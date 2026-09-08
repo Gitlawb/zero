@@ -409,15 +409,53 @@ func (b fileBlob) write(data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(b.path), 0o700); err != nil {
 		return err
 	}
-	tempPath := fmt.Sprintf("%s.tmp-%d-%d", b.path, os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(tempPath, data, 0o600); err != nil {
+	temp, tempPath, err := createPublicationFile(b.path)
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tempPath, b.path); err != nil {
-		_ = os.Remove(tempPath)
+	defer os.Remove(tempPath)
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
 		return err
 	}
-	return nil
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, b.path)
+}
+
+// PublicationDirSuffix names the per-store directory a token store publishes new
+// contents through. Sandbox profiles deny it by name (see
+// internal/sandbox.credentialPublicationDir), which is why the directory name is
+// derived from the store path while the file inside it is randomly named: the
+// deterministic part is what a deny rule can reference, and the random part is
+// what stops a same-user process from waiting for the plaintext to appear at a
+// path it can open or rename away.
+const PublicationDirSuffix = ".publish"
+
+// PublicationDir returns the publication directory for a store path.
+func PublicationDir(path string) string { return path + PublicationDirSuffix }
+
+// createPublicationFile creates the randomly-named 0600 file that path's next
+// contents are written to before being renamed into place. It lives in
+// PublicationDir(path) — same filesystem as path, so the rename stays atomic —
+// and the directory is created 0700 if it does not exist yet.
+func createPublicationFile(path string) (*os.File, string, error) {
+	dir := PublicationDir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, "", err
+	}
+	temp, err := os.CreateTemp(dir, "publish-*")
+	if err != nil {
+		return nil, "", err
+	}
+	if err := temp.Chmod(0o600); err != nil {
+		name := temp.Name()
+		_ = temp.Close()
+		_ = os.Remove(name)
+		return nil, "", err
+	}
+	return temp, temp.Name(), nil
 }
 
 func (b fileBlob) withLock(now func() time.Time, fn func() error) error {

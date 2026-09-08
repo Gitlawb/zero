@@ -18,6 +18,8 @@ type sandboxCommandOptions struct {
 	path      string
 }
 
+const permissionProfileScopeNote = "permissionProfile is derived from this process's environment and working directory; a command run with its own environment can add further credential deny-read entries."
+
 func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	if len(args) == 0 {
 		return writeExecUsageError(stderr, "sandbox subcommand required. Use `zero sandbox policy` or `zero sandbox grants list`.")
@@ -91,16 +93,25 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		return runSandboxPolicyEffective(options, workspaceRoot, policy, backend, plan, store.FilePath(), writeRoots, writeRootsErr, stdout)
 	}
 	if options.json {
+		// The profile here is built from Zero's own environment and working
+		// directory, because that is all this command has: no command has been
+		// chosen yet. A nested command carries its own cwd and env, and the
+		// credential baseline resolves relative token overrides against those, so
+		// an executed command can carry MORE denyReadIfExists entries than this
+		// view lists. Say so in the payload rather than leaving a consumer to
+		// assume it is the whole picture (see PermissionProfileFromPolicy).
 		payload := struct {
-			Policy     zeroSandbox.Policy      `json:"policy"`
-			Backend    zeroSandbox.Backend     `json:"backend"`
-			Plan       zeroSandbox.BackendPlan `json:"plan"`
-			GrantsPath string                  `json:"grantsPath"`
+			Policy                zeroSandbox.Policy      `json:"policy"`
+			Backend               zeroSandbox.Backend     `json:"backend"`
+			Plan                  zeroSandbox.BackendPlan `json:"plan"`
+			GrantsPath            string                  `json:"grantsPath"`
+			PermissionProfileNote string                  `json:"permissionProfileNote"`
 		}{
-			Policy:     policy,
-			Backend:    backend,
-			Plan:       plan,
-			GrantsPath: store.FilePath(),
+			Policy:                policy,
+			Backend:               backend,
+			Plan:                  plan,
+			GrantsPath:            store.FilePath(),
+			PermissionProfileNote: permissionProfileScopeNote,
 		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
@@ -247,20 +258,22 @@ func runSandboxPolicyEffective(options sandboxCommandOptions, workspaceRoot stri
 			// JSON consumers see the same signal as the text write_roots_error
 			// line: a stale sandbox.additionalWriteRoots entry means the real
 			// entrypoints would refuse to launch, not run workspace-only.
-			WriteRootsError string                  `json:"writeRootsError,omitempty"`
-			Policy          zeroSandbox.Policy      `json:"policy"`
-			Backend         zeroSandbox.Backend     `json:"backend"`
-			Plan            zeroSandbox.BackendPlan `json:"plan"`
-			Guards          sandboxGuards           `json:"guards"`
-			GrantsPath      string                  `json:"grantsPath"`
+			WriteRootsError       string                  `json:"writeRootsError,omitempty"`
+			Policy                zeroSandbox.Policy      `json:"policy"`
+			Backend               zeroSandbox.Backend     `json:"backend"`
+			Plan                  zeroSandbox.BackendPlan `json:"plan"`
+			Guards                sandboxGuards           `json:"guards"`
+			GrantsPath            string                  `json:"grantsPath"`
+			PermissionProfileNote string                  `json:"permissionProfileNote"`
 		}{
-			WorkspaceRoot: workspaceRoot,
-			WriteRoots:    writeRoots,
-			Policy:        policy,
-			Backend:       backend,
-			Plan:          plan,
-			Guards:        guards,
-			GrantsPath:    grantsPath,
+			WorkspaceRoot:         workspaceRoot,
+			WriteRoots:            writeRoots,
+			Policy:                policy,
+			Backend:               backend,
+			Plan:                  plan,
+			Guards:                guards,
+			GrantsPath:            grantsPath,
+			PermissionProfileNote: permissionProfileScopeNote,
 		}
 		if writeRootsErr != nil {
 			payload.WriteRootsError = writeRootsErr.Error()
@@ -284,6 +297,7 @@ func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Polic
 		"network: " + string(policy.Network),
 		"enforce_workspace: " + fmt.Sprintf("%t", policy.EnforceWorkspace),
 		"write_roots: " + strings.Join(writeRoots, ", "),
+		"permission_profile_note: " + permissionProfileScopeNote,
 	}
 	if writeRootsErr != nil {
 		// Fail soft, visibly: a stale sandbox.additionalWriteRoots entry must

@@ -16,7 +16,7 @@ func TestBuildCountsProjectGuidelinesAndFreeBudget(t *testing.T) {
 	writeTestFile(t, root, "AGENTS.md", strings.Repeat("project rules\n", 200))
 
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 
@@ -80,7 +80,7 @@ func TestBuildHasStableJSONContractAndCategoryMath(t *testing.T) {
 	writeTestFile(t, root, "ZERO.md", strings.Repeat("zero rules\n", 16))
 
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 
@@ -127,6 +127,35 @@ func TestBuildHasStableJSONContractAndCategoryMath(t *testing.T) {
 	}
 	if len(decoded.Categories) != len(report.Categories) {
 		t.Fatalf("decoded %d categories, want %d", len(decoded.Categories), len(report.Categories))
+	}
+}
+
+func TestBuildReportsInitialDeferredToolSurface(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
+		registry.Register(tool)
+	}
+
+	eager, err := Build(Options{WorkspaceRoot: root, Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred, err := Build(Options{WorkspaceRoot: root, Registry: registry, DeferThreshold: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deferred.DeferredToolCount < 3 {
+		t.Fatalf("DeferredToolCount = %d, want at least 3", deferred.DeferredToolCount)
+	}
+	if deferred.AvailableToolCount != eager.ToolCount {
+		t.Fatalf("available tools = %d, want eager total %d", deferred.AvailableToolCount, eager.ToolCount)
+	}
+	if deferred.ToolCount >= deferred.AvailableToolCount {
+		t.Fatalf("initial exposed tools = %d, available = %d; expected a smaller initial surface", deferred.ToolCount, deferred.AvailableToolCount)
+	}
+	if categoryByKey(deferred, CategoryTools).Tokens >= categoryByKey(eager, CategoryTools).Tokens {
+		t.Fatalf("deferred tool schemas did not reduce the initial context")
 	}
 }
 

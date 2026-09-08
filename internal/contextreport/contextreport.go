@@ -40,6 +40,7 @@ type Options struct {
 	Provider            config.ProviderProfile
 	Registry            *tools.Registry
 	ContextWindow       int
+	DeferThreshold      int
 	ProjectContextFiles []string
 }
 
@@ -56,6 +57,8 @@ type Report struct {
 	FreeTokens           int        `json:"freeTokens"`
 	UsedFraction         float64    `json:"usedFraction"`
 	ToolCount            int        `json:"toolCount"`
+	AvailableToolCount   int        `json:"availableToolCount,omitempty"`
+	DeferredToolCount    int        `json:"deferredToolCount,omitempty"`
 	ProjectGuidelineFile string     `json:"projectGuidelineFile,omitempty"`
 	Categories           []Category `json:"categories"`
 }
@@ -113,8 +116,10 @@ func Build(options Options) (Report, error) {
 		categories = append(categories, category(CategoryWorkspaceMap, "Workspace map", estimateTextTokens(workspaceMap), report.ContextWindow))
 	}
 
-	toolCount, toolTokens := estimateRegistryTools(options.Registry)
+	toolCount, availableTools, deferredTools, toolTokens := estimateRegistryTools(options.Registry, options.DeferThreshold)
 	report.ToolCount = toolCount
+	report.AvailableToolCount = availableTools
+	report.DeferredToolCount = deferredTools
 	if toolTokens > 0 {
 		categories = append(categories, category(CategoryTools, "Tools", toolTokens, report.ContextWindow))
 	}
@@ -175,7 +180,11 @@ func Format(report Report) string {
 		lines = append(lines, fmt.Sprintf("usage: %s tokens (context window unknown)", compactNumber(report.UsedTokens)))
 	}
 	if report.ToolCount > 0 {
-		lines = append(lines, fmt.Sprintf("tools: %d", report.ToolCount))
+		toolLine := fmt.Sprintf("tools: %d exposed", report.ToolCount)
+		if report.AvailableToolCount > report.ToolCount {
+			toolLine += fmt.Sprintf(", %d available, %d deferred", report.AvailableToolCount, report.DeferredToolCount)
+		}
+		lines = append(lines, toolLine)
 	}
 	if report.ProjectGuidelineFile != "" {
 		lines = append(lines, "project_guidelines: "+report.ProjectGuidelineFile)
@@ -212,29 +221,51 @@ func category(key string, name string, tokens int, contextWindow int) Category {
 	return cat
 }
 
-func estimateRegistryTools(registry *tools.Registry) (int, int) {
+func estimateRegistryTools(registry *tools.Registry, deferThreshold int) (int, int, int, int) {
 	if registry == nil {
-		return 0, 0
+		return 0, 0, 0, 0
 	}
 	all := registry.All()
 	sort.Slice(all, func(left int, right int) bool {
 		return all[left].Name() < all[right].Name()
 	})
-	total := 0
-	count := 0
+	var visible []tools.Tool
+	var deferred []tools.Tool
 	for _, tool := range all {
 		if tool.Safety().Permission == tools.PermissionDeny {
 			continue
 		}
-		count++
+		visible = append(visible, tool)
+		if tools.IsDeferred(tool) {
+			deferred = append(deferred, tool)
+		}
+	}
+	active := deferThreshold > 0 && len(deferred) >= deferThreshold
+	exposed := visible
+	if active {
+		exposed = make([]tools.Tool, 0, len(visible)-len(deferred)+1)
+		for _, tool := range visible {
+			if !tools.IsDeferred(tool) && tool.Name() != tools.ToolSearchToolName {
+				exposed = append(exposed, tool)
+			}
+		}
+		exposed = append(exposed, tools.NewToolSearchTool(registry))
+	}
+
+	total := 0
+	for _, tool := range exposed {
 		total += estimateTextTokens(tool.Name())
-		total += estimateTextTokens(tool.Description())
+		description := tool.Description()
+		if active && tool.Name() == tools.ToolSearchToolName {
+			description = tools.BuildToolSearchDescription(deferred)
+		}
+		total += estimateTextTokens(description)
 		if encoded, err := json.Marshal(tool.Parameters()); err == nil {
 			total += estimateTextTokens(string(encoded))
 		}
 		total += toolDefinitionOverheadTokens
 	}
-	return count, total
+	return len(exposed), len(visible), len(deferred), total
 }
 
 func readProjectGuidelines(root string, names []string) (string, string) {

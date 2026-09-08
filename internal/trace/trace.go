@@ -53,6 +53,7 @@ const (
 	CounterModelSwitches     = "model_switches"
 	CounterInputTokens       = "input_tokens"
 	CounterCachedInputTokens = "cached_input_tokens"
+	CounterCacheWriteTokens  = "cache_write_tokens"
 	CounterOutputTokens      = "output_tokens"
 	CounterPrewarmAttempts   = "prewarm_attempts"
 	CounterPrefixStable      = "prefix_stable"
@@ -62,6 +63,12 @@ const (
 	// model_switches: a posture escalation changes loop policy knobs, never the
 	// model or session.
 	CounterPostureEscalations = "posture_escalations"
+)
+
+const (
+	CounterResponseChainReused   = "response_chain_reused"
+	CounterResponseChainReset    = "response_chain_reset"
+	CounterResponsesHTTPFallback = "responses_http_fallback"
 )
 
 // Span is one named wall interval attributed to part of a run. Each stamp is
@@ -159,6 +166,7 @@ type PrefixHash struct {
 	ToolsHash              string `json:"tools"`
 	SchemaHash             string `json:"schema"`
 	CompletePrefixHash     string `json:"complete_prefix"`
+	InvalidationReason     string `json:"invalidation_reason,omitempty"`
 }
 
 // WallDuration is the total traced wall time of the run.
@@ -289,6 +297,7 @@ func OptionalEventKeys() []string {
 		"span:" + SpanVerification,
 		"counter:" + CounterToolCalls,
 		"counter:" + CounterCachedInputTokens,
+		"counter:" + CounterCacheWriteTokens,
 		"counter:" + CounterRetryCount,
 		"counter:" + CounterReconnectCount,
 		"counter:" + CounterCompactionCount,
@@ -300,6 +309,9 @@ func OptionalEventKeys() []string {
 		"counter:" + CounterPrewarmAttempts,
 		"counter:" + CounterPrefixStable,
 		"counter:" + CounterPrefixDrift,
+		"counter:" + CounterResponseChainReused,
+		"counter:" + CounterResponseChainReset,
+		"counter:" + CounterResponsesHTTPFallback,
 		"counter:" + CounterPostureEscalations,
 		"event:prefix_hash",
 		"task_state",

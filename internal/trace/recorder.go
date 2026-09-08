@@ -177,9 +177,9 @@ func (r *Recorder) StampFirstUsefulAction() {
 }
 
 // EmitPrefixHash records one prompt-prefix fingerprint on the trace. Multiple
-// calls are allowed within a run (one per turn, typically) and accumulate in
-// order. The first call after Finish is a no-op; later calls are also no-ops
-// because the trace has been sealed.
+// calls are allowed within a run (one per planned provider request) and
+// accumulate in request order. The first call after Finish is a no-op; later
+// calls are also no-ops because the trace has been sealed.
 func (r *Recorder) EmitPrefixHash(p PrefixHash) {
 	if r == nil {
 		return

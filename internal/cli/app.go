@@ -23,6 +23,7 @@ import (
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/observability"
+	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -63,37 +64,53 @@ type appDeps struct {
 	// getenv reads a process environment variable (production: os.Getenv, set in
 	// defaultAppDeps — deliberately NOT filled by fillAppDeps, so tests are hermetic
 	// against ambient vars like ZERO_PROVIDER unless they inject it). nil ⇒ empty.
-	getenv                 func(string) string
-	probeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
-	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
-	detectLocalRuntimes    func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
-	openRouterLogin        func(context.Context, provideroauth.OpenRouterOptions) (string, error)
-	newSessionStore        func() *sessions.Store
-	loadPlugins            func(plugins.LoadOptions) (plugins.LoadResult, error)
-	loadHooks              func(hooks.LoadOptions) (hooks.LoadResult, error)
-	skillsDir              func() string
-	pluginsDir             func() string
-	toolsDir               func() string
-	newMCPStore            func() (*mcp.PermissionStore, error)
-	newMCPTokenStore       func() (*mcp.TokenStore, error)
-	newSandboxStore        func() (*sandbox.GrantStore, error)
-	selectSandboxBackend   func(sandbox.BackendOptions) sandbox.Backend
-	runSandboxSetupHelper  func(path string, args []string, stdout io.Writer, stderr io.Writer) error
-	registerMCPTools       func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
-	prepareWorktree        func(context.Context, worktrees.Options) (worktrees.Result, error)
-	detectVerifyPlan       func(string) (verify.Plan, error)
-	runVerify              func(context.Context, verify.Plan, verify.RunOptions) verify.Report
-	runSelfVerify          func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
-	runAgentEval           func(context.Context, agentEvalOptions) (agentEvalReport, error)
-	inspectChanges         func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
-	commitChanges          func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
-	pushChanges            func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
-	createPR               func(context.Context, zerogit.PROptions) (zerogit.PRResult, error)
-	runTUI                 func(context.Context, tui.Options) int
-	runEditor              func(string) error
-	checkUpdate            func(context.Context, update.Options) (update.Result, error)
-	applyUpdate            func(context.Context, update.Options) (update.ApplyResult, error)
-	now                    func() time.Time
+	getenv                       func(string) string
+	probeProviderHealth          func(context.Context, providerhealth.Options) providerhealth.Result
+	discoverProviderModels       func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
+	detectLocalRuntimes          func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
+	openRouterLogin              func(context.Context, provideroauth.OpenRouterOptions) (string, error)
+	newSessionStore              func() *sessions.Store
+	loadPlugins                  func(plugins.LoadOptions) (plugins.LoadResult, error)
+	loadHooks                    func(hooks.LoadOptions) (hooks.LoadResult, error)
+	skillsDir                    func() string
+	pluginsDir                   func() string
+	toolsDir                     func() string
+	newMCPStore                  func() (*mcp.PermissionStore, error)
+	newMCPTokenStore             func() (*mcp.TokenStore, error)
+	newSandboxStore              func() (*sandbox.GrantStore, error)
+	selectSandboxBackend         func(sandbox.BackendOptions) sandbox.Backend
+	runSandboxSetupHelper        func(path string, args []string, stdout io.Writer, stderr io.Writer) error
+	registerMCPTools             func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
+	prepareWorktree              func(context.Context, worktrees.Options) (worktrees.Result, error)
+	releaseWorktree              func(context.Context, worktrees.Options, string) error
+	detectVerifyPlan             func(string) (verify.Plan, error)
+	runVerify                    func(context.Context, verify.Plan, verify.RunOptions) verify.Report
+	runSelfVerify                func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
+	runAgentEval                 func(context.Context, agentEvalOptions) (agentEvalReport, error)
+	inspectChanges               func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
+	commitChanges                func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
+	pushChanges                  func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
+	createPR                     func(context.Context, zerogit.PROptions) (zerogit.PRResult, error)
+	createBranch                 func(context.Context, zerogit.BranchOptions) (zerogit.BranchResult, error)
+	isDefaultBranch              func(context.Context, zerogit.DefaultBranchOptions) (bool, string, string, error)
+	currentGitUser               func(context.Context, string) string
+	headCommitSubject            func(context.Context, string) string
+	commitsAhead                 func(context.Context, string, string, string) (int, error)
+	isUnbornRemote               func(context.Context, string, string) (bool, error)
+	refreshTrackingRef           func(context.Context, string, string, string) error
+	branchUpstreamRemote         func(context.Context, string, string) string
+	branchUpstreamRemoteAndMerge func(context.Context, string, string) (string, string)
+	resolveRemoteBranchTip       func(context.Context, string, string, string) (string, error)
+	remoteHasBranch              func(context.Context, string, string, string) (bool, error)
+	currentGitBranch             func(context.Context, string) string
+	currentBranchTip             func(context.Context, string) string
+	deleteBranch                 func(context.Context, string, string, string) error
+	resetBranchRef               func(context.Context, string, string, string, string) error
+	runTUI                       func(context.Context, tui.Options) int
+	runEditor                    func(string) error
+	checkUpdate                  func(context.Context, update.Options) (update.Result, error)
+	applyUpdate                  func(context.Context, update.Options) (update.ApplyResult, error)
+	now                          func() time.Time
 }
 
 type mcpToolRuntime interface {
@@ -187,6 +204,7 @@ func defaultAppDeps() appDeps {
 			return mcp.RegisterTools(ctx, registry, cfg, options)
 		},
 		prepareWorktree:  worktrees.Prepare,
+		releaseWorktree:  worktrees.Release,
 		detectVerifyPlan: verify.DetectPlan,
 		runVerify:        verify.Run,
 		runSelfVerify:    selfverify.Run,
@@ -195,11 +213,52 @@ func defaultAppDeps() appDeps {
 		commitChanges:    zerogit.Commit,
 		pushChanges:      zerogit.Push,
 		createPR:         zerogit.CreatePR,
-		runTUI:           tui.Run,
-		runEditor:        openEditor,
-		checkUpdate:      update.Check,
-		applyUpdate:      update.Apply,
-		now:              time.Now,
+		createBranch:     zerogit.CreateBranch,
+		isDefaultBranch:  zerogit.IsDefaultBranch,
+		currentGitUser: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentGitUser(ctx, cwd, nil)
+		},
+		headCommitSubject: func(ctx context.Context, cwd string) string {
+			return zerogit.HeadCommitSubject(ctx, cwd, nil)
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			return zerogit.CommitsAhead(ctx, cwd, remote, branch, nil)
+		},
+		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+			return zerogit.IsUnbornRemote(ctx, cwd, remote, nil)
+		},
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+			return zerogit.RefreshTrackingRef(ctx, cwd, remote, branch, nil)
+		},
+		branchUpstreamRemote: func(ctx context.Context, cwd, branch string) string {
+			return zerogit.UpstreamRemote(ctx, cwd, branch, nil)
+		},
+		branchUpstreamRemoteAndMerge: func(ctx context.Context, cwd, branch string) (string, string) {
+			return zerogit.UpstreamRemoteAndMergeBranch(ctx, cwd, branch, nil)
+		},
+		resolveRemoteBranchTip: func(ctx context.Context, cwd, remote, branch string) (string, error) {
+			return zerogit.ResolveRemoteBranchTip(ctx, cwd, remote, branch, nil)
+		},
+		remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
+			return zerogit.RemoteHasBranch(ctx, cwd, remote, branch, nil)
+		},
+		currentGitBranch: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentBranch(ctx, cwd, nil)
+		},
+		currentBranchTip: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentBranchTip(ctx, cwd, nil)
+		},
+		deleteBranch: func(ctx context.Context, cwd, fallbackBranch, branchToDelete string) error {
+			return zerogit.DeleteBranch(ctx, cwd, fallbackBranch, branchToDelete, nil)
+		},
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip, expectedOld string) error {
+			return zerogit.ResetBranchRef(ctx, cwd, branch, newTip, nil, expectedOld)
+		},
+		runTUI:      tui.Run,
+		runEditor:   openEditor,
+		checkUpdate: update.Check,
+		applyUpdate: update.Apply,
+		now:         time.Now,
 	}
 }
 
@@ -532,6 +591,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.prepareWorktree == nil {
 		deps.prepareWorktree = defaults.prepareWorktree
 	}
+	if deps.releaseWorktree == nil {
+		deps.releaseWorktree = defaults.releaseWorktree
+	}
 	if deps.detectVerifyPlan == nil {
 		deps.detectVerifyPlan = defaults.detectVerifyPlan
 	}
@@ -556,6 +618,45 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.createPR == nil {
 		deps.createPR = defaults.createPR
 	}
+	if deps.createBranch == nil {
+		deps.createBranch = defaults.createBranch
+	}
+	if deps.isDefaultBranch == nil {
+		deps.isDefaultBranch = defaults.isDefaultBranch
+	}
+	if deps.currentGitUser == nil {
+		deps.currentGitUser = defaults.currentGitUser
+	}
+	if deps.headCommitSubject == nil {
+		deps.headCommitSubject = defaults.headCommitSubject
+	}
+	if deps.commitsAhead == nil {
+		deps.commitsAhead = defaults.commitsAhead
+	}
+	if deps.isUnbornRemote == nil {
+		deps.isUnbornRemote = defaults.isUnbornRemote
+	}
+	if deps.refreshTrackingRef == nil {
+		deps.refreshTrackingRef = defaults.refreshTrackingRef
+	}
+	if deps.branchUpstreamRemote == nil {
+		deps.branchUpstreamRemote = defaults.branchUpstreamRemote
+	}
+	if deps.branchUpstreamRemoteAndMerge == nil {
+		deps.branchUpstreamRemoteAndMerge = defaults.branchUpstreamRemoteAndMerge
+	}
+	if deps.remoteHasBranch == nil {
+		deps.remoteHasBranch = defaults.remoteHasBranch
+	}
+	if deps.currentGitBranch == nil {
+		deps.currentGitBranch = defaults.currentGitBranch
+	}
+	if deps.currentBranchTip == nil {
+		deps.currentBranchTip = defaults.currentBranchTip
+	}
+	// resolveRemoteBranchTip, deleteBranch, and resetBranchRef stay nil when
+	// unset so unit tests that mock createBranch without a real git tree do not
+	// hit real git restore/delete commands.
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
 	}
@@ -585,6 +686,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	baseProbeProviderHealth := deps.probeProviderHealth
 	deps.probeProviderHealth = func(ctx context.Context, options providerhealth.Options) providerhealth.Result {
 		options.Profile = applyStoredProviderKeyAt(options.Profile, userConfigPath)
+		if options.OAuthResolver == nil {
+			options.OAuthResolver, _ = oauthLoginForProfile(options.Profile)
+		}
 		return baseProbeProviderHealth(ctx, options)
 	}
 	return deps
@@ -735,24 +839,26 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		mcpTokenStore = nil
 		err = nil
 	}
+	criticalMCPConfig, optionalMCPConfig := splitMCPStartupConfig(mcpConfig)
 	mcpRuntime := mcpToolRuntime(noopMCPRuntime{})
-	if len(mcpConfig.Servers) > 0 {
-		mcpRuntime, err = deps.registerMCPTools(context.Background(), registry, mcpConfig, mcp.RegisterOptions{
+	if len(criticalMCPConfig.Servers) > 0 {
+		runtime, registerErr := deps.registerMCPTools(context.Background(), registry, criticalMCPConfig, mcp.RegisterOptions{
 			PermissionStore: mcpPermissionStore,
 			Autonomy:        mcp.AutonomyLow,
 			Execution:       executionRunner,
 			WorkspaceRoot:   workspaceRoot,
 		})
-	}
-	if err != nil {
-		closeMCPRuntime(stderr, mcpRuntime)
-		return writeAppError(stderr, err.Error(), 1)
+		if registerErr != nil {
+			closeMCPRuntime(stderr, runtime)
+			return writeAppError(stderr, redaction.ErrorMessage(registerErr, redaction.Options{}), 1)
+		}
+		mcpRuntime = runtime
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
 	// A server that could not be reached or validated is skipped, not fatal (one
 	// bad MCP server must not abort startup) — surface each so a missing tool set is
 	// explained rather than silently absent. A built-in default the user never
-	// configured (e.g. keyless Firecrawl with no credentials) is the exception: it
+	// configured (e.g. keyless Exa with no credentials) is the exception: it
 	// was never asked for, so its failure is not worth a startup warning — only
 	// servers the user actually configured warn on failure (issue #552).
 	for _, skipped := range mcpRuntime.Skipped() {
@@ -783,13 +889,57 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAsk
 	}
+	sessionStore := deps.newSessionStore()
+	peerClass := peermsg.PermissionPrompting
+	if permissionMode == agent.PermissionModeUnsafe {
+		peerClass = peermsg.PermissionBypass
+	}
+	peerService, peerErr := peermsg.New(peermsg.Options{
+		Identity: peermsg.Identity{
+			Cwd:             workspaceRoot,
+			PermissionClass: peerClass,
+		},
+		InboundPolicy: peermsg.InboundPolicy(resolved.CrossSessionInbound),
+	})
+	if peerErr != nil {
+		fmt.Fprintf(stderr, "warning: cross-session messaging unavailable: %s\n", peerErr)
+		peerService = nil
+	} else {
+		for _, tool := range tools.NewPeerSessionTools(peerService) {
+			registry.Register(tool)
+		}
+	}
 	// Activate deferred MCP-tool loading for the interactive run only when the
 	// VISIBLE deferred-eligible count meets the resolved threshold, matching exec.
-	// The registry is complete (core + specialist + MCP + plugins) here, so the
-	// count is accurate; below threshold this is a no-op and the surface is
-	// unchanged. The interactive surface applies no operator tool filters, so
-	// enabled/disabled are nil — matching the AgentOptions below.
+	// This first pass covers every prompt-critical tool. Optional built-in MCP
+	// defaults re-run the same gate after publishing their atomic batch, so a
+	// later catalog generation cannot miss its loader. The interactive surface
+	// applies no operator tool filters, so enabled/disabled are nil — matching the
+	// AgentOptions below.
 	registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, permissionMode, nil, nil)
+	var optionalMCPRuntime *optionalMCPStartup
+	var awaitToolReadiness func(context.Context)
+	if len(optionalMCPConfig.Servers) > 0 {
+		optionalMCPRuntime = startOptionalMCP(
+			context.Background(),
+			registry,
+			optionalMCPConfig,
+			mcp.RegisterOptions{
+				PermissionStore: mcpPermissionStore,
+				Autonomy:        mcp.AutonomyLow,
+				Execution:       executionRunner,
+				WorkspaceRoot:   workspaceRoot,
+			},
+			deps.registerMCPTools,
+			func() {
+				registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, permissionMode, nil, nil)
+			},
+		)
+		defer closeMCPRuntime(stderr, optionalMCPRuntime)
+		awaitToolReadiness = func(ctx context.Context) {
+			optionalMCPRuntime.Await(ctx, optionalMCPPromptGrace)
+		}
+	}
 	lastKnownMCPConfig := mcpConfig
 	fileTracker := tools.NewFileTracker()
 	var scratchBaseline scratchFileBaseline
@@ -813,6 +963,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		Version:              version,
 		Theme:                theme,
 		SavedTheme:           resolved.Preferences.Theme,
+		SavedPet:             resolved.Preferences.Pet,
 		UserConfigPath:       userConfigPath,
 		DoctorUserConfigPath: doctorUserConfigPath,
 		ProjectConfigPath:    projectConfigPath,
@@ -823,10 +974,20 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		FavoriteModels:       resolved.Preferences.FavoriteModels,
 		RecentModels:         resolved.Preferences.RecentModels,
 		RecapsEnabled:        resolved.Preferences.RecapsEnabled(),
+		CompactionModel:      resolved.Preferences.CompactionModel,
 		Provider:             provider,
 		NewProvider:          deps.newProvider,
-		ProbeProviderHealth:  deps.probeProviderHealth,
-		UserAgent:            userAgent(),
+		NewTurnSessionProvider: func(profile config.ProviderProfile, provider zeroruntime.Provider) zeroruntime.TurnSessionProvider {
+			if provider == nil {
+				return nil
+			}
+			if optimized, ok := providers.OptimizedTurnSessions(profile, provider, providers.Options{}); ok {
+				return optimized
+			}
+			return providers.DefaultTurnSessions(profile, provider, providers.Options{})
+		},
+		ProbeProviderHealth: deps.probeProviderHealth,
+		UserAgent:           userAgent(),
 		PrepareRunCompletionWarning: func() {
 			scratchBaseline = scratchFileSnapshot(workspaceRoot)
 		},
@@ -834,7 +995,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			return scratchFileWarning(workspaceRoot, scratchBaseline)
 		},
 		Registry:           registry,
-		SessionStore:       deps.newSessionStore(),
+		AwaitToolReadiness: awaitToolReadiness,
+		SessionStore:       sessionStore,
+		PeerService:        peerService,
 		SandboxStore:       sandboxStore,
 		MCPConfig:          mcpConfig,
 		MCPPermissionStore: mcpPermissionStore,
@@ -1196,7 +1359,8 @@ Commands:
   mcp        Manage MCP backend settings
   auth       Log in to model providers via OAuth
   sandbox    Inspect sandbox policy and persistent grants
-  update     Check for Zero CLI updates
+  update     Check or apply Zero CLI updates (requires --check or --apply)
+  upgrade    Download, verify, and install available Zero CLI updates
   worktrees  Prepare isolated git worktrees
   verify     Detect and run local verification checks
   eval       Validate offline agent eval suites
@@ -1358,6 +1522,10 @@ Flags:
       --spec-model <model>           Override the draft model when --use-spec is set
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
+      --plan                         Read-only planning mode: write and shell tools are hidden
+      --permission-mode <mode>       Set permission mode directly (plan, spec-draft, auto, member,
+                                    ask, unsafe). Outranks --auto; prefer --plan / --auto for
+                                    interactive use. Used by specialist/swarm child processes.
       --max-turns <number>           Override the maximum agent loop turns
       --exec-profile <name>          Apply an execution profile (balanced, fast, thorough): loop
                                     posture only (turn budget, effort, self-correction, escalation);

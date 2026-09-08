@@ -78,7 +78,7 @@ func TestRunPluginsListsJSONAndText(t *testing.T) {
 }
 
 func TestRunHooksListsRedactedJSONAndText(t *testing.T) {
-	secret := "sk-proj-" + strings.Repeat("a", 24)
+	secret := "sk-proj-" + strings.Repeat("a", 23) + "0"
 	result := hooks.LoadResult{
 		Config: hooks.Config{
 			Enabled: true,

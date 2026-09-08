@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -72,6 +73,12 @@ type LoadResult struct {
 
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 
+// specialistFilesMu prevents Zero-managed loads from observing a specialist
+// mutation in progress. This is especially important on Windows, where
+// ReplaceFileW can briefly leave the destination name absent. It cannot
+// synchronize external editors or other Zero processes.
+var specialistFilesMu sync.RWMutex
+
 var knownMetadataKeys = map[string]bool{
 	"name":            true,
 	"description":     true,
@@ -82,9 +89,9 @@ var knownMetadataKeys = map[string]bool{
 }
 
 var toolCategories = map[string][]string{
-	"read-only": {"read_file", "read_minified_file", "list_directory", "grep", "glob"},
-	"edit":      {"read_file", "read_minified_file", "list_directory", "grep", "glob", "write_file", "edit_file", "apply_patch"},
-	"execute":   {"read_file", "read_minified_file", "list_directory", "grep", "glob", "exec_command", "write_stdin", "bash"},
+	"read-only": {"read_file", "read_minified_file", "view_image", "list_directory", "grep", "glob"},
+	"edit":      {"read_file", "read_minified_file", "view_image", "list_directory", "grep", "glob", "write_file", "edit_file", "apply_patch"},
+	"execute":   {"read_file", "read_minified_file", "view_image", "list_directory", "grep", "glob", "exec_command", "write_stdin", "bash"},
 	"plan":      {"update_plan"},
 }
 
@@ -102,6 +109,7 @@ var defaultToolSelection = []string{"read-only"}
 var knownToolNames = map[string]bool{
 	"read_file":           true,
 	"read_minified_file":  true,
+	"view_image":          true,
 	"list_directory":      true,
 	"glob":                true,
 	"grep":                true,
@@ -143,6 +151,8 @@ func Load(options LoadOptions) (LoadResult, error) {
 		}
 		paths.UserDir = resolved.UserDir
 	}
+	specialistFilesMu.RLock()
+	defer specialistFilesMu.RUnlock()
 
 	manifests := Builtins()
 	warnings := []string{}
@@ -476,6 +486,14 @@ func loadDirectory(dir string, location Location) ([]Manifest, []string, error) 
 	manifests := []Manifest{}
 	warnings := []string{}
 	for _, entry := range entries {
+		// Only *.md is a specialist. Everything else in the directory is
+		// deliberately invisible here, including the two kinds of sibling files an
+		// interrupted overwrite can leave: a .specialist-*.tmp replacement that was
+		// never published, and a .zero-replace-*.backup holding an original whose
+		// rollback failed on Windows. Neither is a manifest, and guessing that one
+		// of them is would be worse than the gap. The recovery for a backup that
+		// really does hold the last good copy is a manual rename, spelled out both
+		// in the fsutil error that reports it and in docs/SPECIALISTS.md.
 		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".md" {
 			continue
 		}

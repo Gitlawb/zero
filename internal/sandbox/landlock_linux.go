@@ -38,7 +38,7 @@ func ApplyLandlockFilesystemProfile(profile PermissionProfile, cwd string) error
 	}
 	writeRoots := landlockWritableRoots(profile.FileSystem, cwd)
 	if len(writeRoots) == 0 {
-		return errors.New("Landlock requires at least one writable root")
+		return errors.New("Landlock requires at least one writable root") //nolint:staticcheck // Preserve the proper name and established user-facing text.
 	}
 	return installLandlockFilesystemRules(writeRoots)
 }
@@ -48,7 +48,7 @@ func validateLandlockProfile(profile PermissionProfile) error {
 	if fs.Kind != FileSystemRestricted {
 		return nil
 	}
-	if len(fs.DenyRead) > 0 {
+	if len(fs.DenyRead) > 0 || len(fs.DenyReadIfExists) > 0 {
 		return errors.New("deny-read paths require the bubblewrap helper mode")
 	}
 	if len(fs.DenyWrite) > 0 {

@@ -150,7 +150,7 @@ func assertNoDeferredDiscoveryMessage(t *testing.T, request zeroruntime.Completi
 func TestPartitionToolsInactiveIsByteIdenticalAndDropsToolSearch(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	registry.Register(fakeDeferredTool{name: "mcp__srv__a", desc: "tool a"})
 	registry.Register(fakeToolSearchTool{})
 
@@ -305,8 +305,8 @@ func TestPartitionToolsActiveExcludesDisabledDeferredFromDiscoveryAndExposed(t *
 func TestPartitionToolsActiveHidesUnloadedExposesLoaded(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root)) // non-deferred builtin
-	registry.Register(fakeToolSearchTool{})        // non-deferred, must stay exposed
+	registry.Register(tools.NewScopedReadFileTool(root, nil)) // non-deferred builtin
+	registry.Register(fakeToolSearchTool{})                   // non-deferred, must stay exposed
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha tool"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta tool"})
 
@@ -341,15 +341,15 @@ func TestPartitionToolsActiveHidesUnloadedExposesLoaded(t *testing.T) {
 	if search.Description != discovery || !strings.Contains(search.Description, "mcp") {
 		t.Fatalf("tool_search description must carry discovery source, got %q", search.Description)
 	}
-	if strings.Contains(search.Description, "mcp__srv__alpha") {
-		t.Fatalf("tool_search description must not list already-loaded tool names, got %q", search.Description)
+	if !strings.Contains(search.Description, "mcp__srv__alpha") {
+		t.Fatalf("stable tool_search catalog must retain already-loaded tool names, got %q", search.Description)
 	}
 	if !strings.Contains(search.Description, "mcp__srv__beta") {
 		t.Fatalf("tool_search description must list exact hidden tool names, got %q", search.Description)
 	}
 }
 
-func TestPartitionToolsActiveNothingHiddenEmptyReminder(t *testing.T) {
+func TestPartitionToolsActiveNothingHiddenKeepsStableCatalog(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta"})
@@ -368,9 +368,8 @@ func TestPartitionToolsActiveNothingHiddenEmptyReminder(t *testing.T) {
 	if !exposedNames["tool_search"] {
 		t.Fatalf("expected tool_search exposed on active path, got %#v", exposed)
 	}
-	// No hidden tools means no dynamic discovery text is needed.
-	if reminder != "" {
-		t.Fatalf("expected empty discovery text when nothing is hidden, got %q", reminder)
+	if !strings.Contains(reminder, "mcp__srv__alpha") || !strings.Contains(reminder, "mcp__srv__beta") {
+		t.Fatalf("stable catalog must retain all deferred names after loading, got %q", reminder)
 	}
 }
 
@@ -796,5 +795,100 @@ func TestDisabledToolSearchFallsBackToEager(t *testing.T) {
 	}
 	if result.Status != tools.StatusOK {
 		t.Fatalf("deferred tool must be callable under eager fallback, got status=%s output=%q", result.Status, result.Output)
+	}
+}
+
+// fakeDeferredMutatorTool is a deferred-eligible tool with mutating Safety
+// (SideEffectWrite), standing in for a real write/mutator MCP tool that would
+// be hidden behind tool_search once deferral activates.
+type fakeDeferredMutatorTool struct{ name string }
+
+func (t fakeDeferredMutatorTool) Name() string        { return t.name }
+func (t fakeDeferredMutatorTool) Description() string { return "mutates the workspace, deferred" }
+func (t fakeDeferredMutatorTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: false}
+}
+func (t fakeDeferredMutatorTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionPrompt, Reason: "mutates"}
+}
+func (t fakeDeferredMutatorTool) Run(_ context.Context, _ map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK, Output: "mutated"}
+}
+func (t fakeDeferredMutatorTool) Deferred() bool { return true }
+
+// TestPlanModeToolSearchNeverLeaksDeferredMutatorSchema guards the concern
+// raised in PR #642 review (jatmn, P2): that tool_search filters deferred
+// candidates only by EnabledTools/DisabledTools, not by plan-mode visibility,
+// so a plan-mode model could call `tool_search select:<deferred write tool>`
+// and receive that tool's full schema even though a direct call to it is
+// correctly denied the following turn.
+//
+// tool_search's own Safety is SideEffectNone, and ToolAdvertisedForPermissionMode (the
+// same gate executeToolCall uses to deny a direct call) requires
+// SideEffect==Read to advertise a tool in plan mode. That means tool_search
+// itself is never advertised, never activates deferral (loaderUsable in
+// partitionToolsCached requires ToolAdvertised(loader, permissionMode)), and
+// is denied at dispatch like any other hidden tool if a stale/adversarial
+// call reaches it anyway — so a deferred mutator's schema can never reach the
+// model through tool_search while in plan mode. This test pins that
+// end-to-end: tool_search is absent from the advertised tool list, and a
+// forced call to it is denied before rendering any tool schema.
+func TestPlanModeToolSearchNeverLeaksDeferredMutatorSchema(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(fakeDeferredMutatorTool{name: "mcp__srv__mutate"})
+	registry.Register(fakeDeferredMutatorTool{name: "mcp__srv__mutate2"})
+	registry.Register(tools.NewToolSearchTool(registry))
+
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{ // turn 1: force a call to tool_search even though it should not be advertised.
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "c1", ToolName: tools.ToolSearchToolName},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "c1", ArgumentsFragment: `{"query":"select:mcp__srv__mutate"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "c1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{ // turn 2: final answer.
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	result, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+		DeferThreshold: 2, // 2 deferred mutators registered => eligible for deferral.
+		MaxTurns:       2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// tool_search (and the deferred mutators) must not be advertised in plan
+	// mode's turn 1 tool list at all.
+	for _, def := range provider.requests[0].Tools {
+		if def.Name == tools.ToolSearchToolName {
+			t.Fatalf("plan mode must not advertise tool_search, got %#v", provider.requests[0].Tools)
+		}
+		if def.Name == "mcp__srv__mutate" || def.Name == "mcp__srv__mutate2" {
+			t.Fatalf("plan mode must not advertise a deferred mutator, got %#v", provider.requests[0].Tools)
+		}
+	}
+
+	// The forced call must be denied outright, never a loaded-schema result:
+	// the tool result must not mention the mutator's name or carry a
+	// load_tools signal.
+	var toolMessage string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			toolMessage = message.Content
+			break
+		}
+	}
+	if !strings.Contains(toolMessage, "not available in plan mode") {
+		t.Fatalf("expected tool_search call denied in plan mode, got %q", toolMessage)
+	}
+	if strings.Contains(toolMessage, "mcp__srv__mutate") {
+		t.Fatalf("denial must not leak the deferred mutator's name/schema, got %q", toolMessage)
 	}
 }

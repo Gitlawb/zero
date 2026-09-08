@@ -42,19 +42,19 @@ func TestBashEscapeGatedByPermissionMode(t *testing.T) {
 	}
 }
 
-// The "!" escape must use the platform shell (cmd.exe on Windows, /bin/sh
-// elsewhere), not a hardcoded "bash" that is absent on stock Windows.
+// The "!" escape must use the same detected host shell as the agent tools.
 func TestEscapeShellWrapsCommandForPlatform(t *testing.T) {
 	name, args := escapeShell("echo hi")
 	if name == "" {
 		t.Fatal("escapeShell returned an empty executable")
 	}
-	if len(args) == 0 || args[len(args)-1] != "echo hi" {
-		t.Fatalf("escapeShell args = %v, want the command as the final arg", args)
+	if len(args) == 0 || !strings.Contains(args[len(args)-1], "echo hi") {
+		t.Fatalf("escapeShell args = %v, want the command in the final arg", args)
 	}
 	if runtime.GOOS == "windows" {
-		if name != "cmd.exe" || args[0] != "/d" {
-			t.Fatalf("windows shell = %q %v, want cmd.exe /d /s /c", name, args)
+		lowerName := strings.ToLower(filepath.Base(name))
+		if lowerName != "pwsh.exe" && lowerName != "powershell.exe" && lowerName != "cmd.exe" {
+			t.Fatalf("windows shell = %q %v, want PowerShell or cmd.exe fallback", name, args)
 		}
 	} else if name != "/bin/sh" || args[0] != "-c" {
 		t.Fatalf("unix shell = %q %v, want /bin/sh -c", name, args)

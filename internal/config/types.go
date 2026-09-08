@@ -112,10 +112,19 @@ type PreferencesConfig struct {
 	// name (e.g. "dracula"). Applied at startup below the --theme flag and
 	// ZERO_THEME, so a /theme choice survives restart. Empty = unset (defaults auto).
 	Theme string `json:"theme,omitempty"`
+	// Pet is the terminal companion selected through /pets. Empty leaves pets
+	// off until the user chooses one; "disabled" is the explicit off state.
+	Pet string `json:"pet,omitempty"`
 	// Recaps is a tri-state: nil (unset) defaults to ON; an explicit false means
-	// the user turned post-turn recaps off. A *bool is its own tri-state, so no
+	// the user turned idle recaps off. A *bool is its own tri-state, so no
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
 	Recaps *bool `json:"recaps,omitempty"`
+	// CompactionModel routes compaction summarization calls to this model
+	// instead of the session's main model (summaries at main-model prices are
+	// the most expensive recurring event in long runs). Empty = automatic: a
+	// curated cheap model on official endpoints, the main model elsewhere.
+	// "main" forces the main model. ZERO_COMPACTION_MODEL overrides.
+	CompactionModel string `json:"compactionModel,omitempty"`
 }
 
 // RecentModelEntry is one provider-qualified model selection recorded in
@@ -130,7 +139,7 @@ type RecentModelEntry struct {
 // MaxRecentModels caps the persisted/displayed recent-selection history.
 const MaxRecentModels = 5
 
-// RecapsEnabled reports whether post-turn recaps are on. Unset defaults to ON.
+// RecapsEnabled reports whether idle recaps are on. Unset defaults to ON.
 func (p PreferencesConfig) RecapsEnabled() bool {
 	return p.Recaps == nil || *p.Recaps
 }
@@ -148,7 +157,8 @@ type KeyBindingsConfig struct {
 	ToggleMouse KeyBindingDef `json:"toggleMouse,omitempty"`
 	// CycleReasoning cycles through reasoning effort levels (default: ctrl+t).
 	CycleReasoning KeyBindingDef `json:"cycleReasoning,omitempty"`
-	// TogglePlan toggles the plan panel expansion (default: ctrl+p).
+	// TogglePlan is retained for configuration compatibility. Plan updates render
+	// in the transcript and no longer have a persistent panel to toggle.
 	TogglePlan KeyBindingDef `json:"togglePlan,omitempty"`
 	// ToggleSidebar toggles the right context sidebar (default: ctrl+b).
 	ToggleSidebar KeyBindingDef `json:"toggleSidebar,omitempty"`
@@ -322,14 +332,6 @@ type SwarmConfig struct {
 	MaxTeamSize int `json:"maxTeamSize,omitempty"`
 }
 
-// ToolsOverride builds a ToolsConfig that explicitly overrides the deferred-tool
-// threshold (including to 0, which disables deferral). Use this for programmatic
-// Overrides — a bare ToolsConfig{DeferThreshold: 0} is indistinguishable from
-// "unset" and will not override.
-func ToolsOverride(deferThreshold int) ToolsConfig {
-	return ToolsConfig{DeferThreshold: deferThreshold, deferThresholdSet: true}
-}
-
 func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 	type rawTools struct {
 		DeferThreshold *int `json:"deferThreshold"`
@@ -348,46 +350,49 @@ func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 }
 
 type FileConfig struct {
-	ActiveProvider string             `json:"activeProvider,omitempty"`
-	Providers      []ProviderProfile  `json:"providers,omitempty"`
-	MaxTurns       int                `json:"maxTurns,omitempty"`
-	MCP            MCPConfig          `json:"mcp,omitempty"`
-	Sandbox        SandboxConfig      `json:"sandbox,omitempty"`
-	Notify         NotifyConfig       `json:"notify,omitempty"`
-	Tools          ToolsConfig        `json:"tools,omitempty"`
-	Swarm          SwarmConfig        `json:"swarm,omitempty"`
-	Preferences    PreferencesConfig  `json:"preferences,omitempty"`
-	KeyBindings    KeyBindingsConfig  `json:"keybindings,omitempty"`
-	LocalControl   LocalControlConfig `json:"localControl,omitempty"`
-	STT            STTConfig          `json:"stt,omitempty"`
+	ActiveProvider      string             `json:"activeProvider,omitempty"`
+	Providers           []ProviderProfile  `json:"providers,omitempty"`
+	MaxTurns            int                `json:"maxTurns,omitempty"`
+	MCP                 MCPConfig          `json:"mcp,omitempty"`
+	Sandbox             SandboxConfig      `json:"sandbox,omitempty"`
+	Notify              NotifyConfig       `json:"notify,omitempty"`
+	Tools               ToolsConfig        `json:"tools,omitempty"`
+	Swarm               SwarmConfig        `json:"swarm,omitempty"`
+	Preferences         PreferencesConfig  `json:"preferences,omitempty"`
+	KeyBindings         KeyBindingsConfig  `json:"keybindings,omitempty"`
+	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
+	STT                 STTConfig          `json:"stt,omitempty"`
+	CrossSessionInbound string             `json:"crossSessionInbound,omitempty"`
 }
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 	type rawConfig struct {
-		ActiveProvider string              `json:"activeProvider,omitempty"`
-		Providers      []ProviderProfile   `json:"providers,omitempty"`
-		MaxTurns       int                 `json:"maxTurns,omitempty"`
-		MCP            MCPConfig           `json:"mcp,omitempty"`
-		Sandbox        SandboxConfig       `json:"sandbox,omitempty"`
-		Notify         NotifyConfig        `json:"notify,omitempty"`
-		Tools          ToolsConfig         `json:"tools,omitempty"`
-		Swarm          SwarmConfig         `json:"swarm,omitempty"`
-		Preferences    PreferencesConfig   `json:"preferences,omitempty"`
-		KeyBindings    KeyBindingsConfig   `json:"keybindings,omitempty"`
-		LocalControl   *LocalControlConfig `json:"localControl,omitempty"`
-		STT            *STTConfig          `json:"stt,omitempty"`
+		ActiveProvider      string              `json:"activeProvider,omitempty"`
+		Providers           []ProviderProfile   `json:"providers,omitempty"`
+		MaxTurns            int                 `json:"maxTurns,omitempty"`
+		MCP                 MCPConfig           `json:"mcp,omitempty"`
+		Sandbox             SandboxConfig       `json:"sandbox,omitempty"`
+		Notify              NotifyConfig        `json:"notify,omitempty"`
+		Tools               ToolsConfig         `json:"tools,omitempty"`
+		Swarm               SwarmConfig         `json:"swarm,omitempty"`
+		Preferences         PreferencesConfig   `json:"preferences,omitempty"`
+		KeyBindings         KeyBindingsConfig   `json:"keybindings,omitempty"`
+		LocalControl        *LocalControlConfig `json:"localControl,omitempty"`
+		STT                 *STTConfig          `json:"stt,omitempty"`
+		CrossSessionInbound string              `json:"crossSessionInbound,omitempty"`
 	}
 	raw := rawConfig{
-		ActiveProvider: cfg.ActiveProvider,
-		Providers:      cfg.Providers,
-		MaxTurns:       cfg.MaxTurns,
-		MCP:            cfg.MCP,
-		Sandbox:        cfg.Sandbox,
-		Notify:         cfg.Notify,
-		Tools:          cfg.Tools,
-		Swarm:          cfg.Swarm,
-		Preferences:    cfg.Preferences,
-		KeyBindings:    cfg.KeyBindings,
+		ActiveProvider:      cfg.ActiveProvider,
+		Providers:           cfg.Providers,
+		MaxTurns:            cfg.MaxTurns,
+		MCP:                 cfg.MCP,
+		Sandbox:             cfg.Sandbox,
+		Notify:              cfg.Notify,
+		Tools:               cfg.Tools,
+		Swarm:               cfg.Swarm,
+		Preferences:         cfg.Preferences,
+		KeyBindings:         cfg.KeyBindings,
+		CrossSessionInbound: cfg.CrossSessionInbound,
 	}
 	if !cfg.LocalControl.Empty() {
 		raw.LocalControl = &cfg.LocalControl
@@ -412,33 +417,35 @@ type ResolveOptions struct {
 }
 
 type Overrides struct {
-	ActiveProvider string
-	Providers      []ProviderProfile
-	Provider       ProviderProfile
-	MaxTurns       int
-	MCP            MCPConfig
-	Sandbox        SandboxConfig
-	Notify         NotifyConfig
-	Tools          ToolsConfig
-	KeyBindings    KeyBindingsConfig
-	LocalControl   LocalControlConfig
-	STT            STTConfig
+	ActiveProvider      string
+	Providers           []ProviderProfile
+	Provider            ProviderProfile
+	MaxTurns            int
+	MCP                 MCPConfig
+	Sandbox             SandboxConfig
+	Notify              NotifyConfig
+	Tools               ToolsConfig
+	KeyBindings         KeyBindingsConfig
+	LocalControl        LocalControlConfig
+	STT                 STTConfig
+	CrossSessionInbound string
 }
 
 type ResolvedConfig struct {
-	ActiveProvider string
-	Providers      []ProviderProfile
-	Provider       ProviderProfile
-	MaxTurns       int
-	MCP            MCPConfig
-	Sandbox        SandboxConfig
-	Notify         NotifyConfig
-	Tools          ToolsConfig
-	Swarm          SwarmConfig
-	Preferences    PreferencesConfig
-	KeyBindings    KeyBindingsConfig
-	LocalControl   LocalControlConfig
-	STT            STTConfig
+	ActiveProvider      string
+	Providers           []ProviderProfile
+	Provider            ProviderProfile
+	MaxTurns            int
+	MCP                 MCPConfig
+	Sandbox             SandboxConfig
+	Notify              NotifyConfig
+	Tools               ToolsConfig
+	Swarm               SwarmConfig
+	Preferences         PreferencesConfig
+	KeyBindings         KeyBindingsConfig
+	LocalControl        LocalControlConfig
+	STT                 STTConfig
+	CrossSessionInbound string
 }
 
 type MCPConfig struct {
@@ -464,7 +471,7 @@ type MCPServerConfig struct {
 	// fields it set or what values they hold. A built-in default seeded by
 	// DefaultMCPServers() is never unmarshaled from JSON, so it starts false;
 	// any explicit entry in the user/project file — even one that happens to
-	// repeat a default's exact field values (e.g. re-declaring firecrawl's
+	// repeat a default's exact field values (e.g. re-declaring Exa's
 	// default URL) — sets it true. IsUnconfiguredDefault checks this alongside
 	// a resolved-value comparison, so redeclaring default values verbatim still
 	// counts as user-configured.
@@ -488,20 +495,21 @@ type MCPOAuthConfig struct {
 
 func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	type rawConfig struct {
-		ActiveProvider  string                     `json:"activeProvider"`
-		Providers       []ProviderProfile          `json:"providers"`
-		MaxTurns        int                        `json:"maxTurns"`
-		MCP             MCPConfig                  `json:"mcp"`
-		Sandbox         SandboxConfig              `json:"sandbox"`
-		Notify          NotifyConfig               `json:"notify"`
-		Tools           ToolsConfig                `json:"tools"`
-		Swarm           SwarmConfig                `json:"swarm"`
-		Preferences     PreferencesConfig          `json:"preferences"`
-		KeyBindings     KeyBindingsConfig          `json:"keybindings"`
-		LocalControl    LocalControlConfig         `json:"localControl"`
-		STT             STTConfig                  `json:"stt"`
-		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
-		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
+		ActiveProvider      string                     `json:"activeProvider"`
+		Providers           []ProviderProfile          `json:"providers"`
+		MaxTurns            int                        `json:"maxTurns"`
+		MCP                 MCPConfig                  `json:"mcp"`
+		Sandbox             SandboxConfig              `json:"sandbox"`
+		Notify              NotifyConfig               `json:"notify"`
+		Tools               ToolsConfig                `json:"tools"`
+		Swarm               SwarmConfig                `json:"swarm"`
+		Preferences         PreferencesConfig          `json:"preferences"`
+		KeyBindings         KeyBindingsConfig          `json:"keybindings"`
+		LocalControl        LocalControlConfig         `json:"localControl"`
+		STT                 STTConfig                  `json:"stt"`
+		CrossSessionInbound string                     `json:"crossSessionInbound"`
+		MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
+		MCPServersSnake     map[string]MCPServerConfig `json:"mcp_servers"`
 	}
 
 	var raw rawConfig
@@ -528,6 +536,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.KeyBindings = raw.KeyBindings
 	cfg.LocalControl = raw.LocalControl
 	cfg.STT = raw.STT
+	cfg.CrossSessionInbound = raw.CrossSessionInbound
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}

@@ -43,7 +43,7 @@ func TestUpdateTitle(t *testing.T) {
 		t.Fatalf("title not trimmed/stored: %q", updated.Title)
 	}
 	if updated.UpdatedAt != before.UpdatedAt {
-		t.Fatalf("UpdatedAt must not change on retitle: before=%q after=%q", before.UpdatedAt, updated.UpdatedAt)
+		t.Fatalf("UpdatedAt must not change on rename: before=%q after=%q", before.UpdatedAt, updated.UpdatedAt)
 	}
 	if updated.EventCount != before.EventCount {
 		t.Fatalf("EventCount changed: before=%d after=%d", before.EventCount, updated.EventCount)
@@ -67,12 +67,36 @@ func TestUpdateTitle(t *testing.T) {
 
 	// An unchanged title is a no-op (still succeeds).
 	if _, err := store.UpdateTitle(session.SessionID, "Clean Generated Title"); err != nil {
-		t.Fatalf("no-op retitle should succeed: %v", err)
+		t.Fatalf("no-op rename should succeed: %v", err)
 	}
 
 	// An invalid session id is rejected.
 	if _, err := store.UpdateTitle("../escape", "whatever"); err == nil {
 		t.Fatal("expected an invalid session id to be rejected")
+	}
+}
+
+func TestUpdateTitleIfCurrent(t *testing.T) {
+	store := newTitleTestStore(t)
+	session, err := store.Create(CreateInput{Title: "Automatic title"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	updated, applied, err := store.UpdateTitleIfCurrent(session.SessionID, "Automatic title", "Generated title")
+	if err != nil || !applied || updated.Title != "Generated title" {
+		t.Fatalf("matching update = (%#v, %v, %v)", updated, applied, err)
+	}
+
+	if _, err := store.UpdateTitle(session.SessionID, "Manual title"); err != nil {
+		t.Fatalf("manual rename: %v", err)
+	}
+	updated, applied, err = store.UpdateTitleIfCurrent(session.SessionID, "Generated title", "Late generated title")
+	if err != nil {
+		t.Fatalf("stale update: %v", err)
+	}
+	if applied || updated.Title != "Manual title" {
+		t.Fatalf("stale update should preserve manual title: (%#v, %v)", updated, applied)
 	}
 }
 

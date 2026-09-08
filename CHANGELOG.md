@@ -6,6 +6,94 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.8.0](https://github.com/Gitlawb/zero/compare/v0.7.0...v0.8.0) (2026-08-21)
+
+
+### Features
+
+* **security:** path-jail primitive, credential-store locking, worktree git hardening ([#891](https://github.com/Gitlawb/zero/issues/891)) ([060d38c](https://github.com/Gitlawb/zero/commit/060d38ce716feb7c5b6657b082cd35cb8dda3d75))
+* **update:** recognise Homebrew installs and add mise, go install docs ([#910](https://github.com/Gitlawb/zero/issues/910)) ([01c3498](https://github.com/Gitlawb/zero/commit/01c3498205e69d26e5f929225f9455b276444f39))
+* use Exa as default search provider ([#926](https://github.com/Gitlawb/zero/issues/926)) ([1ec7219](https://github.com/Gitlawb/zero/commit/1ec7219aee7b2840481ab0905f131644e27d2a4e))
+* **zerogit:** auto-create a conventional branch before push/pr on default branch ([#671](https://github.com/Gitlawb/zero/issues/671)) ([d065467](https://github.com/Gitlawb/zero/commit/d065467cd3ec3ed91c5dc60554c36fc4b4d6de4c))
+
+
+### Bug Fixes
+
+* **acp:** three defects a desktop ACP client hits ([#915](https://github.com/Gitlawb/zero/issues/915)) ([a78c6c3](https://github.com/Gitlawb/zero/commit/a78c6c357e1d21146d7cd2e8030a754e06f7f1f5))
+* bump Go to 1.26.6 for stdlib vulnerability fixes ([#903](https://github.com/Gitlawb/zero/issues/903)) ([dc15e82](https://github.com/Gitlawb/zero/commit/dc15e822987d8d7de467c62c375518f435b74d8c))
+* **daemon:** clean up child after startup timeout ([#774](https://github.com/Gitlawb/zero/issues/774)) ([9c29209](https://github.com/Gitlawb/zero/commit/9c292092a26c9092fd873d072b0af1b0d9d39ef0))
+* **dictation:** redact API keys from streaming transcriber errors ([#852](https://github.com/Gitlawb/zero/issues/852)) ([64a783b](https://github.com/Gitlawb/zero/commit/64a783b08caa2c7b21f188033b9ed84a14e00e84))
+* **modelregistry:** expose reasoning effort for DeepSeek V4 models ([#931](https://github.com/Gitlawb/zero/issues/931)) ([90dcfd1](https://github.com/Gitlawb/zero/commit/90dcfd127e8a6d9902ec9f4e72f6d03fef1a0fc6))
+* **providers:** discover ChatGPT capabilities ([#890](https://github.com/Gitlawb/zero/issues/890)) ([2d2450e](https://github.com/Gitlawb/zero/commit/2d2450e9a744349f0d01b1d4e9ba29c24ba5650d))
+* **sandbox:** normalize launcher names before the command-prefix denylist ([#934](https://github.com/Gitlawb/zero/issues/934)) ([6edf9a8](https://github.com/Gitlawb/zero/commit/6edf9a8b78dc030dc44598919db1c7fa9d4f809a))
+
+## [0.7.0](https://github.com/Gitlawb/zero/compare/v0.6.0...v0.7.0) (2026-08-10)
+
+
+### Features
+
+* **agent:** add PermissionModePlan for interactive read-only planning ([#853](https://github.com/Gitlawb/zero/issues/853)) ([0176ee4](https://github.com/Gitlawb/zero/commit/0176ee49ffddcff6f7edf6ae2ade4967e5b22cc3))
+* **providers:** live model lists for OpenRouter and OpenGateway ([#860](https://github.com/Gitlawb/zero/issues/860)) ([fb4f293](https://github.com/Gitlawb/zero/commit/fb4f293c20eb860ca388a10d22fd566ce282ba1f))
+* **tools:** give tool results an image channel and add view_image ([#843](https://github.com/Gitlawb/zero/issues/843)) ([cd0eb19](https://github.com/Gitlawb/zero/commit/cd0eb194e4df4b844785796c0701216740a56344))
+* **tui:** replace /retitle with local /rename ([#826](https://github.com/Gitlawb/zero/issues/826)) ([5886354](https://github.com/Gitlawb/zero/commit/588635487f22ef4d62d350140a219b7b8bb24119))
+
+
+### Bug Fixes
+
+* **agent:** end the additional_permissions retry loop ([#864](https://github.com/Gitlawb/zero/issues/864)) ([4ca4fa7](https://github.com/Gitlawb/zero/commit/4ca4fa75d31b139dbe55a3badf17da86892ab001))
+* **agent:** tell the user a prefix approval leaves the sandbox ([#885](https://github.com/Gitlawb/zero/issues/885)) ([2ec5c3a](https://github.com/Gitlawb/zero/commit/2ec5c3ae6b8fb543887bdeafdb34c4da057b8d36))
+* **cli:** report MCP servers that failed to start ([#822](https://github.com/Gitlawb/zero/issues/822)) ([#827](https://github.com/Gitlawb/zero/issues/827)) ([021281e](https://github.com/Gitlawb/zero/commit/021281ebbab3f2bbe6a77b2dab4bf121bcfe6b52))
+* **lsp:** dispatch notifications off read loop ([#759](https://github.com/Gitlawb/zero/issues/759)) ([936aa4e](https://github.com/Gitlawb/zero/commit/936aa4e77cf49738560a89395b8ba4d22263a396))
+* **mcp:** name the non-text blocks a tool result drops ([#874](https://github.com/Gitlawb/zero/issues/874)) ([027a670](https://github.com/Gitlawb/zero/commit/027a67080bea511b876c284bc911ef011eceb308))
+* **sandbox:** deny reads of Zero credential stores ([#681](https://github.com/Gitlawb/zero/issues/681)) ([55fa05f](https://github.com/Gitlawb/zero/commit/55fa05f0ab5a01b495345d43464606cd19a31b4f))
+* **sandbox:** stop the Windows write jail honouring Everyone-granted paths ([#865](https://github.com/Gitlawb/zero/issues/865)) ([91b413c](https://github.com/Gitlawb/zero/commit/91b413c514cc1607d5b4e7936780d40569239814))
+* **secrets,worktrees:** fix secret redaction leakage and prune stale worktrees ([#855](https://github.com/Gitlawb/zero/issues/855)) ([ff62f73](https://github.com/Gitlawb/zero/commit/ff62f73b7f4dc5e2472db21acba43cf6140c06d1))
+* **specialist:** make overwrites atomic ([#757](https://github.com/Gitlawb/zero/issues/757)) ([30f6d8f](https://github.com/Gitlawb/zero/commit/30f6d8f591a0b81638b4182ff56c86c8a50a5c70))
+* suppress gosec G204 warning for trusted local config commands ([#848](https://github.com/Gitlawb/zero/issues/848)) ([c52db05](https://github.com/Gitlawb/zero/commit/c52db055b0b213758a33c5c5627a411e052f8de4))
+* **tui:** a copied NUL byte no longer panics the TUI on Windows ([#876](https://github.com/Gitlawb/zero/issues/876)) ([cae0269](https://github.com/Gitlawb/zero/commit/cae0269e77e7a0a493cf799b41c653c9ff9a19de)), closes [#875](https://github.com/Gitlawb/zero/issues/875)
+* **tui:** exclude permission waits from turn time ([#820](https://github.com/Gitlawb/zero/issues/820)) ([15eb16f](https://github.com/Gitlawb/zero/commit/15eb16f736f903c94203207032f98aacbcf06318))
+* **tui:** fall back to CellMotion where AllMotion is unreliable ([#872](https://github.com/Gitlawb/zero/issues/872)) ([7fbd864](https://github.com/Gitlawb/zero/commit/7fbd864e91433441489902571ea394ebc5b7bd0d))
+* **tui:** fill alt-screen frame with theme panel background ([#850](https://github.com/Gitlawb/zero/issues/850)) ([020c28e](https://github.com/Gitlawb/zero/commit/020c28eaf95e2f38853f99fc06a13cd1568bf3c9))
+* **tui:** hide unavailable sidebar shortcut ([#821](https://github.com/Gitlawb/zero/issues/821)) ([845df6c](https://github.com/Gitlawb/zero/commit/845df6c7d28e02f475e90acfe838733eb37e6aa2))
+* use OAuth credentials in provider health checks ([#828](https://github.com/Gitlawb/zero/issues/828)) ([d37de92](https://github.com/Gitlawb/zero/commit/d37de9214b1ba86542f4f5ef3b060bb96849763b))
+
+
+### Performance Improvements
+
+* compact common test output ([#846](https://github.com/Gitlawb/zero/issues/846)) ([edf660a](https://github.com/Gitlawb/zero/commit/edf660ab85131f90a452cee51dc2c3a5cf62d632))
+* improve harness context efficiency ([#838](https://github.com/Gitlawb/zero/issues/838)) ([8e26679](https://github.com/Gitlawb/zero/commit/8e266797a8305e689806eadcf9698da2796481ab))
+
+## [0.6.0](https://github.com/Gitlawb/zero/compare/v0.5.0...v0.6.0) (2026-07-29)
+
+
+### Features
+
+* add persistent session goals ([#803](https://github.com/Gitlawb/zero/issues/803)) ([5d1869e](https://github.com/Gitlawb/zero/commit/5d1869e7bc193c97e07418b57b823905c1151d5d))
+* **providers:** add Fireworks AI provider preset ([#772](https://github.com/Gitlawb/zero/issues/772)) ([58daea7](https://github.com/Gitlawb/zero/commit/58daea7a482927e5ab35afaf97761c60bb35e113))
+* **skills:** report hash drift in skill info ([#795](https://github.com/Gitlawb/zero/issues/795)) ([9fbdc34](https://github.com/Gitlawb/zero/commit/9fbdc341551601c13434cf7b9b6f5e4ea4c483b1))
+
+
+### Bug Fixes
+
+* **acp:** interrupt idle reads on cancellation ([#782](https://github.com/Gitlawb/zero/issues/782)) ([15b7a54](https://github.com/Gitlawb/zero/commit/15b7a5475cfeefddbc59634551451a8872b996b7))
+* **cli:** include plugins info in shell completions ([#794](https://github.com/Gitlawb/zero/issues/794)) ([fa8734f](https://github.com/Gitlawb/zero/commit/fa8734f17927de8832dfe041e043cfb86f93d12a))
+* **config:** kill provider-command process tree via job object on Windows ([#690](https://github.com/Gitlawb/zero/issues/690)) ([5c58256](https://github.com/Gitlawb/zero/commit/5c58256abc29c185b449f8ce79647eb3fae61882))
+* **config:** make the provider-command timeout an upper bound ([#811](https://github.com/Gitlawb/zero/issues/811)) ([#813](https://github.com/Gitlawb/zero/issues/813)) ([1c38e8c](https://github.com/Gitlawb/zero/commit/1c38e8cba50db255f3cda8b7cf4298712b2933e1))
+* **config:** stop billing provider-command fixtures to the 5s timeout ([#810](https://github.com/Gitlawb/zero/issues/810)) ([f5fa4ff](https://github.com/Gitlawb/zero/commit/f5fa4ffc64537897aa78a56edca36d8f1dacd021))
+* **cron:** reserve job IDs atomically ([#686](https://github.com/Gitlawb/zero/issues/686)) ([d9b882e](https://github.com/Gitlawb/zero/commit/d9b882eb0a94f38de8447cb54b57860ccd8ed053))
+* **lint:** resolve static analysis baseline ([#769](https://github.com/Gitlawb/zero/issues/769)) ([583e653](https://github.com/Gitlawb/zero/commit/583e6530bd849a8efcb2b88bbe8c297e8592e62c))
+* **providers:** retry provably pre-send transport failures ([#447](https://github.com/Gitlawb/zero/issues/447)) ([#750](https://github.com/Gitlawb/zero/issues/750)) ([8acd42a](https://github.com/Gitlawb/zero/commit/8acd42a3bd743a35807d762f23a33fb61c171839))
+* **sandbox:** add platform-specific write lock around grant state file ([#752](https://github.com/Gitlawb/zero/issues/752)) ([#755](https://github.com/Gitlawb/zero/issues/755)) ([88fb7b6](https://github.com/Gitlawb/zero/commit/88fb7b6192c1ac8173089967d5e9119f92d7a101))
+* **sandbox:** clarify scoped permission prompts ([#798](https://github.com/Gitlawb/zero/issues/798)) ([9fe02ae](https://github.com/Gitlawb/zero/commit/9fe02ae52e3234cb9dae76e0c5594a287ccbb52a))
+* **sandbox:** deny reads of git's credential stores ([#815](https://github.com/Gitlawb/zero/issues/815)) ([#816](https://github.com/Gitlawb/zero/issues/816)) ([33c94ec](https://github.com/Gitlawb/zero/commit/33c94ec7a3e7987e6e36b5fd5e037ff4e6e84c26))
+* **sandbox:** preserve user config and retry denied writes ([#801](https://github.com/Gitlawb/zero/issues/801)) ([81a5e6c](https://github.com/Gitlawb/zero/commit/81a5e6cb716ba4b7ecf7ff3ff261dfa51fd01098))
+* **sandbox:** scrub the daemon token file pointer ([#677](https://github.com/Gitlawb/zero/issues/677)) ([#818](https://github.com/Gitlawb/zero/issues/818)) ([3e7692d](https://github.com/Gitlawb/zero/commit/3e7692d8f0885d346809869935c81a9cf055d89e))
+* **swarm:** close lifecycle admission on shutdown ([#776](https://github.com/Gitlawb/zero/issues/776)) ([bdbda89](https://github.com/Gitlawb/zero/commit/bdbda89f3e42d93e8058ab3e1e9ef402659530cd))
+* **tui:** fix rendering corruption over multipass + Windows Terminal ([#709](https://github.com/Gitlawb/zero/issues/709)) ([5bb1bc1](https://github.com/Gitlawb/zero/commit/5bb1bc11c3188dcea7709ff07c8b25dda3541de8))
+* **tui:** paste clipboard images with Ctrl+V ([#534](https://github.com/Gitlawb/zero/issues/534)) ([#807](https://github.com/Gitlawb/zero/issues/807)) ([ec3b822](https://github.com/Gitlawb/zero/commit/ec3b8225050eb62f0f41a9582ed2881d2f9dcc8e))
+* **tui:** reset quiet clock for new runs ([#799](https://github.com/Gitlawb/zero/issues/799)) ([a4a805a](https://github.com/Gitlawb/zero/commit/a4a805a6c82c51cb255e909bd87ca183c8805cf2))
+* **windows:** use PowerShell for command execution ([#804](https://github.com/Gitlawb/zero/issues/804)) ([518d2e5](https://github.com/Gitlawb/zero/commit/518d2e53ba3fa073090a9b41c278face85b59b64))
+
 ## [0.5.0](https://github.com/Gitlawb/zero/compare/v0.4.0...v0.5.0) (2026-07-22)
 
 

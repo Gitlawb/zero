@@ -62,16 +62,6 @@ var defaultModes = []Mode{
 	},
 }
 
-// Modes returns a copy of the preset catalog, preserving declaration order so
-// list output and help text stay stable.
-func Modes() []Mode {
-	modes := make([]Mode, len(defaultModes))
-	for index, mode := range defaultModes {
-		modes[index] = cloneMode(mode)
-	}
-	return modes
-}
-
 // LookupMode returns the preset registered under name (case-insensitive,
 // whitespace-trimmed). The second result reports whether a preset matched.
 func LookupMode(name string) (Mode, bool) {

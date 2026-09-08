@@ -23,12 +23,16 @@ type clipboardImageMsg struct {
 	err       error
 }
 
+// readClipboardImage is the OS clipboard image reader. A var so tests can
+// substitute a stub instead of depending on the developer's real clipboard.
+var readClipboardImage = imageinput.ReadClipboardImage
+
 // readClipboardImageCmd reads the OS clipboard for image content off the
 // Update goroutine. Returns a clipboardImageMsg with the bytes, or nil (no
 // command) if there is no image — the caller treats nil as a silent no-op.
 func readClipboardImageCmd() tea.Cmd {
 	return func() tea.Msg {
-		data, mediaType, err := imageinput.ReadClipboardImage()
+		data, mediaType, err := readClipboardImage()
 		if err != nil {
 			return clipboardImageMsg{err: err}
 		}
@@ -53,8 +57,10 @@ func pasteFromClipboardCmd() tea.Cmd {
 // shared by the terminal bracketed-paste handler (tea.PasteMsg) and the
 // right-click paste (clipboardReadMsg) so a bracketed paste and a right-click
 // paste behave identically. Surfaces with no editable text field (a permission/
-// spec prompt, the MCP manager, an open picker, the detailed transcript) swallow
-// the paste; empty content is a no-op.
+// spec prompt, the MCP manager, or the detailed transcript) swallow the paste.
+// Searchable pickers consume pasted text through the same filtering path as
+// typed characters. The session rename editor accepts text only; empty content
+// is a no-op there rather than an image probe.
 func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	// A paste is a deliberate action, same as a keypress or click — it means
 	// the user moved on to something else, so it disarms a stale Esc
@@ -71,6 +77,14 @@ func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	// toggle instead of going solid.
 	m.lastCharTime = m.now()
 	m.composerCursorVisible = true
+	if m.renamePrompt != nil {
+		if content == "" {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.PasteMsg{Content: sanitizeComposerInput(content)})
+		return m, cmd
+	}
 	if content == "" {
 		// Empty text clipboard — the user may have pasted a screenshot.
 		// Probe the OS clipboard for image content asynchronously.
@@ -88,7 +102,17 @@ func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	if m.providerWizard != nil {
 		return m.handleProviderWizardPaste(content)
 	}
-	if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil {
+	if m.picker != nil {
+		if m.modelPickerIsLoading() {
+			return m, nil
+		}
+		m.picker.appendQuery([]rune(sanitizeComposerInput(content)))
+		if m.picker.kind == pickerPet {
+			return m.schedulePetPreview()
+		}
+		return m, nil
+	}
+	if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.mcpAddWizard != nil || m.mcpManager != nil {
 		return m, nil
 	}
 	// A drag-dropped image/PDF arrives as a (backslash-escaped) file path. Attach

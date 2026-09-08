@@ -48,13 +48,28 @@ func TestModelMatchesProvider(t *testing.T) {
 }
 
 func TestDefaultedOpenGatewayURL(t *testing.T) {
-	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{}, " https://x/models.json "); got != "https://x/models.json" {
+	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{}, " https://x/v1/models "); got != "https://x/v1/models" {
 		t.Fatalf("explicit override = %q, want trimmed override", got)
 	}
-	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "https://gw.example.com/v1"}, ""); got != "https://gw.example.com/zero/models.json" {
+	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "https://gw.example.com/v1"}, ""); got != "https://gw.example.com/v1/models" {
 		t.Fatalf("derived = %q", got)
 	}
-	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "::not a url"}, ""); got != "https://opengateway.gitlawb.com/zero/models.json" {
+	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "::not a url"}, ""); got != "https://opengateway.gitlawb.com/v1/models" {
+		t.Fatalf("fallback = %q", got)
+	}
+}
+
+func TestDefaultedOpenRouterURL(t *testing.T) {
+	if got := defaultedOpenRouterURL(providercatalog.Descriptor{}, " https://or.example/api/v1/models "); got != "https://or.example/api/v1/models" {
+		t.Fatalf("explicit override = %q, want trimmed override", got)
+	}
+	if got := defaultedOpenRouterURL(providercatalog.Descriptor{DefaultBaseURL: "https://openrouter.ai/api/v1"}, ""); got != "https://openrouter.ai/api/v1/models" {
+		t.Fatalf("derived = %q", got)
+	}
+	if got := defaultedOpenRouterURL(providercatalog.Descriptor{DefaultBaseURL: "https://openrouter.ai/api/v1?token=x#frag"}, ""); got != "https://openrouter.ai/api/v1/models" {
+		t.Fatalf("query/fragment stripped = %q, want clean /models URL", got)
+	}
+	if got := defaultedOpenRouterURL(providercatalog.Descriptor{DefaultBaseURL: "bad"}, ""); got != "https://openrouter.ai/api/v1/models" {
 		t.Fatalf("fallback = %q", got)
 	}
 }
@@ -131,6 +146,110 @@ func TestFetchModelsDevAndOpenGatewayOverHTTP(t *testing.T) {
 	}
 	if !containsModelID(routed, "claude-coder") {
 		t.Fatalf("FetchRemote models = %#v, want claude-coder", routed)
+	}
+
+	openrouter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"openai/gpt-4o","name":"GPT-4o","context_length":128000,"supported_parameters":["tools"]}]}`))
+	}))
+	defer openrouter.Close()
+	orModels, err := FetchOpenRouter(context.Background(), openrouter.URL, FetchOptions{HTTPClient: openrouter.Client()})
+	if err != nil {
+		t.Fatalf("FetchOpenRouter error: %v", err)
+	}
+	if !containsModelID(orModels, "openai/gpt-4o") {
+		t.Fatalf("FetchOpenRouter models = %#v, want openai/gpt-4o", orModels)
+	}
+	routedOR, err := FetchRemote(context.Background(), providercatalog.Descriptor{ID: "openrouter"}, FetchOptions{HTTPClient: openrouter.Client(), OpenRouterURL: openrouter.URL})
+	if err != nil {
+		t.Fatalf("FetchRemote openrouter error: %v", err)
+	}
+	if !containsModelID(routedOR, "openai/gpt-4o") {
+		t.Fatalf("FetchRemote openrouter models = %#v, want openai/gpt-4o", routedOR)
+	}
+}
+
+// TestFetchOpenRouterFallsBackToModelsDev pins independent resilience: when
+// openrouter.ai is down, models.dev still supplies a coding list so the picker
+// does not error empty.
+func TestFetchOpenRouterFallsBackToModelsDev(t *testing.T) {
+	openrouter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	}))
+	defer openrouter.Close()
+
+	modelsDev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"openrouter": {
+				"models": {
+					"openai/gpt-4.1": {
+						"id": "openai/gpt-4.1",
+						"name": "GPT-4.1",
+						"tool_call": true,
+						"limit": {"context": 1048576},
+						"cost": {"input": 2, "output": 8},
+						"modalities": {"input": ["text"], "output": ["text"]}
+					}
+				}
+			}
+		}`))
+	}))
+	defer modelsDev.Close()
+
+	models, err := FetchOpenRouter(context.Background(), openrouter.URL, FetchOptions{
+		HTTPClient:   openrouter.Client(),
+		ModelsDevURL: modelsDev.URL,
+	})
+	if err != nil {
+		t.Fatalf("FetchOpenRouter with models.dev fallback: %v", err)
+	}
+	if !containsModelID(models, "openai/gpt-4.1") {
+		t.Fatalf("models = %#v, want models.dev openrouter fallback entry", models)
+	}
+	if models[0].Source != "models.dev" {
+		t.Fatalf("source = %q, want models.dev fallback source", models[0].Source)
+	}
+}
+
+// TestFetchOpenRouterFallsBackOnMalformedJSON covers the HTTP-200-but-unparseable
+// path: a broken openrouter.ai body must still degrade to models.dev instead of
+// failing the catalog fetch entirely.
+func TestFetchOpenRouterFallsBackOnMalformedJSON(t *testing.T) {
+	openrouter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data": not-json`))
+	}))
+	defer openrouter.Close()
+
+	modelsDev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"openrouter": {
+				"models": {
+					"openai/gpt-4.1": {
+						"id": "openai/gpt-4.1",
+						"name": "GPT-4.1",
+						"tool_call": true,
+						"limit": {"context": 1048576},
+						"cost": {"input": 2, "output": 8},
+						"modalities": {"input": ["text"], "output": ["text"]}
+					}
+				}
+			}
+		}`))
+	}))
+	defer modelsDev.Close()
+
+	models, err := FetchOpenRouter(context.Background(), openrouter.URL, FetchOptions{
+		HTTPClient:   openrouter.Client(),
+		ModelsDevURL: modelsDev.URL,
+	})
+	if err != nil {
+		t.Fatalf("FetchOpenRouter malformed JSON fallback: %v", err)
+	}
+	if !containsModelID(models, "openai/gpt-4.1") {
+		t.Fatalf("models = %#v, want models.dev openrouter fallback entry", models)
+	}
+	if models[0].Source != "models.dev" {
+		t.Fatalf("source = %q, want models.dev fallback source", models[0].Source)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 type SideEffect string
@@ -83,6 +84,7 @@ type PropertySchema struct {
 	Minimum     *int            `json:"minimum,omitempty"`
 	Maximum     *int            `json:"maximum,omitempty"`
 	MinLength   *int            `json:"minLength,omitempty"`
+	MaxLength   *int            `json:"maxLength,omitempty"`
 	MinItems    *int            `json:"minItems,omitempty"`
 	// Properties/Required describe nested object fields (for Type "object" or an
 	// object-typed Items).
@@ -101,6 +103,16 @@ type Result struct {
 	// while callers migrate away from parsing text and string metadata.
 	ExecutionRequest *execution.Request `json:"-"`
 	ExecutionOutcome *execution.Outcome `json:"-"`
+	// Images are pictures the tool is handing the model — a screenshot it just
+	// captured, a file it was asked to look at. Text-only tools leave it nil.
+	//
+	// They are NOT delivered on this result's own tool-result message. Every
+	// provider drops images there: Anthropic maps a tool result to a tool_result
+	// block whose content is a string, Gemini to a functionResponse, and OpenAI
+	// guards its image content-parts to the user role. The agent loop therefore
+	// emits them as a following user message, which is also the only shape that
+	// keeps one tool result per tool call.
+	Images []zeroruntime.ImageBlock `json:"-"`
 	// Redacted is set when secret scrubbing altered Output before it left the
 	// tool-execution boundary.
 	Redacted bool
@@ -114,6 +126,71 @@ type Result struct {
 	ChangeSummaries []execution.Change
 	// Display carries a short, structured summary for the TUI / stream.
 	Display Display
+	// Outcome is the finalized, typed representation produced at the registry
+	// seam. ModelView, HumanView, and Artifact deliberately serve different
+	// consumers; Output, Display, and spill metadata remain synchronized for
+	// compatibility with direct tool callers and persisted sessions.
+	Outcome ToolOutcome
+	// pendingFileObservation is proposed by read_file and committed only after
+	// the final model-visible output boundary confirms the exact content survived.
+	pendingFileObservation *pendingFileObservation
+}
+
+// ToolOutcome is the canonical post-execution representation of one tool
+// result. It separates the bounded provider payload from the human-facing
+// presentation and the recoverable output retained outside model context.
+type ToolOutcome struct {
+	ModelView   string
+	HumanView   Display
+	Artifact    *ToolArtifact
+	Diagnostics OutcomeDiagnostics
+	finalized   bool
+}
+
+// Finalized reports whether the outcome crossed the registry boundary. Direct
+// Tool.Run results deliberately return false and use their legacy fields.
+func (outcome ToolOutcome) Finalized() bool {
+	return outcome.finalized
+}
+
+// ToolArtifact identifies recoverable output saved by the tool boundary.
+// CompleteAtBoundary means the artifact contains every redacted byte received
+// by that boundary; an underlying process may already have applied its own
+// capture limit before producing the result.
+type ToolArtifact struct {
+	Path               string
+	CompleteAtBoundary bool
+}
+
+// OutcomeDiagnostics describes how the model-facing representation differs
+// from the redacted output received by the registry boundary.
+type OutcomeDiagnostics struct {
+	Category                string
+	OriginalBytes           int
+	ModelBytes              int
+	EstimatedOriginalTokens int
+	EstimatedModelTokens    int
+	Truncated               bool
+	Redacted                bool
+	Reason                  string
+}
+
+// ModelOutput returns the finalized provider-facing text, falling back to the
+// legacy field for direct Tool.Run callers that have not crossed the registry.
+func (result Result) ModelOutput() string {
+	if result.Outcome.finalized {
+		return result.Outcome.ModelView
+	}
+	return result.Output
+}
+
+// HumanDisplay returns the finalized presentation, falling back to the legacy
+// display for direct Tool.Run callers.
+func (result Result) HumanDisplay() Display {
+	if result.Outcome.finalized {
+		return result.Outcome.HumanView
+	}
+	return result.Display
 }
 
 // Display carries a short, structured summary of a tool result for the TUI/stream.
@@ -132,6 +209,14 @@ type Tool interface {
 	Parameters() Schema
 	Safety() Safety
 	Run(ctx context.Context, args map[string]any) Result
+}
+
+// IsBuiltInApplyPatch reports whether tool is Zero's scoped patch tool. The
+// marker method is package-private so external and MCP tools cannot claim this
+// identity merely by sharing the public name "apply_patch".
+func IsBuiltInApplyPatch(tool Tool) bool {
+	_, ok := tool.(interface{ isBuiltInApplyPatch() })
+	return ok
 }
 
 // ArgsPermissioner is an optional interface a Tool can implement to refine its
@@ -158,6 +243,7 @@ type baseTool struct {
 	parameters   Schema
 	safety       Safety
 	capabilities ToolCapabilities // zero value = EffectUnknown, not thread-safe
+	deferred     bool
 }
 
 func (tool baseTool) Name() string {
@@ -174,6 +260,11 @@ func (tool baseTool) Parameters() Schema {
 
 func (tool baseTool) Safety() Safety {
 	return tool.safety
+}
+
+// Deferred reports whether this built-in is discoverable on demand.
+func (tool baseTool) Deferred() bool {
+	return tool.deferred
 }
 
 func okResult(output string) Result {

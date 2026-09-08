@@ -20,7 +20,7 @@ func TestMutatingToolsAppendInlineDiagnostics(t *testing.T) {
 		return absPath + ":1:1: error: undefined: x"
 	}
 
-	editResult := NewEditFileTool(dir).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+	editResult := NewScopedEditFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":       "a.go",
 		"old_string": "package a",
 		"new_string": "package b",
@@ -32,7 +32,7 @@ func TestMutatingToolsAppendInlineDiagnostics(t *testing.T) {
 		t.Fatalf("edit output missing diagnostics block: %q", editResult.Output)
 	}
 
-	writeResult := NewWriteFileTool(dir).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+	writeResult := NewScopedWriteFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":    "b.go",
 		"content": "package b\n",
 	}, RunOptions{Diagnostics: diagnostics})
@@ -43,7 +43,7 @@ func TestMutatingToolsAppendInlineDiagnostics(t *testing.T) {
 		t.Fatalf("write output missing diagnostics block: %q", writeResult.Output)
 	}
 
-	clean := NewWriteFileTool(dir).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+	clean := NewScopedWriteFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":    "c.go",
 		"content": "package c\n",
 	}, RunOptions{Diagnostics: func(context.Context, string) string { return "" }})

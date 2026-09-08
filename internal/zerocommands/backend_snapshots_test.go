@@ -89,6 +89,8 @@ func TestMCPServerSnapshotWithCountsMergesRuntimeCounts(t *testing.T) {
 }
 
 func TestMCPServerSnapshotRedactsSecretCommand(t *testing.T) {
+	// Digit-free known OpenAI prefix: exercises the special-case path that
+	// redacts sk-proj- even when the body has no digit.
 	secret := "sk-proj-" + strings.Repeat("d", 24)
 	server := mcp.Server{
 		Name:    "leaky",

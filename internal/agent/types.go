@@ -26,6 +26,15 @@ const (
 	PermissionModeAsk       PermissionMode = "ask"
 	PermissionModeUnsafe    PermissionMode = "unsafe"
 	PermissionModeSpecDraft PermissionMode = "spec-draft"
+	// PermissionModePlan is an interactive, read-only planning mode. It applies
+	// to the CURRENT session (unlike spec-draft, which drafts in a separate
+	// session): the agent may inspect the workspace and shape the plan with
+	// update_plan/ask_user, but no mutating tool is advertised, so it cannot
+	// write files, run shell, or implement while planning. Entry points:
+	// the TUI's /plan on (exit with /plan off, which restores whatever mode
+	// was active before), `zero exec --plan`, and the ACP session mode
+	// selector ("plan").
+	PermissionModePlan PermissionMode = "plan"
 	// PermissionModeMemberAuto is a headless mode for swarm/specialist MEMBERS: it
 	// advertises the in-workspace mutators a member needs to build (write/edit +
 	// shell) on top of the Auto set, while the sandbox engine still gates them at
@@ -68,14 +77,18 @@ type ToolResult struct {
 	Output     string
 	// Truncated reports that the tool's model-visible output omitted content.
 	// The full result may be recoverable through Meta["spill_path"].
-	Truncated    bool
-	Meta         map[string]string
+	Truncated bool
+	Meta      map[string]string
+	// Images the tool produced, delivered to the model as a following user
+	// message rather than on this result. See tools.Result.Images.
+	Images       []zeroruntime.ImageBlock
 	Redacted     bool
 	ChangedFiles []string
 	// ChangeSummaries are non-selectable generated-tree summaries emitted by
 	// command execution; callers must not schedule per-file work from them.
 	ChangeSummaries []execution.Change
 	Display         tools.Display
+	Outcome         tools.ToolOutcome
 	// DenialReason categorizes why a tool call was blocked (empty when it ran).
 	// It lets a surface distinguish the cause precisely instead of parsing Output.
 	DenialReason DenialCategory
@@ -94,6 +107,24 @@ type ToolResult struct {
 	// for every normal tool result; the Run loop performs the switch when it is
 	// set and Options.ModelSwitcher is wired.
 	RequestedModel string
+}
+
+// ModelOutput returns the bounded provider-facing result while preserving
+// compatibility with synthetic and restored results created before outcomes
+// were finalized.
+func (result ToolResult) ModelOutput() string {
+	if result.Outcome.Finalized() {
+		return result.Outcome.ModelView
+	}
+	return result.Output
+}
+
+// HumanDisplay returns the presentation intended for interactive surfaces.
+func (result ToolResult) HumanDisplay() tools.Display {
+	if result.Outcome.Finalized() {
+		return result.Outcome.HumanView
+	}
+	return result.Display
 }
 
 // DenialCategory classifies why a tool call was blocked before it executed.
@@ -173,6 +204,22 @@ type PermissionRequest struct {
 	Grant              *sandbox.Grant             `json:"grant,omitempty"`
 	CommandPrefix      []string                   `json:"commandPrefix,omitempty"`
 	AvailableDecisions []PermissionDecisionAction `json:"availableDecisions,omitempty"`
+	// PrefixApprovalEscalates reports that approving a command prefix will also
+	// run the command OUTSIDE the sandbox, not merely stop asking about it.
+	//
+	// It exists because that consequence was real but invisible. Approving a
+	// prefix rewrites the call to sandbox_permissions: require_escalated, which
+	// resolves to a nil engine and genuinely unsandboxed execution, and the
+	// engine's own escalation prompt is then satisfied by the approval just
+	// given for the sandboxed form. So the operator authorized one thing and got
+	// a wider one, having been shown only "allow command prefix for session".
+	//
+	// The escalation itself is deliberate and guarded: proposedCommandPrefix
+	// refuses to offer a prefix while any other segment of the command is not
+	// known-safe, precisely so an unreviewed segment cannot ride out of the
+	// sandbox on it. What was missing was telling the person deciding, so this
+	// surfaces it rather than removing it.
+	PrefixApprovalEscalates bool `json:"prefixApprovalEscalates,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -278,8 +325,12 @@ type Options struct {
 	ProviderName     string
 	Model            string
 	ReasoningEffort  string
+	ServiceTier      string
 	Cwd              string
 	SystemPrompt     string
+	// TransientSystemPrompt adds trusted runtime guidance for this run only.
+	// Empty preserves the ordinary system prompt byte-for-byte.
+	TransientSystemPrompt string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the
 	// system prompt as a short directive. Empty or "balanced" adds nothing — the
@@ -297,10 +348,26 @@ type Options struct {
 	// CompactionPreserveLast is how many trailing messages compaction keeps
 	// verbatim. <= 0 falls back to defaultCompactionPreserveLast.
 	CompactionPreserveLast int
-	Registry               *tools.Registry
-	PermissionMode         PermissionMode
-	Autonomy               string
-	Sandbox                *sandbox.Engine
+	// Summarizer, when set, lazily builds the provider used for compaction
+	// summarization calls — typically a cheap/fast model, since summaries at
+	// main-model prices are the single most expensive recurring event in a
+	// long run. It receives the main model currently in force and may return
+	// (nil, nil) when no dedicated summarizer applies to it (the main model is
+	// already the cheap one). Built on the first paid compaction and again
+	// after a mid-run model switch. Any failure (build or call) falls back to
+	// the run's main provider until the next switch, so a misconfigured
+	// summarizer can never break compaction. nil keeps today's behavior.
+	Summarizer func(ctx context.Context, mainModelID string) (Provider, error)
+	// ContextWindowFor, when set, resolves a model ID to its context window so
+	// the compactor can re-derive its threshold after a mid-run model switch
+	// (escalate_model). Without it a switch keeps compacting against the
+	// original model's window — overflowing a smaller target or over-compacting
+	// a larger one. Return <= 0 when the model is unknown (window unchanged).
+	ContextWindowFor func(modelID string) int
+	Registry         *tools.Registry
+	PermissionMode   PermissionMode
+	Autonomy         string
+	Sandbox          *sandbox.Engine
 	// FileTracker records per-session file read/write versions so the write tools
 	// can detect a file changed on disk outside Zero since it was last read. nil
 	// disables the check. Created once per session and threaded into every tool run.
@@ -330,9 +397,11 @@ type Options struct {
 	// specialist child process emits while running. The toolCallID identifies
 	// which Task tool call the progress belongs to. nil is a no-op.
 	OnToolProgress func(toolCallID string, event streamjson.Event)
-	// OnContext, when set, is called once per turn with the per-category context
-	// budget of the request about to be sent, so a surface (TUI/CLI) can show
-	// context utilization. Opt-in like the other callbacks; nil is a no-op.
+	// OnContext, when set, is called for each main agent request with its
+	// per-category context budget, including a replacement request after
+	// compaction or a stall retry. Internal summarizer requests are excluded so
+	// surfaces keep showing the active conversation budget. Opt-in like the other
+	// callbacks; nil is a no-op.
 	OnContext func(ContextBreakdown)
 	// ModelSwitcher, when set, lets a tool escalate the run to a stronger model
 	// mid-run: the loop calls it with the requested model id and, on success,
@@ -425,13 +494,6 @@ type Result struct {
 	// marked Incomplete (e.g. "pending plan items remain"). Empty when Incomplete
 	// is false. Surfaced in logs / run_end so an abandoned run is debuggable.
 	IncompleteReason string
-}
-
-// Truncated reports whether the final response ended abnormally (cut off at the
-// output token cap or withheld by a content filter) rather than completing
-// naturally. Callers can use it to warn the user that FinalAnswer is incomplete.
-func (result Result) Truncated() bool {
-	return result.FinishReason != ""
 }
 
 // TruncationNotice returns a user-facing warning when the final response was

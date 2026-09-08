@@ -516,7 +516,7 @@ func TestRunMCPRemovePreservesUnrelatedConfigFields(t *testing.T) {
 func TestRunMCPListRedactsURLCredentialsAndSensitiveQueryParams(t *testing.T) {
 	cwd := t.TempDir()
 	serverURL := "https://user:password@remote.example/mcp?access_token=secret-token&api_key=secret-key&safe=value#access_token=fragment-secret"
-	commandSecret := "sk-proj-" + strings.Repeat("a", 24)
+	commandSecret := "sk-proj-" + strings.Repeat("a", 23) + "0"
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
 		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {

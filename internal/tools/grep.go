@@ -48,7 +48,6 @@ func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 					"path":             {Type: "string", Description: "Directory or file to search. Relative paths stay in the workspace; use an absolute path to search a granted extra root. Defaults to workspace root.", Default: "."},
 					"glob":             {Type: "string", Description: `Optional glob filter, for example "**/*.go".`},
 					"output_mode":      {Type: "string", Description: "Output mode.", Enum: []string{"content", "files_with_matches", "count"}, Default: "content"},
-					"-i":               {Type: "boolean", Description: "Case insensitive search.", Default: false},
 					"case_insensitive": {Type: "boolean", Description: "Case insensitive search.", Default: false},
 					"head_limit":       {Type: "integer", Description: "Maximum content results to return.", Default: 50, Minimum: intPtr(1)},
 				},

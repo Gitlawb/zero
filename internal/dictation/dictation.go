@@ -37,16 +37,6 @@ const (
 	StreamProviderOpenAI   = "openai"
 )
 
-// BatchProviders lists valid stt.provider values, for config validation.
-func BatchProviders() []string {
-	return []string{ProviderLocal, ProviderGroq, ProviderOpenAI}
-}
-
-// StreamProviders lists valid stt.streamProvider values, for config validation.
-func StreamProviders() []string {
-	return []string{StreamProviderLocal, StreamProviderDeepgram, StreamProviderOpenAI}
-}
-
 // AudioFormat identifies a recorded container format, sniffed from the bytes —
 // desktop recorders produce WAV, Termux's recorder produces M4A/AAC.
 type AudioFormat string

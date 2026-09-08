@@ -64,6 +64,7 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 	}
 	m.pendingImages = nil
 	m.pendingImageLabels = nil
+	m.pendingImageThumbnails = nil
 
 	specRegistry := cloneToolRegistry(m.registry)
 	specmode.RegisterDraftTools(specRegistry, m.cwd, m.now)
@@ -92,6 +93,7 @@ func (m model) createSpecDraftSession(task string) (model, error) {
 	}
 	m.activeSession = session
 	m.sessionEvents = []sessions.Event{}
+	m = m.syncPeerIdentity()
 	return m, nil
 }
 
@@ -199,6 +201,7 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.pendingSpecReview = nil
 	m.activeSession = impl
 	m.sessionEvents = append([]sessions.Event{}, events...)
+	m = m.syncPeerIdentity()
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Spec approved. Starting implementation session " + impl.SessionID + "."})
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)
@@ -244,14 +247,7 @@ func (m model) cancelSpecReview() (tea.Model, tea.Cmd) {
 }
 
 func cloneToolRegistry(registry *tools.Registry) *tools.Registry {
-	clone := tools.NewRegistry()
-	if registry == nil {
-		return clone
-	}
-	for _, tool := range registry.All() {
-		clone.Register(tool)
-	}
-	return clone
+	return registry.Clone()
 }
 
 // renderFocusedSpecReviewPrompt draws the spec-review gate in the shared card

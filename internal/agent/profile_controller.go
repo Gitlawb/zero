@@ -91,7 +91,7 @@ func (c *profileController) maybeEscalate() (PostureEscalation, bool) {
 	if c.policy == nil || c.escalated {
 		return PostureEscalation{}, false
 	}
-	if !(c.failureTripped || c.riskTripped || c.scTripped || c.uncertainTrip) {
+	if !c.failureTripped && !c.riskTripped && !c.scTripped && !c.uncertainTrip {
 		return PostureEscalation{}, false
 	}
 	c.escalated = true

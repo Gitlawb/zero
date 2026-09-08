@@ -124,22 +124,6 @@ func MCPServerSnapshots(servers []mcp.Server) []MCPServerSnapshot {
 	return snapshots
 }
 
-// MCPServerSnapshotWithCounts returns a snapshot that also records
-// how many tools the server exposes and how many persistent
-// approvals are currently recorded. A nil counts struct is treated
-// as zero values so callers that do not have a live registry can
-// still call this helper.
-func MCPServerSnapshotWithCounts(server mcp.Server, counts *MCPServerCounts) MCPServerSnapshot {
-	snapshot := MCPServerSnapshotFromServer(server)
-	if counts == nil {
-		return snapshot
-	}
-	snapshot.ToolCount = counts.ToolCount
-	snapshot.AllowGranted = counts.AllowGranted
-	snapshot.DenyGranted = counts.DenyGranted
-	return snapshot
-}
-
 // MCPServerCounts is the optional runtime count bundle that the
 // snapshot can carry. The struct is split out so callers that
 // have a live tool registry and a live permission store can
@@ -176,14 +160,6 @@ func HookSnapshotFromDefinition(def hooks.Definition, source hooks.ConfigSource)
 // slice so JSON output is always `[]` and never `null`.
 func HookSnapshots(definitions []hooks.Definition) []HookSnapshot {
 	return hookSnapshotsWithSource(definitions, "")
-}
-
-// HookSnapshotsWithSource converts a slice of hooks.Definition and
-// tags every snapshot with the same source string. The helper
-// exists so callers that have a single hooks.LoadResult can build
-// the snapshot slice in one pass.
-func HookSnapshotsWithSource(definitions []hooks.Definition, source hooks.ConfigSource) []HookSnapshot {
-	return hookSnapshotsWithSource(definitions, source)
 }
 
 func hookSnapshotsWithSource(definitions []hooks.Definition, source hooks.ConfigSource) []HookSnapshot {

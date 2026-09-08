@@ -149,10 +149,6 @@ func (s *PrService) detect(ctx context.Context) PrState {
 	return PrState{Status: PrNotFound}
 }
 
-func WatchPRState(service *PrService, onChange func(PrState)) func() {
-	return WatchPRStateContext(context.Background(), service, onChange)
-}
-
 func WatchPRStateContext(ctx context.Context, service *PrService, onChange func(PrState)) func() {
 	if service == nil || onChange == nil {
 		return func() {}
@@ -235,16 +231,6 @@ func detectGitLabMR(ctx context.Context, cwd string, run prCommandRunner) (PrSta
 	}
 	state.Additions, state.Deletions, _ = getLocalDiffStats(ctx, cwd, view.TargetBranch, run)
 	return state, true
-}
-
-func GetLocalDiffStats(baseBranch string) (additions int, deletions int, err error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return 0, 0, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), prCommandTimeout)
-	defer cancel()
-	return getLocalDiffStats(ctx, cwd, baseBranch, defaultPRCommandRunner)
 }
 
 func getLocalDiffStats(ctx context.Context, cwd string, baseBranch string, run prCommandRunner) (int, int, error) {

@@ -24,7 +24,7 @@ func TestFormatOnWriteDisabledByDefault(t *testing.T) {
 	dir := t.TempDir()
 	ugly := "package a\n\nfunc  A( ) {   }\n"
 
-	result := NewWriteFileTool(dir).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+	result := NewScopedWriteFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":    "a.go",
 		"content": ugly,
 	}, RunOptions{})
@@ -46,7 +46,7 @@ func TestFormatOnWriteFormatsAndKeepsTrackerConsistent(t *testing.T) {
 	dir := t.TempDir()
 	tracker := NewFileTracker()
 
-	write := NewWriteFileTool(dir).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+	write := NewScopedWriteFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":    "a.go",
 		"content": "package a\n\nfunc  A( ) {   }\n",
 	}, RunOptions{FileTracker: tracker})
@@ -61,15 +61,37 @@ func TestFormatOnWriteFormatsAndKeepsTrackerConsistent(t *testing.T) {
 		t.Fatalf("expected gofmt-formatted content, got %q", onDisk)
 	}
 
-	// The tracker must have been re-baselined to the POST-format content: a
-	// follow-up edit must not trip the external-modification conflict guard.
-	edit := NewEditFileTool(dir).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+	// The tracker is re-baselined to the post-format bytes, but those bytes were
+	// not returned exactly to the model, so an edit must require an exact read.
+	edit := NewScopedEditFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":       "a.go",
 		"old_string": "func A() {",
 		"new_string": "func B() {",
 	}, RunOptions{FileTracker: tracker})
+	if edit.Status != StatusError || !strings.Contains(edit.Output, "has not been read exactly") {
+		t.Fatalf("formatter-modified content must require an exact read: %q", edit.Output)
+	}
+	read := NewScopedReadFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "a.go",
+	}, RunOptions{FileTracker: tracker})
+	if read.Status != StatusOK {
+		t.Fatalf("exact read failed: %q", read.Output)
+	}
+	edit = NewScopedEditFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path":       "a.go",
+		"old_string": "func A() {",
+		"new_string": "func B( ) {",
+	}, RunOptions{FileTracker: tracker})
 	if edit.Status != StatusOK {
-		t.Fatalf("follow-up edit must not conflict after formatting: %q", edit.Output)
+		t.Fatalf("follow-up edit after exact read failed: %q", edit.Output)
+	}
+	edit = NewScopedEditFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path":       "a.go",
+		"old_string": "func B() {",
+		"new_string": "func C() {",
+	}, RunOptions{FileTracker: tracker})
+	if edit.Status != StatusError || !strings.Contains(edit.Output, "has not been read exactly") {
+		t.Fatalf("formatter-modified edit must require an exact read: %q", edit.Output)
 	}
 }
 
@@ -78,5 +100,19 @@ func TestFormatOnWriteSkipsUnknownExtensions(t *testing.T) {
 	content := maybeFormatWrittenFile(context.Background(), filepath.Join(t.TempDir(), "notes.xyz"), "raw   text")
 	if content != "raw   text" {
 		t.Fatalf("unknown extension must pass through: %q", content)
+	}
+}
+
+func TestFormatOnWriteFormatterLookupFailure(t *testing.T) {
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	t.Setenv("PATH", t.TempDir())
+	targetPath := filepath.Join(t.TempDir(), "a.go")
+	uglyContent := "package a\n\nfunc  A( ) {   }\n"
+	if err := os.WriteFile(targetPath, []byte(uglyContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content := maybeFormatWrittenFile(context.Background(), targetPath, uglyContent)
+	if content != uglyContent {
+		t.Fatalf("missing formatter must return written content, got %q", content)
 	}
 }

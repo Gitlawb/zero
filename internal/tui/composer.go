@@ -269,10 +269,7 @@ func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
 	if width < 8 {
 		return m.composerPositionAtVisualCell(localX, localY, width)
 	}
-	contentY := localY - 1
-	if renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments) != "" {
-		contentY--
-	}
+	contentY := localY - 1 - m.attachmentComposerPrefixRows(width)
 	if contentY < 0 {
 		return 0, false
 	}
@@ -281,7 +278,7 @@ func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
 
 func (m model) composerMouseSelectionBlocked() bool {
 	return m.transcriptDetailed || m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
-		m.mcpManager != nil || m.picker != nil || m.suggestionsActive()
+		m.mcpManager != nil || m.picker != nil || m.renamePrompt != nil || m.suggestionsActive()
 }
 
 func (m model) composerPositionAtVisualCell(x int, y int, width int) (int, bool) {

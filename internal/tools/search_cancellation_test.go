@@ -53,7 +53,7 @@ func buildLargeSearchTree(t *testing.T, n int) string {
 // application was stuck until the walk finished on its own.
 func TestGrepStopsWalkOnCancelledContext(t *testing.T) {
 	root := buildLargeSearchTree(t, 500)
-	tool := NewGrepTool(root)
+	tool := NewScopedGrepTool(root, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled before the walk starts
@@ -69,7 +69,7 @@ func TestGrepStopsWalkOnCancelledContext(t *testing.T) {
 
 func TestGrepRunWithSandboxStopsWalkOnCancelledContext(t *testing.T) {
 	root := buildLargeSearchTree(t, 500)
-	tool := NewGrepTool(root)
+	tool := NewScopedGrepTool(root, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -88,7 +88,7 @@ func TestGrepRunWithSandboxStopsWalkOnCancelledContext(t *testing.T) {
 // fix only short-circuits on cancellation, it does not change matching.
 func TestGrepStillMatchesWithLiveContext(t *testing.T) {
 	root := buildLargeSearchTree(t, 3)
-	tool := NewGrepTool(root)
+	tool := NewScopedGrepTool(root, nil)
 
 	result := tool.Run(context.Background(), map[string]any{"pattern": "needle"})
 	if result.Status != StatusOK {
@@ -172,7 +172,7 @@ func TestScanGlobStopsMidWalkOnCancelledContext(t *testing.T) {
 
 func TestGlobStopsWalkOnCancelledContext(t *testing.T) {
 	root := buildLargeSearchTree(t, 500)
-	tool := NewGlobTool(root)
+	tool := NewScopedGlobTool(root, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -188,7 +188,7 @@ func TestGlobStopsWalkOnCancelledContext(t *testing.T) {
 
 func TestGlobRunWithSandboxStopsWalkOnCancelledContext(t *testing.T) {
 	root := buildLargeSearchTree(t, 500)
-	tool := NewGlobTool(root)
+	tool := NewScopedGlobTool(root, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -205,7 +205,7 @@ func TestGlobRunWithSandboxStopsWalkOnCancelledContext(t *testing.T) {
 
 func TestGlobStillMatchesWithLiveContext(t *testing.T) {
 	root := buildLargeSearchTree(t, 3)
-	tool := NewGlobTool(root)
+	tool := NewScopedGlobTool(root, nil)
 
 	result := tool.Run(context.Background(), map[string]any{"pattern": "**/*.txt"})
 	if result.Status != StatusOK {

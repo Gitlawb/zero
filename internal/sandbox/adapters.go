@@ -7,6 +7,7 @@ import (
 type BackendOptions struct {
 	GOOS             string
 	LookupExecutable func(string) (string, error)
+	DetectWSL        func() WSLInfo
 }
 
 type Backend struct {
@@ -53,6 +54,7 @@ func SelectBackend(options BackendOptions) Backend {
 	return NewSandboxManager(SandboxManagerOptions{
 		GOOS:             options.GOOS,
 		LookupExecutable: options.LookupExecutable,
+		DetectWSL:        options.DetectWSL,
 	}).Backend()
 }
 
@@ -131,6 +133,13 @@ func unavailableBackend(goos string, message string) Backend {
 	}
 }
 
+// BuildPlan renders the plan for introspection (`zero sandbox policy`). It has
+// no command to describe, so the profile is built with no command context: the
+// credential baseline resolves relative token overrides against THIS process's
+// environment and working directory only. Execution goes through
+// BuildCommandPlan instead, which passes the command's own dir and env and can
+// therefore produce additional deny-if-exists entries. Callers exporting this
+// plan should say which of the two they are showing.
 func (backend Backend) BuildPlan(workspaceRoot string, policy Policy) BackendPlan {
 	effectivePolicy := policy
 	if effectivePolicy.Mode == "" {
@@ -225,7 +234,7 @@ func (backend Backend) SandboxEnvMarkers(policy Policy) []string {
 	if policy.Mode == ModeDisabled {
 		return nil
 	}
-	if !(backend.CommandWrapping && backend.Available) && backend.Name != BackendWSL {
+	if (!backend.CommandWrapping || !backend.Available) && backend.Name != BackendWSL {
 		return nil
 	}
 	name := backend.Name

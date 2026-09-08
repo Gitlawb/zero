@@ -23,6 +23,7 @@ func newTerminalSessionTool(options localcontrol.TerminalOptions) Tool {
 	return terminalSessionTool{
 		baseTool: baseTool{
 			name:        "terminal_session",
+			deferred:    true,
 			description: "Launch or control a local virtual terminal session through the local terminal automation helper.",
 			parameters: Schema{
 				Type: "object",

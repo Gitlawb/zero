@@ -155,7 +155,7 @@ func TestAskUserToolRunRejectsMissingQuestions(t *testing.T) {
 
 func TestCoreReadOnlyToolsIncludeAskUser(t *testing.T) {
 	found := false
-	for _, tool := range CoreReadOnlyTools(t.TempDir()) {
+	for _, tool := range CoreReadOnlyToolsScoped(t.TempDir(), nil) {
 		if tool.Name() == "ask_user" {
 			found = true
 			break

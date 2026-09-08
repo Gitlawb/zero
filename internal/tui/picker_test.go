@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -49,6 +50,40 @@ func TestModelPickerDetectsOllamaCloudFromBaseURL(t *testing.T) {
 	}
 	if contains(got, "custom-model") {
 		t.Fatalf("picker should not show custom-openai-compatible fallback when URL is Ollama Cloud: %#v", got)
+	}
+}
+
+func TestModelPickerChatGPTDiscoveryUsesMatchingOAuthAccount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("oauth store: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{
+		AccessToken: "live-token",
+		Account:     "workspace-77",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save OAuth token: %v", err)
+	}
+
+	m := model{userAgent: "zero/test"}
+	options := m.modelPickerDiscoveryOptions(config.ProviderProfile{Name: "codex", CatalogID: "chatgpt"})
+	if options.OAuthResolver == nil || options.CodexAccountResolver == nil {
+		t.Fatal("ChatGPT model discovery must carry both bearer and account resolvers")
+	}
+	header, bearer, ok, err := options.OAuthResolver(context.Background(), false)
+	if err != nil || !ok || header != "Authorization" || bearer != "Bearer live-token" {
+		t.Fatalf("discovery bearer = (%q, %q, %v, %v)", header, bearer, ok, err)
+	}
+	account, ok, err := options.CodexAccountResolver(context.Background())
+	if err != nil || !ok || account != "workspace-77" {
+		t.Fatalf("discovery account = (%q, %v, %v)", account, ok, err)
+	}
+	if options.UserAgent != "zero/test" {
+		t.Fatalf("discovery user agent = %q", options.UserAgent)
 	}
 }
 
@@ -486,9 +521,9 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	})
 	m.input.SetValue("/model openai/gpt-4.1")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting a run")
 	}
 	if captured.Model != "openai/gpt-4.1" {
@@ -497,8 +532,8 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	if next.modelName != "openai/gpt-4.1" {
 		t.Fatalf("active model = %q, want raw OpenRouter model ID", next.modelName)
 	}
-	if !transcriptContains(next.transcript, "openai/gpt-4.1 ·") {
-		t.Fatalf("expected model switch status, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "openai/gpt-4.1") {
+		t.Fatalf("model switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -532,6 +567,30 @@ func TestRecentModelPairsForPickerPinsActiveDedupesAndCaps(t *testing.T) {
 	}
 	if len(got) != config.MaxRecentModels {
 		t.Fatalf("len = %d, want config.MaxRecentModels (%d)", len(got), config.MaxRecentModels)
+	}
+}
+
+func TestRecentModelPairsForPickerCanonicalizesChatGPTOpenAIModelAliases(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "chatgpt",
+		ModelName:    "gpt-5.6-sol",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "chatgpt",
+			CatalogID: "chatgpt",
+		},
+		RecentModels: []config.RecentModelEntry{
+			{Provider: "chatgpt", Model: "openai/gpt-5.6-sol"},
+			{Provider: "chatgpt", Model: "gpt-5.6-terra"},
+		},
+	})
+
+	got := m.recentModelPairsForPicker()
+	want := []config.RecentModelEntry{
+		{Provider: "chatgpt", Model: "gpt-5.6-sol"},
+		{Provider: "chatgpt", Model: "gpt-5.6-terra"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recentModelPairsForPicker() = %#v, want %#v", got, want)
 	}
 }
 
@@ -808,9 +867,9 @@ func TestModelCommandAcceptsManualModelForCustomProvider(t *testing.T) {
 	})
 	m.input.SetValue("/model qwen-custom-latest")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting a run")
 	}
 	if captured.Model != "qwen-custom-latest" {
@@ -895,8 +954,8 @@ func TestModelPickerNavigatesAndChoosesAppliesHandler(t *testing.T) {
 	if m.modelName != "claude-haiku-4.5" {
 		t.Fatalf("expected model switched to claude-haiku-4.5 via handler, got %q", m.modelName)
 	}
-	if !transcriptContains(m.transcript, "Model") {
-		t.Fatal("choosing should append the model handler's status text")
+	if !strings.Contains(m.transientNotice.text, "Model:") {
+		t.Fatalf("model picker notice = %q", m.transientNotice.text)
 	}
 }
 
@@ -928,7 +987,7 @@ func TestEffortPickerOpensForSupportedModel(t *testing.T) {
 }
 
 func TestThemeCommandOpensPicker(t *testing.T) {
-	// Bare /theme opens the theme popup (live preview on move, apply on Enter),
+	// Bare /theme opens the theme popup (contained preview on move, apply on Enter),
 	// like /model and /effort. Full preview/commit/cancel behavior is covered in
 	// theme_picker_test.go; here we just pin that the no-arg command opens it.
 	defer applyTheme(themeDark, true)
@@ -1106,6 +1165,42 @@ func TestEffortPickerOpensForModelWithoutEffortControls(t *testing.T) {
 	}
 	if m.picker.title != "select reasoning effort" {
 		t.Fatalf("picker title = %q, want %q", m.picker.title, "select reasoning effort")
+	}
+}
+
+func TestEffortPickerPrefersLiveProviderReasoningLevels(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "future-reasoner"})
+	m.providerProfile = config.ProviderProfile{CatalogID: "test-provider"}
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"test-provider": {{
+			ID:               "future-reasoner",
+			Reasoning:        true,
+			ReasoningEfforts: []string{"low", "high", "xhigh", "max", "ultra", "unknown", "high"},
+		}},
+	}
+
+	got := m.availableReasoningEfforts()
+	want := []modelregistry.ReasoningEffort{
+		modelregistry.ReasoningEffortLow,
+		modelregistry.ReasoningEffortHigh,
+		modelregistry.ReasoningEffortXHigh,
+		modelregistry.ReasoningEffortMax,
+		modelregistry.ReasoningEffortUltra,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reasoning efforts = %#v, want %#v", got, want)
+	}
+}
+
+func TestEffortPickerDoesNotFallbackWhenLiveModelAdvertisesNoSelectableEfforts(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-5.5"})
+	m.providerProfile = config.ProviderProfile{CatalogID: "test-provider"}
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"test-provider": {{ID: "gpt-5.5", ReasoningEfforts: []string{"none"}}},
+	}
+
+	if got := m.availableReasoningEfforts(); len(got) != 0 {
+		t.Fatalf("live model with only none exposed efforts %#v, want none", got)
 	}
 }
 

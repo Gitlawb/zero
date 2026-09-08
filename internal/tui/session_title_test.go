@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -32,7 +30,7 @@ func appendSessionMessage(t *testing.T, store *sessions.Store, id, role, content
 }
 
 // createAutoTitledSession creates a real, resumable session whose Title is the
-// default first-message title (so it is a retitle/auto-title candidate).
+// default first-message title (so it is an auto-title candidate).
 func createAutoTitledSession(t *testing.T, store *sessions.Store, prompt, answer string) sessions.Metadata {
 	t.Helper()
 	session, err := store.Create(sessions.CreateInput{Title: tuiSessionTitle(prompt)})
@@ -179,7 +177,7 @@ func TestAutoTitleGeneratesTitleForActiveSession(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected sessionTitleGeneratedMsg, got %#v", msg)
 	}
-	if result.err != nil || result.backfill {
+	if result.err != nil || !result.applied {
 		t.Fatalf("unexpected auto-title result: %#v", result)
 	}
 	if result.title != "Add Fetch Call To Client" {
@@ -268,82 +266,52 @@ func TestAutoTitleFailureReleasesRetryGate(t *testing.T) {
 	// A successful generation keeps the session gated (one-shot, no re-fire).
 	ok := newModel(context.Background(), Options{})
 	ok.titledSessions = map[string]bool{id: true}
-	ok, _ = ok.handleSessionTitleGenerated(sessionTitleGeneratedMsg{sessionID: id, title: "Real Title"})
+	ok, _ = ok.handleSessionTitleGenerated(sessionTitleGeneratedMsg{sessionID: id, title: "Real Title", applied: true})
 	if !ok.titledSessions[id] {
 		t.Fatal("a successful title generation must keep the session gated")
 	}
 }
 
-func TestRetitleBackfillTitlesOnlyAutoTitledSessions(t *testing.T) {
+func TestManualRenameWinsOverInFlightAutoTitle(t *testing.T) {
 	store := testSessionStore(t)
-	first := createAutoTitledSession(t, store, "build the resume picker", "Working on it.")
-	second := createAutoTitledSession(t, store, "fix the dst bug", "Fixed.")
-
-	// An empty/failed run: user prompt + the no-output guardrail stop. Skipped.
-	empty, err := store.Create(sessions.CreateInput{Title: tuiSessionTitle("do a thing")})
-	if err != nil {
-		t.Fatalf("create empty: %v", err)
-	}
-	appendSessionMessage(t, store, empty.SessionID, "user", "do a thing")
-	appendSessionMessage(t, store, empty.SessionID, "assistant",
-		"Agent stopped after 3 turns with no output (no visible text and no tool calls) to avoid consuming tokens without making progress.")
-
-	// A session that already has a distinct (hand/model) title. Skipped.
-	named, err := store.Create(sessions.CreateInput{Title: "Hand Named Session"})
-	if err != nil {
-		t.Fatalf("create named: %v", err)
-	}
-	appendSessionMessage(t, store, named.SessionID, "user", "something")
-	appendSessionMessage(t, store, named.SessionID, "assistant", "ok")
+	session := createAutoTitledSession(t, store, "build the resume picker", "Working on it.")
 
 	m := newModel(context.Background(), Options{
 		SessionStore: store,
-		Provider:     titleProvider("Generated Backfill Title"),
+		Provider:     titleProvider("Generated Automatic Title"),
 	})
-	m.input.SetValue("/retitle")
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
-	m = updated.(model)
-	if !m.retitleActive {
-		t.Fatal("expected a backfill to be active")
+	m.activeSession = session
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
 	}
-	if m.retitleTotal != 2 {
-		t.Fatalf("retitle total = %d, want 2 (only auto-titled real sessions)", m.retitleTotal)
+	m.sessionEvents = events
+
+	m, cmd := m.maybeAutoTitleActiveSession()
+	if cmd == nil {
+		t.Fatal("expected an automatic title command")
 	}
-	if !transcriptContains(m.transcript, "Generating titles for 2 session") {
-		t.Fatalf("expected a kickoff status row, got %#v", m.transcript)
+	if _, err := store.UpdateTitle(session.SessionID, "Manual Name"); err != nil {
+		t.Fatalf("manual rename: %v", err)
 	}
 
-	// Drain the sequential queue.
-	guard := 0
-	for cmd != nil {
-		guard++
-		if guard > 10 {
-			t.Fatal("retitle queue did not drain")
-		}
-		msg := execCmd(cmd)
-		updated, cmd = m.Update(msg)
-		m = updated.(model)
+	result, ok := execCmd(cmd).(sessionTitleGeneratedMsg)
+	if !ok {
+		t.Fatal("expected a title result")
 	}
-	if m.retitleActive {
-		t.Fatal("backfill should be finished after the queue drains")
+	if result.err != nil || result.applied {
+		t.Fatalf("late automatic title should be skipped, got %#v", result)
 	}
-	if !transcriptContains(m.transcript, "Generated titles for 2 of 2") {
-		t.Fatalf("expected a completion status row, got %#v", m.transcript)
+	got, err := store.Get(session.SessionID)
+	if err != nil || got == nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.Title != "Manual Name" {
+		t.Fatalf("late automatic title overwrote manual name: %q", got.Title)
 	}
 
-	for _, id := range []string{first.SessionID, second.SessionID} {
-		got, err := store.Get(id)
-		if err != nil || got == nil {
-			t.Fatalf("get %s: %v", id, err)
-		}
-		if got.Title != "Generated Backfill Title" {
-			t.Fatalf("session %s title = %q, want generated", id, got.Title)
-		}
-	}
-	if got, _ := store.Get(named.SessionID); got == nil || got.Title != "Hand Named Session" {
-		t.Fatalf("a named session must keep its title, got %#v", got)
-	}
-	if got, _ := store.Get(empty.SessionID); got == nil || got.Title != tuiSessionTitle("do a thing") {
-		t.Fatalf("an empty session must be skipped and keep its title, got %#v", got)
+	next, _ := m.handleSessionTitleGenerated(result)
+	if !next.titledSessions[session.SessionID] {
+		t.Fatal("a stale automatic title result must keep the retry gate set")
 	}
 }

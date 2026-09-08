@@ -98,7 +98,7 @@ func TestFormatCommandCardRedactsTokenLikeText(t *testing.T) {
 					{Key: "api key", Value: "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"},
 				},
 				Lines: []string{
-					"google token AIza1234567890abcdef",
+					"google token AIza1234567890abcdefghijklmnopqrstuvwxyz",
 				},
 				Rows: []commandRow{
 					{Text: "shell used sk-proj-row-secret-value"},
@@ -111,7 +111,7 @@ func TestFormatCommandCardRedactsTokenLikeText(t *testing.T) {
 	for _, secret := range []string{
 		"sk-proj-summary-secret-value",
 		"sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
-		"AIza1234567890abcdef",
+		"AIza1234567890abcdefghijklmnopqrstuvwxyz",
 		"sk-proj-row-secret-value",
 		"sk-proj-action-secret-value",
 	} {
@@ -187,7 +187,7 @@ func TestFormatCommandOutputRedactsTokenLikeText(t *testing.T) {
 			Lines: []string{
 				"bash [allow] - sk-proj-sensitive-token-value approved shell",
 				"anthropic: sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
-				"google: AIza1234567890abcdef",
+				"google: AIza1234567890abcdefghijklmnopqrstuvwxyz",
 			},
 		}},
 	})
@@ -195,7 +195,7 @@ func TestFormatCommandOutputRedactsTokenLikeText(t *testing.T) {
 	for _, secret := range []string{
 		"sk-proj-sensitive-token-value",
 		"sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
-		"AIza1234567890abcdef",
+		"AIza1234567890abcdefghijklmnopqrstuvwxyz",
 	} {
 		if strings.Contains(got, secret) {
 			t.Fatalf("expected token-like text to be redacted, got:\n%s", got)

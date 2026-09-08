@@ -167,11 +167,6 @@ func sequence(mode Mode, message string) string {
 	}
 }
 
-// Enabled reports whether mode will ever emit a notification.
-func Enabled(mode Mode) bool {
-	return mode != "" && mode != ModeOff
-}
-
 // sanitizeMessage drops control bytes (so the message can't break the escape or
 // inject terminal control) and clamps to maxMessageLen runes.
 func sanitizeMessage(s string) string {

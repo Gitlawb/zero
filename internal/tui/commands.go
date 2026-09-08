@@ -27,12 +27,13 @@ const (
 	commandPlan
 	commandSearch
 	commandResume
-	commandRetitle
+	commandRename
 	commandSpec
 	commandInit
 	commandCompact
 	commandRewind
 	commandEffort
+	commandFast
 	commandStyle
 	commandTheme
 	commandTranscript
@@ -50,8 +51,10 @@ const (
 	commandBTW
 	commandSkills
 	commandLoop
+	commandGoal
 	commandVoice
 	commandSTTModel
+	commandPets
 	commandUnknown
 )
 
@@ -106,14 +109,14 @@ var commandDefinitions = []commandDefinition{
 		name:        "/voice",
 		usage:       "/voice",
 		group:       commandGroupRuntime,
-		description: "Toggle voice mode (hold Space to dictate).",
+		description: "Toggle voice mode (" + voiceCaptureUsage + ").",
 		kind:        commandVoice,
 	},
 	{
 		name:        "/plan",
-		usage:       "/plan",
+		usage:       "/plan [status|on|off]",
 		group:       commandGroupSession,
-		description: "Show planning mode status.",
+		description: "Show plan status, or enter/exit read-only planning mode.",
 		kind:        commandPlan,
 	},
 	{
@@ -225,11 +228,11 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandResume,
 	},
 	{
-		name:        "/retitle",
-		usage:       "/retitle",
+		name:        "/rename",
+		usage:       "/rename [title]",
 		group:       commandGroupSession,
-		description: "Generate concise titles for resumable sessions.",
-		kind:        commandRetitle,
+		description: "Rename the current session (no arg opens an editor).",
+		kind:        commandRename,
 	},
 	{
 		name:        "/spec",
@@ -269,10 +272,17 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/effort",
-		usage:       "/effort [list|low|medium|high|auto]",
+		usage:       "/effort [list|level|auto]",
 		group:       commandGroupModel,
 		description: "Show or set reasoning effort for supported models.",
 		kind:        commandEffort,
+	},
+	{
+		name:        "/fast",
+		usage:       "/fast",
+		group:       commandGroupModel,
+		description: "Toggle fast mode for supported ChatGPT subscription models.",
+		kind:        commandFast,
 	},
 	{
 		name:        "/style",
@@ -339,11 +349,26 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandLoop,
 	},
 	{
+		name:        "/goal",
+		usage:       "/goal [--tokens N] <objective> | status | pause | resume | edit | clear",
+		group:       commandGroupSession,
+		description: "Create and pursue one persistent objective for this session.",
+		kind:        commandGoal,
+	},
+	{
 		name:        "/help",
 		usage:       "/help",
 		group:       commandGroupMeta,
 		description: "Show available commands.",
 		kind:        commandHelp,
+	},
+	{
+		name:        "/pets",
+		aliases:     []string{"/pet"},
+		usage:       "/pets [name|off]",
+		group:       commandGroupMeta,
+		description: "Choose, preview, or hide a terminal companion.",
+		kind:        commandPets,
 	},
 	{
 		name:        "/doctor",
@@ -432,32 +457,6 @@ func resolveCommand(name string) (commandDefinition, bool) {
 		}
 	}
 	return commandDefinition{}, false
-}
-
-func listCommandNames() []string {
-	names := make([]string, 0, len(commandDefinitions))
-	for _, command := range commandDefinitions {
-		names = append(names, command.name)
-		names = append(names, command.aliases...)
-	}
-	return names
-}
-
-func formatCommandHelpLines() []string {
-	return formatGroupedCommandHelpLines()
-}
-
-func formatGroupedCommandHelpLines() []string {
-	lines := make([]string, 0, len(commandDefinitions)+len(commandGroupOrder()))
-	for _, group := range commandGroupOrder() {
-		groupLines := commandHelpLinesForGroup(group)
-		if len(groupLines) == 0 {
-			continue
-		}
-		lines = append(lines, string(group)+":")
-		lines = append(lines, groupLines...)
-	}
-	return lines
 }
 
 func formatGroupedCommandHelp() string {

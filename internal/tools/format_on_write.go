@@ -78,14 +78,16 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	if !ok {
 		return writtenContent
 	}
-	if _, err := exec.LookPath(command[0]); err != nil {
+	binaryPath, err := exec.LookPath(command[0])
+	if err != nil {
 		return writtenContent
 	}
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
 	arguments := append(append([]string(nil), command[1:]...), absolutePath)
-	formatter := exec.CommandContext(formatCtx, command[0], arguments...)
+	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
 	formatter.Dir = filepath.Dir(absolutePath)
+	formatter.Stdin = strings.NewReader("")
 	if err := formatter.Run(); err != nil {
 		return writtenContent
 	}

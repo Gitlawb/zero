@@ -43,9 +43,9 @@ func permissionOptions(request agent.PermissionRequest) []permissionOption {
 		case agent.PermissionDecisionAllowForSession:
 			options = append(options, permissionOption{label: "allow for session", hotkey: "s", choice: permissionDecisionAllowForSession})
 		case agent.PermissionDecisionAllowPrefix:
-			options = append(options, permissionOption{label: "allow command prefix for session", hotkey: "p", choice: permissionDecisionAllowPrefix})
+			options = append(options, permissionOption{label: prefixApprovalLabel("allow command prefix for session", request), hotkey: "p", choice: permissionDecisionAllowPrefix})
 		case agent.PermissionDecisionAlwaysAllowPrefix:
-			options = append(options, permissionOption{label: "always allow command prefix", hotkey: "y", choice: permissionDecisionAlwaysAllowPrefix})
+			options = append(options, permissionOption{label: prefixApprovalLabel("always allow command prefix", request), hotkey: "y", choice: permissionDecisionAlwaysAllowPrefix})
 		case agent.PermissionDecisionAlwaysAllow:
 			options = append(options, permissionOption{label: "always", hotkey: "y", choice: permissionDecisionAlwaysAllow})
 		case agent.PermissionDecisionDeny:
@@ -154,4 +154,22 @@ func (m model) cancelPermissionTyping() (tea.Model, tea.Cmd) {
 	m.input.SetValue(m.pendingPermission.savedDraft)
 	m.pendingPermission.savedDraft = ""
 	return m, nil
+}
+
+// prefixApprovalLabel spells out that approving a prefix also takes the command
+// out of the sandbox.
+//
+// Approving a prefix rewrites the call to require_escalated, which resolves to
+// unsandboxed execution, and the engine's escalation prompt is then satisfied by
+// the approval just given for the sandboxed form. The operator was shown only
+// "allow command prefix for session" and got something wider, which is a consent
+// gap rather than a bug in the escalation itself.
+//
+// Only appended when it is true. The backend computes that from the same guards
+// the rewrite uses, so a prompt that says this always means it.
+func prefixApprovalLabel(base string, request agent.PermissionRequest) string {
+	if !request.PrefixApprovalEscalates {
+		return base
+	}
+	return base + " (runs outside the sandbox)"
 }

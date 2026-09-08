@@ -103,6 +103,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		// here rather than in mergeConfig because that helper is shared with the
 		// trusted global-config merge, which must keep honouring the setting.
 		commandConfig.Sandbox.Enabled = nil
+		commandConfig.CrossSessionInbound = ""
 		mergeConfig(&cfg, commandConfig)
 	}
 
@@ -140,6 +141,13 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 			return ResolvedConfig{}, fmt.Errorf("invalid notify.focusMode %q: expected unfocused, always, or focused", focusMode)
 		}
 	}
+	if inbound := strings.TrimSpace(cfg.CrossSessionInbound); inbound != "" {
+		switch inbound {
+		case "accept", "hold", "refuse":
+		default:
+			return ResolvedConfig{}, fmt.Errorf("invalid crossSessionInbound %q: expected accept, hold, or refuse", inbound)
+		}
+	}
 	if err := validateSTTConfig(cfg.STT); err != nil {
 		return ResolvedConfig{}, err
 	}
@@ -154,24 +162,25 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	}
 
 	return ResolvedConfig{
-		ActiveProvider: active.Name,
-		Providers:      providers,
-		Provider:       active,
-		MaxTurns:       cfg.MaxTurns,
-		MCP:            cfg.MCP,
-		Sandbox:        cfg.Sandbox,
-		Notify:         cfg.Notify,
-		Tools:          cfg.Tools,
-		Swarm:          cfg.Swarm,
-		Preferences:    cfg.Preferences,
-		KeyBindings:    cfg.KeyBindings,
-		LocalControl:   cfg.LocalControl,
-		STT:            cfg.STT,
+		ActiveProvider:      active.Name,
+		Providers:           providers,
+		Provider:            active,
+		MaxTurns:            cfg.MaxTurns,
+		MCP:                 cfg.MCP,
+		Sandbox:             cfg.Sandbox,
+		Notify:              cfg.Notify,
+		Tools:               cfg.Tools,
+		Swarm:               cfg.Swarm,
+		Preferences:         cfg.Preferences,
+		KeyBindings:         cfg.KeyBindings,
+		LocalControl:        cfg.LocalControl,
+		STT:                 cfg.STT,
+		CrossSessionInbound: cfg.CrossSessionInbound,
 	}, nil
 }
 
 func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
-	// Seed Zero's built-in default MCP servers (e.g. keyless Firecrawl for free,
+	// Seed Zero's built-in default MCP servers (e.g. keyless Exa for free,
 	// no-setup web search/scrape) BEFORE merging user/project config, so the user
 	// can override any field or disable a default by writing over it.
 	cfg := FileConfig{MCP: MCPConfig{Servers: DefaultMCPServers()}}
@@ -185,6 +194,10 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 		// server the user disabled (a user-level disable is sticky, but the user
 		// scope itself may lift it).
 		mergeMCPConfig(&cfg.MCP, fileConfig.MCP, true)
+		// Reconcile config written against a default Zero has since retired,
+		// here while the user layer is the only one merged — so a carried-over
+		// disable counts as a user-level decision the project layer cannot lift.
+		migrateRetiredDefaultMCPServers(&cfg.MCP)
 	}
 	// Drop the project layer when the workspace is untrusted, so a cloned repo's
 	// ./.zero/config.json cannot register (and spawn) MCP servers. Fail-closed:
@@ -264,9 +277,15 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if strings.TrimSpace(src.Preferences.Theme) != "" {
 		dst.Preferences.Theme = strings.TrimSpace(src.Preferences.Theme)
 	}
+	if strings.TrimSpace(src.Preferences.Pet) != "" {
+		dst.Preferences.Pet = strings.TrimSpace(src.Preferences.Pet)
+	}
 	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 	mergeSTTConfig(&dst.STT, src.STT)
+	if inbound := strings.TrimSpace(src.CrossSessionInbound); inbound != "" {
+		dst.CrossSessionInbound = inbound
+	}
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
@@ -324,6 +343,9 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	}
 	if src.Swarm.MaxTeamSize != 0 {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
+	}
+	if inbound := strings.TrimSpace(src.CrossSessionInbound); inboundPolicyRank(inbound) > inboundPolicyRank(dst.CrossSessionInbound) {
+		dst.CrossSessionInbound = inbound
 	}
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 	// Local control is intentionally user-config/override only. A cloned project
@@ -727,6 +749,9 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	mergeLocalControlConfig(&cfg.LocalControl, overrides.LocalControl)
 	mergeKeyBindings(&cfg.KeyBindings, overrides.KeyBindings)
 	mergeSTTConfig(&cfg.STT, overrides.STT)
+	if inbound := strings.TrimSpace(overrides.CrossSessionInbound); inbound != "" {
+		cfg.CrossSessionInbound = inbound
+	}
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)
 	}
@@ -734,6 +759,19 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 		mergeProvider(cfg, overrides.Provider)
 	}
 	mergeMCPConfig(&cfg.MCP, overrides.MCP, true)
+}
+
+func inboundPolicyRank(policy string) int {
+	switch strings.TrimSpace(policy) {
+	case "refuse":
+		return 3
+	case "hold":
+		return 2
+	case "accept":
+		return 0
+	default:
+		return 1 // permission-mode parity
+	}
 }
 
 func mergeLocalControlConfig(dst *LocalControlConfig, src LocalControlConfig) {

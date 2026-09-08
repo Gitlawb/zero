@@ -8,17 +8,21 @@ import (
 )
 
 type Model struct {
-	ID               string
-	Description      string
-	ContextWindow    int
-	ToolCall         bool
-	Reasoning        bool
-	InputModalities  []string
-	OutputModalities []string
-	InputCost        float64
-	OutputCost       float64
-	Tags             []string
-	Source           string
+	ID                     string
+	Description            string
+	ContextWindow          int
+	ToolCall               bool
+	Reasoning              bool
+	ReasoningEfforts       []string
+	DefaultReasoningEffort string
+	ServiceTiers           []string
+	DefaultServiceTier     string
+	InputModalities        []string
+	OutputModalities       []string
+	InputCost              float64
+	OutputCost             float64
+	Tags                   []string
+	Source                 string
 }
 
 const minimaxModelSource = "https://platform.minimax.io/docs/api-reference/api-overview"
@@ -121,6 +125,14 @@ var curatedModels = map[string][]Model{
 		{ID: "Qwen/Qwen2.5-Coder-32B-Instruct", Description: "coding model"},
 		{ID: "deepseek-ai/DeepSeek-R1", Description: "reasoning model"},
 		{ID: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", Description: "multimodal model"},
+	},
+	"fireworks": {
+		// Serverless-only curated set: ordinary API-key setups hit /inference/v1
+		// and cannot use on-demand deployment IDs.
+		{ID: "accounts/fireworks/models/kimi-k2p7-code", Description: "catalog default"},
+		{ID: "accounts/fireworks/models/deepseek-v4-flash", Description: "fast coding model"},
+		{ID: "accounts/fireworks/models/gpt-oss-120b", Description: "general model"},
+		{ID: "accounts/fireworks/models/deepseek-v4-pro", Description: "reasoning model"},
 	},
 	"dashscope": {
 		{ID: "qwen-plus", Description: "catalog default"},
@@ -262,6 +274,8 @@ func dedupeModels(defaultModel string, models []Model) []Model {
 		}
 		model.InputModalities = append([]string{}, model.InputModalities...)
 		model.OutputModalities = append([]string{}, model.OutputModalities...)
+		model.ReasoningEfforts = append([]string{}, model.ReasoningEfforts...)
+		model.ServiceTiers = append([]string{}, model.ServiceTiers...)
 		model.Tags = append([]string{}, model.Tags...)
 		seen[model.ID] = true
 		result = append(result, model)
