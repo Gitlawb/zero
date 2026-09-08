@@ -114,9 +114,11 @@ export LONGCAT_API_KEY=...
 zero providers setup longcat --set-active
 ```
 
-对于本地模型，运行 Ollama、LM Studio 或 [Atomic Chat](https://atomic.chat) 桌面应用，并确保其本地
-OpenAI 兼容 API 可在 `http://127.0.0.1:1337/v1`（默认）访问，然后使用 `zero setup` 或
-`zero providers detect`。
+对于本地模型，运行 Ollama、LM Studio 或 [Atomic Chat](https://atomic.chat) 桌面应用，
+然后使用 `zero setup` 或 `zero providers detect`。使用 Atomic Chat 时，请先加载模型并启用
+本地 OpenAI 兼容 API（默认地址为 `http://127.0.0.1:1337/v1`），再选择 `atomic-chat-local`。
+检测生成的添加命令会包含已加载的模型 ID；如果未发现可用的 ID，请加载模型后重试。
+对于需要特定 Shell 转义的模型 ID，请使用交互式设置。
 
 ## 日常使用
 

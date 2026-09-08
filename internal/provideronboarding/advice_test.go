@@ -1,6 +1,8 @@
 package provideronboarding
 
 import (
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -64,37 +66,6 @@ func TestSetupCommandForOpenAICustomAndLocalProviders(t *testing.T) {
 			}
 			if tt.notWantArg != "" && strings.Contains(got, tt.notWantArg) {
 				t.Fatalf("SetupCommand() = %q, did not want %q", got, tt.notWantArg)
-			}
-		})
-	}
-}
-
-// A local runtime's model id comes from its /v1/models response, which is not
-// trusted. SetupCommandWithModel must render it so a hostile id cannot execute
-// when the adopt command is pasted into a shell.
-func TestSetupCommandWithModelQuotesShellMetacharacters(t *testing.T) {
-	ollama, err := providercatalog.Require("ollama")
-	if err != nil {
-		t.Fatalf("Require(ollama) returned error: %v", err)
-	}
-	cases := []struct {
-		name  string
-		model string
-	}{
-		{"command substitution", "$(touch pwned)"},
-		{"backticks", "`id`"},
-		{"semicolon chain", "gpt;rm -rf /"},
-		{"whitespace", "my model"},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			got := SetupCommandWithModel(ollama, "local", tt.model, false)
-			wantQuoted := "'" + strings.ReplaceAll(tt.model, "'", `'\''`) + "'"
-			if !strings.Contains(got, wantQuoted) {
-				t.Fatalf("model must be single-quoted; got %q, want it to contain %q", got, wantQuoted)
-			}
-			if strings.Contains(got, `"`+tt.model+`"`) {
-				t.Fatalf("model rendered inside double quotes still expands: %q", got)
 			}
 		})
 	}
@@ -256,6 +227,36 @@ func assertNoSecretLeak(t *testing.T, actions []Action, secrets ...string) {
 			}
 			if strings.Contains(action.Label, secret) || strings.Contains(action.Command, secret) || strings.Contains(action.Detail, secret) {
 				t.Fatalf("action leaked secret %q: %#v", secret, action)
+			}
+		}
+	}
+}
+
+func TestSetupCommandWithModelShellRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell round-trip; portable command boundary is tested on every OS")
+	}
+	for _, id := range []string{"my loaded model", "unsloth/Qwen3-GGUF", "model:latest", "user/model@revision"} {
+		command := SetupCommandWithModel(providercatalog.Descriptor{ID: "atomic-chat-local"}, "Atomic Chat Local", id, true)
+		out, err := exec.Command("sh", "-c", `zero() { printf '%s\n' "$@"; }; `+command).CombinedOutput()
+		want := "providers\nadd\natomic-chat-local\n--name\nAtomic Chat Local\n--model\n" + id + "\n--set-active\n"
+		if err != nil || string(out) != want {
+			t.Fatalf("argument round-trip: command=%q output=%q err=%v", command, out, err)
+		}
+	}
+}
+
+func TestSetupCommandWithModelOmitsUnsafeArguments(t *testing.T) {
+	for _, value := range []string{"x&calc", `a"&calc&"b`, "$(id)", "`id`", "%PATH%", "!PATH!", "a;b", "a|b", "a^b", "a>b", "a\nb", "@args", "a\u201db"} {
+		for _, field := range []string{"model", "name"} {
+			name, model := "local", "loaded/model"
+			if field == "model" {
+				model = value
+			} else {
+				name = value
+			}
+			if got := SetupCommandWithModel(providercatalog.Descriptor{ID: "atomic-chat-local"}, name, model, true); got != "" {
+				t.Fatalf("unsafe %s %q emitted as a shell command: %q", field, value, got)
 			}
 		}
 	}

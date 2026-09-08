@@ -120,8 +120,7 @@ func TestSetupActionPinsProbedModel(t *testing.T) {
 	}
 }
 
-// When the probe returns no ids the command stays on the catalog default rather
-// than inventing a model.
+// With no model IDs, Atomic Chat needs guidance instead of a failing command.
 func TestSetupActionOmitsModelWhenProbeFoundNone(t *testing.T) {
 	runtime := DetectedLocalRuntime{
 		LocalRuntime: LocalRuntime{CatalogID: "atomic-chat-local", Name: "Atomic Chat Local", BaseURL: "http://127.0.0.1:1337/v1", DefaultModel: "local-model"},
@@ -130,26 +129,48 @@ func TestSetupActionOmitsModelWhenProbeFoundNone(t *testing.T) {
 	if got := runtime.AdoptModel(); got != "" {
 		t.Fatalf("AdoptModel() = %q, want empty", got)
 	}
-	if command := runtime.SetupAction().Command; strings.Contains(command, "--model") {
-		t.Fatalf("SetupAction command must omit --model when nothing was probed, got %q", command)
+	action := runtime.SetupAction()
+	if strings.Contains(action.Command, "providers add") {
+		t.Fatalf("atomic-chat-local with no served model must not advertise a bare add command, got %q", action.Command)
 	}
 }
 
-// jatmn's P1: the pinned model id comes from an untrusted /v1/models response,
-// so the adopt command must render it shell-safely. A command-substitution id
-// must be single-quoted, never left inside double quotes where it still runs.
-func TestSetupActionQuotesShellMetacharactersInProbedModel(t *testing.T) {
+func TestSetupActionPreservesModelsWithSpaces(t *testing.T) {
 	runtime := DetectedLocalRuntime{
-		LocalRuntime: LocalRuntime{CatalogID: "atomic-chat-local", Name: "Atomic Chat Local", BaseURL: "http://127.0.0.1:1337/v1", DefaultModel: "local-model"},
-		Reachable:    true,
-		Models:       []string{"$(touch pwned)"},
+		LocalRuntime: LocalRuntime{CatalogID: "atomic-chat-local", Name: "Atomic Chat Local"},
+		Models:       []string{"my loaded model"},
 	}
-	command := runtime.SetupAction().Command
-	if strings.Contains(command, `"$(touch pwned)"`) {
-		t.Fatalf("model rendered inside double quotes still executes on paste: %q", command)
+	if got := runtime.AdoptModel(); got != "my loaded model" {
+		t.Fatalf("AdoptModel() = %q", got)
 	}
-	if !strings.Contains(command, `'$(touch pwned)'`) {
-		t.Fatalf("model must be single-quoted so the shell cannot expand it, got %q", command)
+	if got := runtime.SetupAction().Command; !strings.Contains(got, `--model "my loaded model"`) {
+		t.Fatalf("model with spaces not preserved: %q", got)
+	}
+}
+
+func TestSetupActionOmitsUnsafeCommands(t *testing.T) {
+	for _, id := range []string{"$(touch pwned)", "`id`", "x&calc", "a \" & calc & \"b", "a;b", "a|b", "a'b", "a>b", "%PATH%", "!PATH!", "@args", "line\ncommand", "a\u201db"} {
+		t.Run(id, func(t *testing.T) {
+			runtime := DetectedLocalRuntime{LocalRuntime: LocalRuntime{CatalogID: "atomic-chat-local", Name: "Atomic Chat Local"}, Models: []string{id, "safe-model"}}
+			if runtime.AdoptModel() != id {
+				t.Fatal("discovered model must not be silently changed")
+			}
+			action := runtime.SetupAction()
+			if action.Command != "" || !strings.Contains(action.Detail, "zero setup") {
+				t.Fatalf("unsafe command must be replaced with interactive guidance: %#v", action)
+			}
+		})
+	}
+}
+
+func TestSetupActionRejectsAtomicPlaceholder(t *testing.T) {
+	runtime := DetectedLocalRuntime{LocalRuntime: LocalRuntime{CatalogID: "atomic-chat-local", DefaultModel: "local-model"}, Models: []string{"local-model"}}
+	if runtime.AdoptModel() != "" || runtime.SetupAction().Command != "" {
+		t.Fatal("placeholder must not be advertised as adoptable")
+	}
+	runtime.Models = append(runtime.Models, "loaded/model")
+	if runtime.AdoptModel() != "loaded/model" {
+		t.Fatal("real model must be selected instead of placeholder")
 	}
 }
 
@@ -250,4 +271,15 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestAtomicDetectionWithoutUsableModelsOmitsAdoption(t *testing.T) {
+	for _, body := range []string{`{"data":[]}`, `not json`, strings.Repeat(" ", 256*1024) + `{"data":[{"id":"real"}]}`, `{"data":[{"id":"local-model"}]}`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+		detected := DetectLocalRuntimes(context.Background(), LocalDetectOptions{HTTPClient: server.Client(), Candidates: []LocalRuntime{{CatalogID: "atomic-chat-local", BaseURL: server.URL + "/v1", DefaultModel: "local-model"}}})
+		server.Close()
+		if len(detected) != 1 || detected[0].SetupAction().Command != "" || detected[0].SetupAction().Detail == "" {
+			t.Fatalf("model-less detection advertised a failing action: %+v", detected)
+		}
+	}
 }

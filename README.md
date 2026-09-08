@@ -182,9 +182,12 @@ zero providers add custom-openai-compatible \
   --set-active
 ```
 
-For local models, run Ollama, LM Studio, or the [Atomic Chat](https://atomic.chat) desktop app and ensure its local
-OpenAI-compatible API is reachable at `http://127.0.0.1:1337/v1` (default) before using `zero setup` or
-`zero providers detect`.
+For local models, run Ollama, LM Studio, or the [Atomic Chat](https://atomic.chat)
+desktop app, then use `zero setup` or `zero providers detect`. For Atomic Chat,
+load a model and enable its local OpenAI-compatible API (default
+`http://127.0.0.1:1337/v1`). Choose `atomic-chat-local`; detection includes the
+loaded model ID in the add command. If no usable ID is discovered, load a model
+and retry. Model IDs requiring shell-specific quoting use interactive setup.
 
 ## Daily Use
 

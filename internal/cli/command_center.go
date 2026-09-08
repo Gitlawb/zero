@@ -407,7 +407,11 @@ func formatProviderCatalogLine(provider providerCatalogSummary) string {
 		provider.RuntimeSupported,
 	))
 	if provider.RuntimeSupported {
-		lines = append(lines, "    setup: zero providers setup "+displayCLIValue(provider.ID, "unknown")+" --set-active")
+		setup := "    setup: zero providers setup " + displayCLIValue(provider.ID, "unknown") + " --set-active"
+		if provider.ID == "atomic-chat-local" {
+			setup = "    setup: run zero setup to select a loaded model, or zero providers detect to get an add command"
+		}
+		lines = append(lines, setup)
 	} else {
 		lines = append(lines, "    unsupported: "+displayCLIValue(provider.RuntimeUnsupportedReason, "unknown"))
 	}

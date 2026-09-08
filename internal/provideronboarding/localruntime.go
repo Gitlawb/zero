@@ -103,10 +103,26 @@ func DetectLocalRuntimes(ctx context.Context, options LocalDetectOptions) []Dete
 func (runtime DetectedLocalRuntime) SetupAction() Action {
 	descriptor := providercatalog.Descriptor{ID: runtime.CatalogID, RequiresAuth: false}
 	model := runtime.AdoptModel()
-	command := SetupCommandWithModel(descriptor, runtime.Name, model, true)
 	name := strings.TrimSpace(runtime.Name)
 	if name == "" {
 		name = runtime.CatalogID
+	}
+	// Atomic Chat serves whichever model the user loaded, so with no real model
+	// there is nothing safe to pin and a bare adopt command would only persist
+	// the catalog placeholder that fails on first use. Offer guidance instead of
+	// a command that cannot work.
+	if runtime.CatalogID == "atomic-chat-local" && model == "" {
+		return Action{
+			Label:  "Load a model",
+			Detail: "Detected " + name + " on " + runtime.BaseURL + " but no usable model ID was discovered. Load a model in Atomic Chat, then run zero providers detect again.",
+		}
+	}
+	command := SetupCommandWithModel(descriptor, runtime.Name, model, true)
+	if command == "" {
+		return Action{
+			Label:  "Use interactive setup",
+			Detail: "A setup value cannot be safely included in a command for all supported shells. Run zero setup and select or enter the model there.",
+		}
 	}
 	detail := "Detected " + name + " on " + runtime.BaseURL + " — no API key required."
 	if model != "" {
@@ -119,23 +135,25 @@ func (runtime DetectedLocalRuntime) SetupAction() Action {
 	}
 }
 
-// AdoptModel returns the model id the adopt command should pin. The catalog
-// DefaultModel is a placeholder for local runtimes ("local-model"), so prefer it
-// only when the probe actually saw it and otherwise take the first id the server
-// advertised. Returns "" when the probe parsed no ids at all, which leaves the
-// command on the catalog default rather than inventing one.
+// AdoptModel returns an advertised model, preferring the catalog default when
+// served. Atomic Chat's placeholder is never eligible for adoption. Shell syntax
+// is handled when rendering the command, so valid IDs are not silently replaced.
 func (runtime DetectedLocalRuntime) AdoptModel() string {
-	if len(runtime.Models) == 0 {
-		return ""
-	}
-	if want := strings.TrimSpace(runtime.DefaultModel); want != "" {
-		for _, id := range runtime.Models {
-			if strings.TrimSpace(id) == want {
-				return want
-			}
+	want := strings.TrimSpace(runtime.DefaultModel)
+	first := ""
+	for _, raw := range runtime.Models {
+		id := strings.TrimSpace(raw)
+		if id == "" || runtime.CatalogID == "atomic-chat-local" && id == "local-model" {
+			continue
+		}
+		if id == want {
+			return id
+		}
+		if first == "" {
+			first = id
 		}
 	}
-	return strings.TrimSpace(runtime.Models[0])
+	return first
 }
 
 func probeLocalRuntime(ctx context.Context, client *http.Client, timeout time.Duration, candidate LocalRuntime) ([]string, bool) {

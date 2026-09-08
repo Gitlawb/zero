@@ -78,6 +78,13 @@ func TestProviderProfileForAddRequiresModelForAtomicChatLocal(t *testing.T) {
 		t.Fatalf("error should tell the user to pass --model, got %v", err)
 	}
 
+	// The interactive wizards and the no-id detect fallback resolve the model to
+	// the catalog DefaultModel and pass it through as a non-empty value, so the
+	// placeholder itself must be rejected, not just an empty --model.
+	if _, err := providerProfileForAdd(providerAddOptions{catalogID: "atomic-chat-local", model: "local-model"}); err == nil {
+		t.Fatalf("providerProfileForAdd(atomic-chat-local, --model local-model) = nil error, want reject of the catalog placeholder")
+	}
+
 	profile, err := providerProfileForAdd(providerAddOptions{catalogID: "atomic-chat-local", model: "unsloth/gemma-4-E2B-it-GGUF"})
 	if err != nil {
 		t.Fatalf("providerProfileForAdd(atomic-chat-local, --model) returned error: %v", err)

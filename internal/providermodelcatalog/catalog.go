@@ -214,10 +214,8 @@ var curatedModels = map[string][]Model{
 		{ID: "gpt-4.1", Description: "catalog default"},
 		{ID: "gpt-4o-mini", Description: "fast model"},
 	},
-	// atomic-chat-local intentionally has no curated list: the app's model
-	// catalog is a Hugging Face scrape refreshed every 12h, and the served ID is
-	// whichever model the user loaded, so any hardcoded list would go stale.
-	// Model discovery probes the runtime's /v1/models instead.
+	// atomic-chat-local has no curated list: discover the user-loaded model
+	// from the runtime's /v1/models endpoint.
 	"opencode-go-anthropic-compatible": {
 		{ID: "minimax-m3", Description: "MiniMax M3: default"},
 		{ID: "minimax-m2.7", Description: "MiniMax M2.7: coding model"},

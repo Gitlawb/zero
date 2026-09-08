@@ -1,6 +1,7 @@
 package provideronboarding
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -31,7 +32,8 @@ func SetupCommand(descriptor providercatalog.Descriptor, name string, setActive 
 // runtime serves whichever model the user loaded, so its catalog DefaultModel is
 // only a placeholder: an adopt command that omits --model persists that
 // placeholder and the first completion fails with an unknown-model response.
-// An empty model falls back to SetupCommand's behaviour.
+// An empty model falls back to SetupCommand's behaviour. Commands that cannot
+// be represented safely across supported shells are omitted.
 func SetupCommandWithModel(descriptor providercatalog.Descriptor, name string, model string, setActive bool) string {
 	return setupCommand(descriptor, name, model, setActive)
 }
@@ -52,7 +54,7 @@ func setupCommand(descriptor providercatalog.Descriptor, name string, model stri
 	if setActive {
 		parts = append(parts, "--set-active")
 	}
-	return joinCommand(parts)
+	return joinSetupCommand(parts)
 }
 
 func UseCommand(name string) string {
@@ -176,6 +178,46 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// joinSetupCommand only emits arguments supported literally by POSIX shells,
+// cmd.exe, and PowerShell. Shell-specific quoting cannot safely cover all three.
+// Return no command when a value requires it; callers can offer interactive setup.
+func joinSetupCommand(parts []string) string {
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part == "" {
+			continue
+		}
+		arg := setupCommandArg(part)
+		if arg == "" {
+			return ""
+		}
+		quoted = append(quoted, arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
+func setupCommandArg(value string) string {
+	for i, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '-', '_', '.', '/', ':', ' ':
+			continue
+		case '@':
+			// A leading @ starts splatting in PowerShell.
+			if i > 0 {
+				continue
+			}
+		}
+		return ""
+	}
+	if value == "" || strings.Contains(value, " ") {
+		return `"` + value + `"`
+	}
+	return value
+}
+
 func joinCommand(parts []string) string {
 	quoted := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -187,23 +229,8 @@ func joinCommand(parts []string) string {
 }
 
 func commandArg(value string) string {
-	if shellSafeArg(value) {
-		return value
-	}
-	// Wrap anything else in POSIX single quotes so the shell treats it
-	// literally: no parameter, command ($(...)), or backtick expansion. An
-	// embedded single quote is emitted by closing the quote, escaping it, and
-	// reopening ('\''). strconv.Quote would use double quotes, which still
-	// expand $(...) and backticks, so a model id from an untrusted local
-	// /v1/models response could then execute when the adopt command is pasted.
-	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
-}
-
-// shellSafeArg reports whether value can appear unquoted in a POSIX shell
-// command line. Only characters that never trigger shell processing qualify.
-func shellSafeArg(value string) bool {
 	if value == "" {
-		return false
+		return strconv.Quote(value)
 	}
 	for _, r := range value {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
@@ -213,8 +240,8 @@ func shellSafeArg(value string) bool {
 		case '-', '_', '.', '/', ':', '@':
 			continue
 		default:
-			return false
+			return strconv.Quote(value)
 		}
 	}
-	return true
+	return value
 }

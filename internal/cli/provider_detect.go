@@ -146,6 +146,8 @@ func formatProviderDetectReport(report providerDetectReport) string {
 		}
 		if command := strings.TrimSpace(runtime.Action.Command); command != "" {
 			lines = append(lines, "    "+runtime.Action.Label+": "+command)
+		} else if detail := strings.TrimSpace(runtime.Action.Detail); detail != "" {
+			lines = append(lines, "    "+runtime.Action.Label+": "+detail)
 		}
 	}
 
