@@ -204,7 +204,7 @@ func TestReadMinifiedFileNULInClippedLineTail(t *testing.T) {
 
 func TestReadMinifiedFileClippedPageRemainsValidUTF8(t *testing.T) {
 	dir := t.TempDir()
-	line := strings.Repeat("界", readMinifiedMaxWindowBytes/3)
+	line := strings.Repeat("界", readMinifiedMaxLoadBytes/3+1)
 	if err := os.WriteFile(filepath.Join(dir, "unicode.txt"), []byte(line), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +212,9 @@ func TestReadMinifiedFileClippedPageRemainsValidUTF8(t *testing.T) {
 	result := tool.RunWithOptions(context.Background(), map[string]any{"path": "unicode.txt", "limit": 1}, RunOptions{})
 	if result.Status != StatusOK || !utf8.ValidString(result.Output) {
 		t.Fatalf("expected valid UTF-8 output: status=%s valid=%v", result.Status, utf8.ValidString(result.Output))
+	}
+	if result.Meta["partial_load"] != "true" || result.Meta["clamped_lines"] != "1" {
+		t.Fatalf("expected streamed clipped page: meta=%#v output=%q", result.Meta, result.Output)
 	}
 }
 
@@ -548,8 +551,8 @@ type peekErrorReader struct {
 func (reader *peekErrorReader) Read(buffer []byte) (int, error) {
 	if !reader.returned {
 		reader.returned = true
-		copy(buffer, "line\n")
-		return len("line\n"), nil
+		n := copy(buffer, "line\n")
+		return n, nil
 	}
 	return 0, reader.wantErr
 }

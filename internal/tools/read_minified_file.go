@@ -97,7 +97,7 @@ func (tool readMinifiedFileTool) run(ctx context.Context, args map[string]any, o
 	if err != nil {
 		return errorResult("Error reading file " + requestedPath + ": " + err.Error())
 	}
-	file, err := os.Open(absolutePath)
+	file, err := openReadableRegularFile(absolutePath)
 	if err != nil {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error())
 	}
