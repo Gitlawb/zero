@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/proxydial"
 	"github.com/Gitlawb/zero/internal/redaction"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
@@ -313,14 +314,34 @@ func webFetchSafeTransport(roundTripper http.RoundTripper, resolver webFetchReso
 	}
 
 	dialer := &net.Dialer{Timeout: webFetchTimeout, KeepAlive: 30 * time.Second}
-	transport.Proxy = nil
-	transport.DialContext = webFetchSafeDialContext(resolver, dialer)
+	// THE PROXY IS HONOURED, AND THAT IS A DELIBERATE REVERSAL. The original
+	// guarded fetch set Proxy to nil as part of tightening the SSRF guardrails,
+	// and the reasoning was sound as far as it went: a proxied request is dialed
+	// to the proxy, so the dial-time address pin below never sees the target and
+	// the DNS-rebind protection it provides does not apply. What that traded away
+	// was every fetch on a machine that reaches the network only through a
+	// configured proxy, which fails outright rather than degrades (#569).
+	//
+	// The target is still validated before the request is made, lexically and
+	// through the resolver, with the same block list the dialer applies. What a
+	// forward proxy removes is only the re-check at dial time, and that is
+	// inherent to using any forward proxy; a user who sets HTTPS_PROXY has chosen
+	// it. The dialer is handed this same Proxy function, so the one address it
+	// lets past the guard is exactly the one this transport dials as its proxy.
+	transport.Proxy = http.ProxyFromEnvironment
+	transport.DialContext = webFetchSafeDialContext(resolver, dialer, transport.Proxy)
 	transport.DialTLSContext = nil
 	return transport
 }
 
-func webFetchSafeDialContext(resolver webFetchResolver, dialer webFetchDialer) func(context.Context, string, string) (net.Conn, error) {
+func webFetchSafeDialContext(resolver webFetchResolver, dialer webFetchDialer, proxyFor proxydial.ProxyFunc) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network string, address string) (net.Conn, error) {
+		// The proxy is not the target. See webFetchSafeTransport for why the
+		// proxy is honoured at all; here, a dial to exactly the address the
+		// transport's Proxy function names skips the pin, and nothing else does.
+		if proxydial.IsProxyTarget(proxyFor, address) {
+			return dialer.DialContext(ctx, network, address)
+		}
 		pinnedAddress, err := webFetchSafeDialAddress(ctx, resolver, address)
 		if err != nil {
 			return nil, err

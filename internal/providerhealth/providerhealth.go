@@ -19,6 +19,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
+	"github.com/Gitlawb/zero/internal/proxydial"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
@@ -517,7 +518,10 @@ func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHe
 	} else {
 		transport = &http.Transport{}
 	}
-	transport.DialContext = safeDialContext(resolver, allowLoopbackOrPrivate)
+	// The dialer is handed this transport's own Proxy function, so the proxy
+	// exemption matches the dial it exempts by construction. The cloned default
+	// transport already reads HTTPS_PROXY and friends; nothing new is enabled.
+	transport.DialContext = safeDialContext(resolver, allowLoopbackOrPrivate, transport.Proxy)
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
@@ -580,9 +584,19 @@ func sensitiveAuthHeaderNames(profile config.ProviderProfile, kind config.Provid
 // safeDialContext returns a dial function that resolves the target host, refuses
 // the connection if any resolved address is blocked, then dials the validated IP
 // literal so the kernel cannot re-resolve to a different address after the check.
-func safeDialContext(resolver Resolver, allowLoopbackOrPrivate bool) func(context.Context, string, string) (net.Conn, error) {
+func safeDialContext(resolver Resolver, allowLoopbackOrPrivate bool, proxyFor proxydial.ProxyFunc) func(context.Context, string, string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		// THE PROXY IS NOT THE TARGET. With HTTPS_PROXY set to a local forward
+		// proxy, the transport dials the proxy first and tunnels the request
+		// through it, and this dialer used to refuse that dial as a loopback
+		// address: "proxyconnect tcp: ... loopback hosts are blocked" for a
+		// request whose real target had already been validated (#569). The
+		// target validation is unchanged; only a dial to exactly the address
+		// this transport's own Proxy function names is let past the guard.
+		if proxydial.IsProxyTarget(proxyFor, address) {
+			return dialer.DialContext(ctx, network, address)
+		}
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err

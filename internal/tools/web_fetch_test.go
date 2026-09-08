@@ -332,8 +332,15 @@ func TestWebFetchToolConfiguresDialTimeSafetyForDefaultTransport(t *testing.T) {
 	if transport.DialContext == nil {
 		t.Fatal("expected web_fetch transport to install a safe DialContext")
 	}
-	if transport.Proxy != nil {
-		t.Fatal("expected web_fetch transport to disable proxy resolution")
+	// REVERSED ON PURPOSE. The guarded fetch used to pin Proxy to nil as part of
+	// the SSRF hardening, and this assertion held it there. #569 is what that
+	// cost: on a machine that reaches the network only through a configured
+	// forward proxy, every fetch failed outright. The proxy is honoured now, and
+	// the dialer is handed the same function so the one address it lets past
+	// the guard is the one this transport dials as its proxy. The target is
+	// still validated before the request, which the tests below pin.
+	if transport.Proxy == nil {
+		t.Fatal("expected web_fetch transport to honour the environment proxy; a machine behind a forward proxy cannot fetch at all without it (#569)")
 	}
 }
 
@@ -350,6 +357,7 @@ func TestWebFetchSafeDialRejectsPrivateRebindAddress(t *testing.T) {
 			dialCalled = true
 			return nil, errors.New("dial should not run")
 		}),
+		nil,
 	)
 
 	_, err := dial(context.Background(), "tcp", "rebind.example:443")
@@ -376,6 +384,7 @@ func TestWebFetchSafeDialPinsResolvedPublicAddress(t *testing.T) {
 			dialedAddress = address
 			return nil, stop
 		}),
+		nil,
 	)
 
 	_, err := dial(context.Background(), "tcp", "public.example:443")
