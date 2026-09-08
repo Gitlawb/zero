@@ -238,7 +238,7 @@ func promptContextEvents(events []Event) []Event {
 			conversation = append(conversation, event)
 		case EventToolCall:
 			if index > lastSpoken {
-				tail = append(tail, event)
+				tail = append(tail, toolCallIdentity(event))
 			}
 		case EventToolResult:
 			if index > lastSpoken {
@@ -253,6 +253,11 @@ func promptContextEvents(events []Event) []Event {
 	if len(conversation) > maxPromptContextEvents {
 		conversation = conversation[len(conversation)-maxPromptContextEvents:]
 	}
+	// Tail slots exist only when the conversation uses fewer than the 80-event
+	// cap. A session whose conversation already fills it carries no interrupted
+	// tool work, which is what every session did before tool events were admitted
+	// at all, and what the #460 cap is there to hold. Reserving a minimum tail by
+	// trimming conversation further is a product decision, not this change.
 	tailBudget := min(maxPromptContextTailEvents, maxPromptContextEvents-len(conversation))
 	if tailBudget < 0 {
 		tailBudget = 0
@@ -270,6 +275,83 @@ func promptContextEvents(events []Event) []Event {
 	merged = append(merged, tail...)
 	sort.SliceStable(merged, func(i, j int) bool { return merged[i].Sequence < merged[j].Sequence })
 	return merged
+}
+
+// toolCallIdentityKeys are the argument fields that say WHAT a call was about
+// without carrying what it was about to write, run, or search for.
+//
+// Path, directory, URL, name and pattern fields identify the work: the file that
+// was read, the tree that was listed, the expression that was searched. Body
+// fields carry payload: write_file's content, edit_file's old and new strings,
+// apply_patch's hunks, a shell command with whatever credential was on its
+// line. The result side already drops payload through toolResultOutcome, and
+// admitting calls into resume context without the same care put an interrupted
+// write_file's content into the next turn's prompt while its result body did
+// not. Same fact, one door left open.
+//
+// AN ALLOW-LIST, NOT A DENY-LIST, so an argument this file has never heard of is
+// dropped rather than replayed. A new tool with a new body field is then a
+// missing path in a resume prompt, which is visible, instead of a new leak, which
+// is not. The keys cover every alias the tools accept for the identity fields.
+var toolCallIdentityKeys = map[string]bool{
+	// files and directories
+	"path": true, "file": true, "file_path": true, "filepath": true, "filename": true,
+	"dir": true, "directory": true, "cwd": true, "workdir": true,
+	// what a search was for; these are what the interrupted turn was looking at
+	"pattern": true, "glob": true, "query": true, "regex": true, "expression": true,
+	// fetches and named resources
+	"url": true, "name": true,
+	// read windows, so a resumed turn knows which part it already had
+	"offset": true, "limit": true,
+}
+
+// toolCallIdentity keeps a tool call's identity and drops its payload, the
+// symmetric half of toolResultOutcome.
+//
+// The arguments travel as a JSON string inside the payload. They are decoded,
+// reduced to the identity keys, and re-encoded; anything that does not decode as
+// an object is removed outright rather than passed through as text, since text
+// that could not be read is text that cannot be checked.
+func toolCallIdentity(event Event) Event {
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(event.Payload, &decoded); err != nil {
+		event.Payload = json.RawMessage(`{}`)
+		return event
+	}
+	raw, present := decoded["arguments"]
+	if !present {
+		return event
+	}
+	kept := map[string]any{}
+	var argumentsText string
+	if err := json.Unmarshal(raw, &argumentsText); err == nil {
+		var arguments map[string]any
+		if err := json.Unmarshal([]byte(argumentsText), &arguments); err == nil {
+			for key, value := range arguments {
+				if toolCallIdentityKeys[strings.ToLower(key)] {
+					kept[key] = value
+				}
+			}
+		}
+	}
+	if len(kept) == 0 {
+		delete(decoded, "arguments")
+	} else {
+		reduced, err := json.Marshal(kept)
+		if err != nil {
+			delete(decoded, "arguments")
+		} else {
+			quoted, _ := json.Marshal(string(reduced))
+			decoded["arguments"] = quoted
+		}
+	}
+	rebuilt, err := json.Marshal(decoded)
+	if err != nil {
+		event.Payload = json.RawMessage(`{}`)
+		return event
+	}
+	event.Payload = json.RawMessage(rebuilt)
+	return event
 }
 
 // toolResultOutcome strips a tool result down to WHICH tool ran and HOW IT
