@@ -5,12 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -249,6 +251,29 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	}
 	note := &notifier{conn: a.conn, sessionID: sess.id}
 
+	visionCache := make(map[string]bool)
+	var visionCacheMu sync.Mutex
+	supportsVision := func(modelID string) bool {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			return false
+		}
+		visionCacheMu.Lock()
+		defer visionCacheMu.Unlock()
+		if cached, ok := visionCache[modelID]; ok {
+			return cached
+		}
+		supported := a.modelSupportsVision(ctx, resolved.Provider, modelID)
+		visionCache[modelID] = supported
+		return supported
+	}
+	if len(images) > 0 && !supportsVision(resolved.Provider.Model) {
+		msg := fmt.Sprintf("Model %s does not support image input; ignoring %d prompt image(s).", resolved.Provider.Model, len(images))
+		note.text("[zero] " + msg + "\n\n")
+		userText = fmt.Sprintf("[Note: %s]\n\n%s", msg, userText)
+		images = nil
+	}
+
 	opts := agent.Options{
 		Cwd:            sess.cwd,
 		SessionID:      sess.id,
@@ -259,6 +284,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		PermissionMode: sess.currentMode(),
 		MaxTurns:       resolved.MaxTurns,
 		Images:         images,
+		SupportsVision: supportsVision,
 		OnText:         note.text,
 		OnReasoning:    note.thought,
 		OnToolCall:     note.toolCall,
@@ -766,4 +792,33 @@ func (s *acpSession) snapshotHistory() []turnRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]turnRecord(nil), s.history...)
+}
+
+func (a *Agent) modelSupportsVision(ctx context.Context, profile config.ProviderProfile, modelID string) bool {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return false
+	}
+	if a.deps.DiscoverModels != nil {
+		if discovered, err := a.deps.DiscoverModels(ctx, profile); err == nil {
+			for _, dm := range discovered {
+				if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
+					if len(dm.InputModalities) > 0 {
+						for _, mod := range dm.InputModalities {
+							if strings.EqualFold(strings.TrimSpace(mod), "image") {
+								return true
+							}
+						}
+						return false
+					}
+					break
+				}
+			}
+		}
+	}
+	reg, _ := modelregistry.DefaultRegistry()
+	if entry, known := reg.Resolve(trimmed); known {
+		return entry.Supports(modelregistry.ModelCapabilityVision)
+	}
+	return modelregistry.SupportsVision(reg, trimmed)
 }

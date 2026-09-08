@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -571,4 +572,69 @@ func TestRetryResendsAttachments(t *testing.T) {
 	if !strings.Contains(last.Content, "describe both") {
 		t.Fatalf("retried prompt should include the remembered user text, got:\n%s", last.Content)
 	}
+}
+
+func TestModelSupportsVision_ActiveProviderPrecedence(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4.1", ProviderName: "openai"})
+	// gpt-4.1 is in curated catalog as supporting vision.
+	// Override active provider to explicitly report it as text-only.
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"openai": {
+			{
+				ID:              "gpt-4.1",
+				InputModalities: []string{"text"},
+			},
+		},
+		"other-provider": {
+			{
+				ID:              "custom-text-model",
+				InputModalities: []string{"image", "text"},
+			},
+		},
+	}
+	// Active provider explicit modalities must win over catalog.
+	if m.modelSupportsVisionFor("gpt-4.1") {
+		t.Fatal("expected active provider text-only explicit modality to override catalog vision support")
+	}
+
+	// Foreign provider discovery record must NOT decide capabilities for active provider.
+	if m.modelSupportsVisionFor("custom-text-model") {
+		t.Fatal("expected foreign provider discovery record to be ignored for active provider")
+	}
+}
+
+func TestRunAgentWithOptions_DiscoverySnapshotRace(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	m := newModel(ctx, Options{ModelName: "gpt-4.1", ProviderName: "openai"})
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"openai": {{ID: "gpt-4.1", InputModalities: []string{"text"}}},
+	}
+
+	// Schedule the command on the main thread (synchronously snapshotting discovered models)
+	_ = m.runAgentWithOptions(1, ctx, "hello", nil, tuiAgentRunOptions{})
+
+	// Concurrently simulate discovery resolution via applyModelPickerModelsDiscovered
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		localM := m
+		for i := 0; i < 200; i++ {
+			localM = localM.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+				providerID: fmt.Sprintf("provider-%d", i%10),
+				models: []providermodeldiscovery.Model{
+					{ID: "discovered-model", InputModalities: []string{"image"}},
+				},
+			})
+		}
+	}()
+
+	for i := 0; i < 50; i++ {
+		cmd := m.runAgentWithOptions(i+2, ctx, "hello", nil, tuiAgentRunOptions{})
+		if cmd == nil {
+			t.Fatal("expected non-nil cmd")
+		}
+	}
+	<-done
 }
