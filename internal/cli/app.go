@@ -311,28 +311,13 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	// cache file on the machine. The refresh itself is fired in exec/TUI startup.
 	modelregistry.EnableModelsDevOverlay()
 
-	addDirs, args, err := splitLeadingAddDirFlags(args)
+	// --add-dir, --theme and --allow-escalation may be written in any order;
+	// see splitLeadingRootFlags for why they are split together.
+	root, args, err := splitLeadingRootFlags(args)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
-	// --theme <name> selects the TUI palette non-interactively (auto or any registered
-	// theme; populates tui.Options.Theme, which resolveThemeMode prefers over
-	// ZERO_THEME). Re-split --add-dir afterward so it may appear on either side of --theme.
-	theme, args, err := splitLeadingThemeFlag(args)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), 1)
-	}
-	moreDirs, args, err := splitLeadingAddDirFlags(args)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), 1)
-	}
-	addDirs = append(addDirs, moreDirs...)
-	// --allow-escalation opts the interactive session into mid-run model
-	// escalation, mirroring the exec flag of the same name.
-	allowEscalation, args, err := splitLeadingAllowEscalationFlag(args)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), 1)
-	}
+	addDirs, theme, allowEscalation := root.addDirs, root.theme, root.allowEscalation
 
 	if len(args) == 0 {
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme, allowEscalation)
@@ -360,33 +345,24 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// reach unsafe mode in the shell — and the "!" shell escape (which is
 		// gated behind unsafe) was therefore unreachable.
 		//
-		// --add-dir may legally appear on either side of the flag, so re-split
-		// the remaining args and merge with the dirs already collected. Any
-		// trailing non-flag args were ignored on this path before --add-dir
-		// existed and still are — but an --add-dir hidden BEHIND one would be
-		// silently dropped with them, so reject that misplacement loudly.
-		moreDirs, rest, err := splitLeadingAddDirFlags(args[1:])
+		// The root flags may legally appear on either side of this flag, so
+		// split them again from what follows it and merge with what the root
+		// already took. Any trailing non-flag args were ignored on this path
+		// before --add-dir existed and still are, but an --add-dir hidden
+		// BEHIND one would be silently dropped with them, so reject that
+		// misplacement loudly below.
+		more, rest, err := splitLeadingRootFlags(args[1:])
 		if err != nil {
 			return writeAppError(stderr, err.Error(), 1)
 		}
-		// --theme may appear here too; extract it before the stray-arg checks so it is
-		// not rejected as an unexpected positional, then re-split --add-dir after it.
-		skipTheme, rest, err := splitLeadingThemeFlag(rest)
-		if err != nil {
-			return writeAppError(stderr, err.Error(), 1)
+		moreDirs := more.addDirs
+		// A --theme written before the flag was taken at the root and used to be
+		// dropped here; one written after it wins, as the last occurrence does.
+		skipTheme := theme
+		if more.theme != "" {
+			skipTheme = more.theme
 		}
-		evenMoreDirs, rest, err := splitLeadingAddDirFlags(rest)
-		if err != nil {
-			return writeAppError(stderr, err.Error(), 1)
-		}
-		moreDirs = append(moreDirs, evenMoreDirs...)
-		// --allow-escalation may sit on either side of --skip-permissions-unsafe,
-		// like --theme and --add-dir, so re-split it here and OR the two results
-		// rather than letting the side it was written on decide.
-		skipAllowEscalation, rest, err := splitLeadingAllowEscalationFlag(rest)
-		if err != nil {
-			return writeAppError(stderr, err.Error(), 1)
-		}
+		skipAllowEscalation := more.allowEscalation
 		// A misplaced --add-dir anywhere in the remainder is the more specific error,
 		// so check for it across all of rest before rejecting stray args.
 		for _, arg := range rest {
@@ -1455,6 +1431,54 @@ func splitLeadingAddDirFlags(args []string) ([]string, []string, error) {
 		}
 	}
 	return addDirs, args, nil
+}
+
+// rootFlags is what the leading root flags amount to once every one of them
+// has been stripped from the front of the argument list.
+type rootFlags struct {
+	addDirs         []string
+	theme           string
+	allowEscalation bool
+}
+
+// splitLeadingRootFlags strips --add-dir, --theme and --allow-escalation from
+// the front of args in whatever order they were written, stopping at the
+// first token none of them claims.
+//
+// EACH SPLITTER STOPS AT THE FIRST TOKEN IT DOES NOT OWN, so running them once
+// in a fixed sequence made the order the operator wrote them in load-bearing:
+// a flag handled late in the sequence stranded every flag written after it as
+// an unknown command, and `zero --allow-escalation --theme auto` exited with
+// an argument error instead of launching. Running the sequence until it makes
+// no progress accepts every ordering, including a flag repeated on both sides
+// of another.
+func splitLeadingRootFlags(args []string) (rootFlags, []string, error) {
+	var flags rootFlags
+	for {
+		before := len(args)
+		addDirs, rest, err := splitLeadingAddDirFlags(args)
+		if err != nil {
+			return rootFlags{}, nil, err
+		}
+		flags.addDirs = append(flags.addDirs, addDirs...)
+		theme, rest, err := splitLeadingThemeFlag(rest)
+		if err != nil {
+			return rootFlags{}, nil, err
+		}
+		if theme != "" {
+			// The last occurrence wins across passes, as it does within one.
+			flags.theme = theme
+		}
+		allowEscalation, rest, err := splitLeadingAllowEscalationFlag(rest)
+		if err != nil {
+			return rootFlags{}, nil, err
+		}
+		flags.allowEscalation = flags.allowEscalation || allowEscalation
+		args = rest
+		if len(args) == before {
+			return flags, args, nil
+		}
+	}
 }
 
 // splitLeadingAllowEscalationFlag strips a leading --allow-escalation from the
