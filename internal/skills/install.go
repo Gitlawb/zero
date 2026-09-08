@@ -2,13 +2,11 @@ package skills
 
 // Distribution: install a skill from a git URL or a local path into the skills
 // directory, with a content hash recorded in a lockfile (skills.lock) so every
-// install/update is verifiable. Skills are markdown, so install NEVER executes
-// fetched content — it copies and validates the SKILL.md and nothing else.
+// install/update is verifiable. Install copies the skill tree (SKILL.md plus
+// scripts and other assets) but NEVER executes fetched content.
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/fscopy"
 	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
@@ -82,10 +81,11 @@ type SkillInfo struct {
 	HashDrift bool   `json:"hashDrift"`
 }
 
-// Install fetches the skill at options.Source and copies its SKILL.md into
+// Install fetches the skill at options.Source and copies its directory tree into
 // options.Dir/<name>/, validating the frontmatter and recording a content hash
-// in the lockfile. A git URL is fetched via the (injectable) GitRunner into a
-// temp dir; a local path is read in place. Fetched content is never executed.
+// over the same filtered tree in the lockfile. A git URL is fetched via the
+// (injectable) GitRunner into a temp dir; a local path is read in place. Fetched
+// content is never executed.
 func Install(ctx context.Context, options InstallOptions) (InstallResult, error) {
 	source := strings.TrimSpace(options.Source)
 	if source == "" {
@@ -123,26 +123,29 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		return InstallResult{}, fmt.Errorf("skill has no usable name (set a frontmatter `name:` or use a directory name of letters, numbers, dots, dashes, or underscores)")
 	}
 
-	hash := hashContent(data)
+	// Hash the same filtered tree that CopyTree installs (not just SKILL.md), so
+	// a change to a script or nested asset is reflected in the lock hash.
+	hash, err := fscopy.HashTree(skillDir)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("hash skill: %w", err)
+	}
 
 	staged, cleanupStage, err := installtxn.StageDir(dir)
 	if err != nil {
 		return InstallResult{}, err
 	}
 	defer cleanupStage()
-	if err := os.MkdirAll(staged, 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create staged skill dir: %w", err)
+	// Copy the full skill tree (SKILL.md, scripts, assets, subdirectories).
+	// Copy DATA only — never execute anything.
+	if err := fscopy.CopyTree(skillDir, staged); err != nil {
+		return InstallResult{}, fmt.Errorf("stage skill: %w", err)
 	}
-	stagedManifest := filepath.Join(staged, skillFileName)
-	if err := os.WriteFile(stagedManifest, data, 0o644); err != nil {
-		return InstallResult{}, fmt.Errorf("stage SKILL.md: %w", err)
+	stagedHash, err := fscopy.HashTree(staged)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("validate staged skill: %w", err)
 	}
-	stagedData, err := os.ReadFile(stagedManifest)
-	if err != nil || hashContent(stagedData) != hash {
-		if err != nil {
-			return InstallResult{}, fmt.Errorf("validate staged SKILL.md: %w", err)
-		}
-		return InstallResult{}, errors.New("validate staged SKILL.md: copied content hash differs from source")
+	if stagedHash != hash {
+		return InstallResult{}, errors.New("validate staged skill: copied content hash differs from source")
 	}
 
 	unlock, err := installtxn.Lock(dir)
@@ -479,23 +482,25 @@ func validSkillName(name string) bool {
 	return name == filepath.Base(name)
 }
 
-func hashContent(data []byte) string {
-	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-// skillHashDrift reports whether the on-disk SKILL.md no longer matches the
+// skillHashDrift reports whether the on-disk skill tree no longer matches the
 // lockfile hash recorded at install time. Missing lock hashes never count as
-// drift (agents-only / unlocked skills). A locked skill whose SKILL.md cannot
-// be read is treated as drifted — not as a clean match.
+// drift (agents-only / unlocked skills). A locked skill whose tree cannot be
+// hashed is treated as drifted — not as a clean match.
 func skillHashDrift(skill Skill, lockHash string) bool {
 	lockHash = strings.TrimSpace(lockHash)
 	if lockHash == "" {
 		return false
 	}
-	data, err := os.ReadFile(skill.Path)
+	root := strings.TrimSpace(skill.Dir)
+	if root == "" {
+		if strings.TrimSpace(skill.Path) == "" {
+			return true
+		}
+		root = filepath.Dir(skill.Path)
+	}
+	hash, err := fscopy.HashTree(root)
 	if err != nil {
 		return true
 	}
-	return hashContent(data) != lockHash
+	return hash != lockHash
 }

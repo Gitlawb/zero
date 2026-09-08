@@ -525,7 +525,8 @@ func TestLoadFromRootsOptionalRootFailOpen(t *testing.T) {
 
 func TestListFromRootsStripsContent(t *testing.T) {
 	dir := t.TempDir()
-	writeSkill(t, dir, "demo", "---\nname: demo\n---\nbody content\n")
+	writeSkillWithAssets(t, dir, "demo", "---\nname: demo\n---\nbody content\n",
+		map[string]string{"scripts/run.sh": "echo hi\n"})
 	listed, _, err := ListFromRoots([]string{dir})
 	if err != nil {
 		t.Fatalf("ListFromRoots: %v", err)
@@ -535,6 +536,9 @@ func TestListFromRootsStripsContent(t *testing.T) {
 	}
 	if listed[0].Content != "" {
 		t.Fatalf("ListFromRoots must strip Content, got %q", listed[0].Content)
+	}
+	if listed[0].Assets != nil {
+		t.Fatalf("ListFromRoots must strip Assets, got %#v", listed[0].Assets)
 	}
 }
 
@@ -656,6 +660,34 @@ func TestLoadDiscoversAssetsRecursively(t *testing.T) {
 		if strings.EqualFold(a.Name, "SKILL.md") {
 			t.Errorf("SKILL.md must not appear in Assets")
 		}
+	}
+}
+
+func TestLoadSkipsAssetsLargerThanMaxSize(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillWithAssets(t, dir, "s",
+		"---\nname: s\n---\nbody",
+		map[string]string{
+			"big.bin": strings.Repeat("x", maxAssetSize+1),
+			"ok.txt":  "small\n",
+		},
+	)
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	got := map[string]bool{}
+	for _, a := range loaded[0].Assets {
+		got[a.Name] = true
+		if a.Name == "big.bin" {
+			t.Errorf("oversized asset should be skipped, got %+v", a)
+		}
+	}
+	if !got["ok.txt"] {
+		t.Fatalf("small asset should still be discovered, got %v", loaded[0].Assets)
 	}
 }
 
@@ -1012,6 +1044,9 @@ func TestFormatOutputTruncatesOnRuneBoundary(t *testing.T) {
 	// utf8.ValidString catches a split multi-byte rune.
 	if !utf8.ValidString(out) {
 		t.Fatalf("FormatOutput produced invalid UTF-8 after truncation (split rune)")
+	}
+	if len(out) > maxSkillOutputSize {
+		t.Fatalf("output exceeds maxSkillOutputSize: got %d bytes, cap %d", len(out), maxSkillOutputSize)
 	}
 }
 

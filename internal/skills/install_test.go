@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -349,10 +350,97 @@ func TestInstallGitSourceUsesRunnerAndDoesNotExecuteContent(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cloneRoot, "PWNED")); err == nil {
 		t.Fatalf("install must never execute fetched content")
 	}
-	// The fetched executable must not be copied into the skills dir either (skills
-	// are markdown — only SKILL.md is installed, not arbitrary fetched files).
-	if _, err := os.Stat(filepath.Join(destDir, "remote", "install.sh")); err == nil {
-		t.Fatalf("install must not copy fetched executable into the skills dir")
+	// Auxiliary files (scripts included) must be copied so the installed skill
+	// can reference them; they must never be executed during install.
+	scriptPath := filepath.Join(destDir, "remote", "install.sh")
+	info, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatalf("install must copy fetched scripts into the skills dir: %v", err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("install must preserve executable permissions for fetched scripts: mode=%v", info.Mode().Perm())
+	}
+}
+
+func TestInstallCopiesNestedAssetTree(t *testing.T) {
+	destDir := t.TempDir()
+	src := t.TempDir()
+	writeSkillWithAssets(t, src, "pack",
+		"---\nname: pack\ndescription: with assets\n---\nUse scripts/run.sh\n",
+		map[string]string{
+			"scripts/run.sh":      "#!/bin/sh\necho run\n",
+			"templates/hello.txt": "hello\n",
+		},
+	)
+	source := filepath.Join(src, "pack")
+	script := filepath.Join(source, "scripts", "run.sh")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatalf("chmod script: %v", err)
+	}
+
+	result, err := Install(context.Background(), InstallOptions{Source: source, Dir: destDir})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if result.Name != "pack" {
+		t.Fatalf("Name = %q, want pack", result.Name)
+	}
+
+	installedScript := filepath.Join(destDir, "pack", "scripts", "run.sh")
+	got, err := os.ReadFile(installedScript)
+	if err != nil {
+		t.Fatalf("nested script missing after install: %v", err)
+	}
+	if string(got) != "#!/bin/sh\necho run\n" {
+		t.Fatalf("nested script content = %q", got)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(installedScript)
+		if err != nil {
+			t.Fatalf("stat nested script: %v", err)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("nested script lost executable bit: mode=%v", info.Mode().Perm())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "pack", "templates", "hello.txt")); err != nil {
+		t.Fatalf("nested template missing after install: %v", err)
+	}
+
+	loaded, ok := Get(destDir, "pack")
+	if !ok {
+		t.Fatal("installed skill not discoverable")
+	}
+	gotNames := map[string]bool{}
+	for _, asset := range loaded.Assets {
+		gotNames[asset.Name] = true
+	}
+	for _, want := range []string{"scripts/run.sh", "templates/hello.txt"} {
+		if !gotNames[want] {
+			t.Errorf("expected installed asset %q, got %v", want, loaded.Assets)
+		}
+	}
+
+	again, err := Install(context.Background(), InstallOptions{Source: source, Dir: destDir})
+	if err != nil {
+		t.Fatalf("reinstall identical tree: %v", err)
+	}
+	if again.Updated {
+		t.Fatal("identical tree reinstall must not report an update")
+	}
+
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho changed\n"), 0o755); err != nil {
+		t.Fatalf("edit nested script: %v", err)
+	}
+	updated, err := Install(context.Background(), InstallOptions{Source: source, Dir: destDir})
+	if err != nil {
+		t.Fatalf("reinstall after asset edit: %v", err)
+	}
+	if !updated.Updated {
+		t.Fatal("asset-only change must be recorded as an update")
+	}
+	if updated.Hash == result.Hash {
+		t.Fatal("asset-only change must change the lock hash")
 	}
 }
 
@@ -420,6 +508,35 @@ func TestInfoReturnsFrontmatterSourceAndHash(t *testing.T) {
 	}
 	if !info.HashDrift {
 		t.Fatal("expected hash drift after SKILL.md edit")
+	}
+}
+
+func TestInfoReportsHashDriftAfterAssetEdit(t *testing.T) {
+	destDir := t.TempDir()
+	src := t.TempDir()
+	writeSkillWithAssets(t, src, "demo",
+		"---\nname: demo\ndescription: described\n---\nbody text\n",
+		map[string]string{"scripts/run.sh": "echo one\n"},
+	)
+	if _, err := Install(context.Background(), InstallOptions{Source: filepath.Join(src, "demo"), Dir: destDir}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	info, ok := Info(destDir, "demo")
+	if !ok {
+		t.Fatal("Info(demo) not found")
+	}
+	if info.HashDrift {
+		t.Fatal("expected no hash drift immediately after install")
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "demo", "scripts", "run.sh"), []byte("echo two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, ok = Info(destDir, "demo")
+	if !ok {
+		t.Fatal("Info(demo) not found after asset edit")
+	}
+	if !info.HashDrift {
+		t.Fatal("expected hash drift after nested asset edit")
 	}
 }
 

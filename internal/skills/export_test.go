@@ -61,6 +61,7 @@ func List(dir string) ([]Skill, error) {
 	listed := make([]Skill, 0, len(loaded))
 	for _, skill := range loaded {
 		skill.Content = ""
+		skill.Assets = nil
 		listed = append(listed, skill)
 	}
 	return listed, nil
