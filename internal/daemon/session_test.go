@@ -113,7 +113,7 @@ func TestSessionLeaseQueuesWhenPoolFull(t *testing.T) {
 	mgr, _ := NewSessionManager(SessionManagerOptions{Pool: pool})
 
 	sa, _ := mgr.Start(context.Background(), WorkerSpec{Session: "a"})
-	testutil.WaitFor(t, "", func() bool { return sa.State() == SessionRunning })
+	testutil.WaitFor(t, "session reaches running state", func() bool { return sa.State() == SessionRunning })
 
 	sb, _ := mgr.Start(context.Background(), WorkerSpec{Session: "b"})
 	// b must stay queued (its worker not yet launched) while a holds the slot.
