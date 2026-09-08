@@ -369,11 +369,15 @@ func fetchRelease(ctx context.Context, endpoint string) (release Release, err er
 	client := &http.Client{
 		Transport: httpClient.Transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if req.URL.Scheme != "https" {
-				return errors.New("refusing redirect to non-HTTPS URL")
-			}
 			if len(via) >= 10 {
 				return errors.New("stopped after 10 redirects")
+			}
+			if req.URL.Scheme != "https" {
+				for _, prev := range via {
+					if githubAPIToken(prev.URL) != "" {
+						return errors.New("refusing redirect to non-HTTPS URL")
+					}
+				}
 			}
 			return nil
 		},
