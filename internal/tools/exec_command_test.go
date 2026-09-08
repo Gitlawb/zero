@@ -423,6 +423,23 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	if !strings.Contains(served.String(), "served") {
 		t.Fatalf("a still-running session never delivered the line the server printed while serving:\n%s", served.String())
 	}
+
+	// AND A READ DRAINS WHAT IT RETURNS.
+	//
+	// One more poll, because "the line showed up" is satisfied just as well by
+	// output that is re-delivered forever. drain copies and then nils the buffer,
+	// so this read carries nothing; if it stopped clearing, every session in
+	// production would repeat its whole output on every poll while every other
+	// assertion here stayed green. The manager-level test that asserts the same
+	// count is skipped on Windows, so this is the only place guarding it there.
+	again := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"chars":         "",
+		"yield_time_ms": 250,
+	})
+	if strings.Contains(again.Output, "served") {
+		t.Errorf("a second read returned output the first had already delivered, so reads are no longer draining:\n%s", again.Output)
+	}
 }
 
 // waitForListeningAddress polls the exec session until the helper says where it
@@ -894,8 +911,16 @@ func TestExecCommandTTYSessionAcceptsInputOnLinux(t *testing.T) {
 	var transcript strings.Builder
 	transcript.WriteString(result.Output)
 	exitCode := result.Meta["exit_code"]
+	// BOTH THE ECHO AND THE EXIT, because the test asserts both.
+	//
+	// collect can return the drained echo on a yield timer before markDone has
+	// run, so a poll can carry got:hello with no exit_code meta yet. Stopping on
+	// the echo alone would then assert an exit that had not been observed. The
+	// condition deliberately keeps the echo term as well: gating on exit_code
+	// alone would stop polling before a slow shell start delivers the echo, which
+	// is the race this whole change exists to remove.
 	deadline := time.Now().Add(30 * time.Second)
-	for !strings.Contains(transcript.String(), "got:hello") && time.Now().Before(deadline) {
+	for (!strings.Contains(transcript.String(), "got:hello") || exitCode == "") && time.Now().Before(deadline) {
 		poll := writeTool.Run(context.Background(), map[string]any{
 			"session_id":    sessionID,
 			"chars":         "",
