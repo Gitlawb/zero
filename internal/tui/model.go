@@ -661,10 +661,16 @@ type agentUsageMsg struct {
 }
 
 type agentResponseMsg struct {
-	runID         int
-	rows          []transcriptRow
-	usageEvents   []zeroruntime.Usage
+	runID       int
+	rows        []transcriptRow
+	usageEvents []zeroruntime.Usage
+	// usageModelID is the model in force when the run ended. usageModelIDs is
+	// the model in force when each usageEvents entry fired: a mid-run
+	// escalation changes it partway through the run, and billing the events
+	// before the switch to the escalated model would be as wrong as billing
+	// the ones after it to the starting model. Read through usageModelIDAt.
 	usageModelID  string
+	usageModelIDs []string
 	sessionEvents []pendingSessionEvent
 	specReview    *pendingSpecReviewPrompt
 	err           error
@@ -675,6 +681,16 @@ type agentResponseMsg struct {
 	// ttft is time-to-first-token for the turn (0 when nothing streamed — a
 	// tool-only or errored turn). Set only on the success path.
 	ttft time.Duration
+}
+
+// usageModelIDAt is the model in force when usageEvents[index] fired. The
+// per-event record wins; usageModelID is the fallback for a message built
+// without one, which is what every constructor before escalation produced.
+func (msg agentResponseMsg) usageModelIDAt(index int) string {
+	if index < len(msg.usageModelIDs) && msg.usageModelIDs[index] != "" {
+		return msg.usageModelIDs[index]
+	}
+	return msg.usageModelID
 }
 
 type peerMessageMsg struct {
@@ -2550,7 +2566,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 						continue
 					}
 					var usageRows []transcriptRow
-					m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+					m, usageRows = m.recordUsageEvent(msg.usageModelIDAt(index), event)
 					for _, row := range usageRows {
 						m.transcript = appendTranscriptRow(m.transcript, row)
 					}
@@ -2637,7 +2653,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			var usageRows []transcriptRow
-			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+			m, usageRows = m.recordUsageEvent(msg.usageModelIDAt(index), event)
 			for _, row := range usageRows {
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
@@ -5431,6 +5447,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		usageEvents := []zeroruntime.Usage{}
 		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
+		// usageModelIDs records, per usage event, the model in force when it
+		// fired; the escalation switcher reassigns usageModelID mid-run.
+		usageModelIDs := []string{}
 		var specReview *pendingSpecReviewPrompt
 		if m.awaitToolReadiness != nil {
 			m.awaitToolReadiness(runCtx)
@@ -5514,7 +5533,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// why this is built per turn rather than once in the caller.
 		if m.allowEscalation {
 			options.ModelSwitcher, options.ModelSessionSwitcher = providers.EscalationSwitchers(
-				m.providerProfile, m.provider, m.newProvider, nil,
+				m.providerProfile, m.provider, m.newProvider,
+				// Usage attribution follows the switch, as exec reassigns its
+				// currentModel: every usage event after a real escalation is billed
+				// to the escalated model, not the one the run started on.
+				func(modelID string) { usageModelID = modelID },
 			)
 		}
 
@@ -5882,6 +5905,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onUsage := options.OnUsage
 		options.OnUsage = func(event zeroruntime.Usage) {
 			usageEvents = append(usageEvents, event)
+			usageModelIDs = append(usageModelIDs, usageModelID)
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventUsage,
 				Payload: usage.EventUsagePayload(event),
@@ -5899,7 +5923,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventError,
 				Payload: map[string]any{"message": err.Error()},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		if runOptions.specDraft {
 			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
@@ -5909,10 +5933,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 			}
 			flushReasoning(m.now())
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		flushReasoning(m.now())
 		elapsed := m.activeTurnElapsed(started)
@@ -5933,7 +5957,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
 	}
 }
 
