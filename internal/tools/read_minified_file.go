@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/minify"
 )
@@ -24,6 +25,10 @@ const (
 	readMinifiedTruncByteBudget  = "byte_budget"
 	readMinifiedTruncLineClamp   = "line_clamp"
 )
+
+// Small files are loaded completely. Large files are streamed as bounded
+// pages. Reaching a deep offset may scan a sequential prefix, and binary
+// detection covers bytes read or discarded while reaching and emitting it.
 
 type readMinifiedFileTool struct {
 	baseTool
@@ -43,7 +48,7 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 	return readMinifiedFileTool{
 		baseTool: baseTool{
 			name:        "read_minified_file",
-			description: "Read source code in a token-efficient, language-aware form. Use for exploratory understanding of large or unfamiliar source when no exact edit is planned; use read_file directly for likely edit targets. Defaults to at most 2000 source lines; large files are not loaded in full. Deep offsets may scan sequentially to reach the requested line.",
+			description: "Read source code in a token-efficient, language-aware form. Use for exploratory understanding of large or unfamiliar source when no exact edit is planned; use read_file directly for likely edit targets. Do not immediately reread the same file exactly unless a new need for exact text or line numbers appears. Defaults to at most 2000 source lines; large files are not loaded in full. Deep offsets may scan sequentially to reach the requested line.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
@@ -115,7 +120,7 @@ func (tool readMinifiedFileTool) run(ctx context.Context, args map[string]any, o
 		return errorResult("Error reading file " + relativePath + ": " + err.Error())
 	}
 	if loaded.partial {
-		if bytesContainMinifiedNUL(loaded.window.content) {
+		if loaded.window.containsNUL || bytesContainMinifiedNUL(loaded.window.content) {
 			return binaryMinifiedResult(relativePath, "application/octet-stream")
 		}
 	} else if bytesContainMinifiedNUL(loaded.content) {
@@ -140,23 +145,23 @@ func (tool readMinifiedFileTool) run(ctx context.Context, args map[string]any, o
 		windowHitLimit = window.hitLimit
 		lineClamps = window.clampedLines
 		selected = sourceSelection{content: content, totalLines: sourceTotal, emitted: window.emitted}
-		loadNote = fmt.Sprintf("(note: file is %d bytes; streamed %d source line(s) from offset %d without scanning the remainder)", info.Size(), window.emitted, offset)
+		loadNote = fmt.Sprintf("(note: file is %d bytes; streamed %d source line(s) from offset %d; skipped %d source line(s) before the page; the remainder was not scanned)", info.Size(), window.emitted, offset, window.prefixLinesSkipped)
 	} else {
 		content = loaded.content
 		options.FileTracker.Record(absolutePath, content, info)
-		if len(content) == 0 {
-			return Result{Status: StatusOK, Output: fmt.Sprintf("File: %s is empty", relativePath), Meta: map[string]string{"empty": "true", "path": relativePath}}
-		}
 		selected = selectSourceLines(content, offset, limit)
 		if selected.pastEnd {
 			return okResult(fmt.Sprintf("File: %s\n(offset %d is past the end of the file, which has %d lines)", relativePath, offset, selected.totalLines))
+		}
+		if len(content) == 0 {
+			return Result{Status: StatusOK, Output: fmt.Sprintf("File: %s is empty", relativePath), Meta: map[string]string{"empty": "true", "path": relativePath}}
 		}
 		sourceTotal = selected.totalLines
 	}
 
 	selectedSourceLines := selected.emitted
 	truncatedByWindow := windowHitLimit
-	selectionIncomplete := selected.startByte > 0 || len(selected.content) < len(content)
+	selectionIncomplete := selected.startByte > 0 || selected.emitted < selected.totalLines
 	if !partialLoad && sourceTotal > 0 {
 		start := offset
 		if start < 1 {
@@ -222,6 +227,10 @@ func (tool readMinifiedFileTool) run(ctx context.Context, args map[string]any, o
 		} else {
 			meta["source_total_lines"] = strconv.Itoa(sourceTotal)
 		}
+	}
+	if partialLoad && loaded.window.prefixLinesSkipped > 0 {
+		meta["prefix_lines_skipped"] = strconv.Itoa(loaded.window.prefixLinesSkipped)
+		meta["prefix_bytes_scanned"] = strconv.Itoa(loaded.window.prefixBytesScanned)
 	}
 	if !explicitLimit {
 		meta["default_line_limit"] = strconv.Itoa(limit)
@@ -301,11 +310,14 @@ type contextReader struct {
 }
 
 type windowReader struct {
-	ctx          context.Context
-	r            io.Reader
-	remaining    int64
-	limited      bool
-	syntheticEOF bool
+	ctx              context.Context
+	r                io.Reader
+	remaining        int64
+	limited          bool
+	syntheticEOF     bool
+	probeDone        bool
+	moreData         bool
+	probeContainsNUL bool
 }
 
 func (r *windowReader) Read(p []byte) (int, error) {
@@ -314,6 +326,18 @@ func (r *windowReader) Read(p []byte) (int, error) {
 	}
 	if r.limited {
 		if r.remaining == 0 {
+			if !r.probeDone {
+				r.probeDone = true
+				var probe [1]byte
+				n, probeErr := r.r.Read(probe[:])
+				if n > 0 {
+					r.moreData = true
+					r.probeContainsNUL = probe[0] == 0
+				}
+				if probeErr != nil && probeErr != io.EOF {
+					return 0, probeErr
+				}
+			}
 			r.syntheticEOF = true
 			return 0, io.EOF
 		}
@@ -332,6 +356,9 @@ func (r *windowReader) limit(bytes int64) {
 	r.remaining = bytes
 	r.limited = true
 	r.syntheticEOF = false
+	r.probeDone = false
+	r.moreData = false
+	r.probeContainsNUL = false
 }
 
 func (r *contextReader) Read(p []byte) (int, error) {
@@ -342,13 +369,16 @@ func (r *contextReader) Read(p []byte) (int, error) {
 }
 
 type fileLineWindow struct {
-	content      []byte
-	totalLines   int
-	emitted      int
-	pastEnd      bool
-	hitLimit     bool
-	hitByteLimit bool
-	clampedLines int
+	content            []byte
+	totalLines         int
+	emitted            int
+	pastEnd            bool
+	hitLimit           bool
+	hitByteLimit       bool
+	clampedLines       int
+	containsNUL        bool
+	prefixLinesSkipped int
+	prefixBytesScanned int
 }
 
 func readFileLineWindow(ctx context.Context, r io.Reader, offset, limit int) (fileLineWindow, error) {
@@ -364,17 +394,21 @@ func readFileLineWindow(ctx context.Context, r io.Reader, offset, limit int) (fi
 	lineNumber := 0
 	emitted := 0
 	clampedLines := 0
+	prefixLinesSkipped := 0
+	prefixBytesScanned := 0
+	containsNUL := false
 	maxKeep := readMinifiedMaxLineRunes * 4
 	for {
 		if err := ctx.Err(); err != nil {
 			return fileLineWindow{}, err
 		}
 		if lineNumber+1 == offset && !source.limited {
-			// The byte budget applies to the selected page. Bytes buffered while
-			// locating a deep offset are bounded by bufio.Reader's fixed buffer.
+			// The byte budget applies only to the selected page. Reaching a deep
+			// offset still scans a sequential prefix; bufio bounds buffered memory,
+			// not cumulative prefix I/O.
 			source.limit(int64(readMinifiedMaxWindowBytes + 1))
 		}
-		raw, ended, clipped, err := readRawLineLimited(reader, maxKeep)
+		raw, ended, clipped, lineContainsNUL, lineBytesScanned, err := readRawLineLimited(reader, maxKeep)
 		if err == io.EOF {
 			break
 		}
@@ -382,7 +416,10 @@ func readFileLineWindow(ctx context.Context, r io.Reader, offset, limit int) (fi
 			return fileLineWindow{}, err
 		}
 		lineNumber++
+		containsNUL = containsNUL || lineContainsNUL || source.probeContainsNUL
 		if lineNumber < offset {
+			prefixLinesSkipped++
+			prefixBytesScanned += lineBytesScanned
 			continue
 		}
 		body := trimLineBreak(raw, ended)
@@ -392,7 +429,7 @@ func readFileLineWindow(ctx context.Context, r io.Reader, offset, limit int) (fi
 			separatorBytes = 1
 		}
 		if out.Len()+separatorBytes+len(clampedBody) > readMinifiedMaxWindowBytes {
-			return fileLineWindow{content: []byte(out.String()), totalLines: lineNumber, emitted: emitted, hitLimit: true, hitByteLimit: true, clampedLines: clampedLines}, nil
+			return fileLineWindow{content: []byte(out.String()), totalLines: lineNumber, emitted: emitted, hitLimit: true, hitByteLimit: true, clampedLines: clampedLines, containsNUL: containsNUL, prefixLinesSkipped: prefixLinesSkipped, prefixBytesScanned: prefixBytesScanned}, nil
 		}
 		if emitted > 0 {
 			out.WriteByte('\n')
@@ -403,15 +440,15 @@ func readFileLineWindow(ctx context.Context, r io.Reader, offset, limit int) (fi
 		out.WriteString(clampedBody)
 		emitted++
 		if source.syntheticEOF {
-			return fileLineWindow{content: []byte(out.String()), totalLines: lineNumber, emitted: emitted, hitLimit: true, hitByteLimit: true, clampedLines: clampedLines}, nil
+			return fileLineWindow{content: []byte(out.String()), totalLines: lineNumber, emitted: emitted, hitLimit: source.moreData, hitByteLimit: source.moreData, clampedLines: clampedLines, containsNUL: containsNUL, prefixLinesSkipped: prefixLinesSkipped, prefixBytesScanned: prefixBytesScanned}, nil
 		}
 		if emitted >= limit {
 			_, peekErr := reader.Peek(1)
 			if peekErr != nil && peekErr != io.EOF {
 				return fileLineWindow{}, peekErr
 			}
-			if peekErr == nil || source.syntheticEOF {
-				return fileLineWindow{content: []byte(out.String()), totalLines: offset + emitted - 1, emitted: emitted, hitLimit: true, clampedLines: clampedLines}, nil
+			if peekErr == nil || source.moreData {
+				return fileLineWindow{content: []byte(out.String()), totalLines: offset + emitted - 1, emitted: emitted, hitLimit: true, clampedLines: clampedLines, containsNUL: containsNUL, prefixLinesSkipped: prefixLinesSkipped, prefixBytesScanned: prefixBytesScanned}, nil
 			}
 			break
 		}
@@ -424,12 +461,18 @@ func readFileLineWindow(ctx context.Context, r io.Reader, offset, limit int) (fi
 		total = 1
 	}
 	if offset > total {
-		return fileLineWindow{totalLines: total, pastEnd: true}, nil
+		return fileLineWindow{totalLines: total, pastEnd: true, containsNUL: containsNUL, prefixLinesSkipped: prefixLinesSkipped, prefixBytesScanned: prefixBytesScanned}, nil
 	}
-	return fileLineWindow{content: []byte(out.String()), totalLines: total, emitted: emitted, clampedLines: clampedLines}, nil
+	return fileLineWindow{content: []byte(out.String()), totalLines: total, emitted: emitted, clampedLines: clampedLines, containsNUL: containsNUL, prefixLinesSkipped: prefixLinesSkipped, prefixBytesScanned: prefixBytesScanned}, nil
 }
 
 func clampMinifiedRunes(s string, max int) (string, bool) {
+	if valid, trimmed := trimInvalidUTF8Suffix(s); trimmed {
+		s = valid
+		if max <= 0 || len([]rune(s)) <= max {
+			return s, true
+		}
+	}
 	if max <= 0 {
 		return s, false
 	}
@@ -438,6 +481,17 @@ func clampMinifiedRunes(s string, max int) (string, bool) {
 		return s, false
 	}
 	return string(runes[:max]) + "…", true
+}
+
+func trimInvalidUTF8Suffix(s string) (string, bool) {
+	for index := 0; index < len(s); {
+		runeValue, size := utf8.DecodeRuneInString(s[index:])
+		if runeValue == utf8.RuneError && size == 1 {
+			return s[:index], true
+		}
+		index += size
+	}
+	return s, false
 }
 
 type sourceSelection struct {
@@ -449,12 +503,12 @@ type sourceSelection struct {
 }
 
 func selectSourceLines(content []byte, offset, limit int) sourceSelection {
-	if offset <= 1 && limit == 0 {
-		total := sourceLineCount(content)
+	total := sourceLineCount(content)
+	if offset <= 1 && (limit == 0 || limit >= total) {
 		return sourceSelection{content: content, totalLines: total, emitted: total}
 	}
 	lines := strings.Split(string(content), "\n")
-	totalLines := sourceLineCount(content)
+	totalLines := total
 	start := offset - 1
 	if start >= totalLines {
 		return sourceSelection{startByte: len(content), totalLines: totalLines, pastEnd: true}

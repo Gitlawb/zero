@@ -17,12 +17,12 @@ func TestReadRawLineLimitedCRLFAtLimit(t *testing.T) {
 		{name: "content plus CRLF over limit", maxKeep: 11, want: "abcdefghij", clipped: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			line, ended, clipped, err := readRawLineLimited(bufio.NewReader(strings.NewReader("abcdefghij\r\n")), test.maxKeep)
+			line, ended, clipped, containsNUL, _, err := readRawLineLimited(bufio.NewReader(strings.NewReader("abcdefghij\r\n")), test.maxKeep)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(line) != test.want || !ended || clipped != test.clipped {
-				t.Fatalf("line=%q ended=%v clipped=%v", line, ended, clipped)
+			if string(line) != test.want || !ended || clipped != test.clipped || containsNUL {
+				t.Fatalf("line=%q ended=%v clipped=%v containsNUL=%v", line, ended, clipped, containsNUL)
 			}
 		})
 	}

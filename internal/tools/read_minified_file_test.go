@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestReadToolsDescribeExploratoryAndExactUseWithoutRedundantRereads(t *testing.T) {
@@ -168,6 +169,82 @@ func TestReadMinifiedFileCanonicalOffsetPastEnd(t *testing.T) {
 	})
 	if res.Status != StatusOK || !strings.Contains(res.Output, "offset 10 is past the end") {
 		t.Fatalf("expected canonical out-of-range response, got status=%s output=%q", res.Status, res.Output)
+	}
+}
+
+func TestReadMinifiedFileEmptyOffsetPastEnd(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "empty.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := NewScopedReadMinifiedFileTool(dir, nil).Run(context.Background(), map[string]any{
+		"path": "empty.txt", "offset": 2,
+	})
+	if res.Status != StatusOK || !strings.Contains(res.Output, "offset 2 is past the end of the file, which has 1 lines") {
+		t.Fatalf("expected canonical empty-file out-of-range response, got status=%s output=%q", res.Status, res.Output)
+	}
+}
+
+func TestReadMinifiedFileNULInClippedLineTail(t *testing.T) {
+	dir := t.TempDir()
+	line := append(bytes.Repeat([]byte("a"), readMinifiedMaxLineRunes*4), 0)
+	line = append(line, []byte("tail\nsecond\n")...)
+	line = append(line, bytes.Repeat([]byte("padding\n"), 80000)...)
+	if err := os.WriteFile(filepath.Join(dir, "binary.txt"), line, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewScopedReadMinifiedFileTool(dir, nil).(optionsAwareTool)
+	result := tool.RunWithOptions(context.Background(), map[string]any{"path": "binary.txt", "limit": 2}, RunOptions{})
+	if result.Status != StatusOK || result.Meta["binary"] != "true" {
+		t.Fatalf("expected clipped NUL to classify as binary: status=%s meta=%#v output=%q", result.Status, result.Meta, result.Output)
+	}
+}
+
+func TestReadMinifiedFileClippedPageRemainsValidUTF8(t *testing.T) {
+	dir := t.TempDir()
+	line := strings.Repeat("界", readMinifiedMaxWindowBytes/3)
+	if err := os.WriteFile(filepath.Join(dir, "unicode.txt"), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewScopedReadMinifiedFileTool(dir, nil).(optionsAwareTool)
+	result := tool.RunWithOptions(context.Background(), map[string]any{"path": "unicode.txt", "limit": 1}, RunOptions{})
+	if result.Status != StatusOK || !utf8.ValidString(result.Output) {
+		t.Fatalf("expected valid UTF-8 output: status=%s valid=%v", result.Status, utf8.ValidString(result.Output))
+	}
+}
+
+func TestReadMinifiedFileExactEndHasNoContinuation(t *testing.T) {
+	dir := t.TempDir()
+	line := strings.Repeat("x", readMinifiedMaxWindowBytes+1)
+	if err := os.WriteFile(filepath.Join(dir, "exact.txt"), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewScopedReadMinifiedFileTool(dir, nil).(optionsAwareTool)
+	result := tool.RunWithOptions(context.Background(), map[string]any{"path": "exact.txt", "limit": 1}, RunOptions{})
+	if result.Status != StatusOK || !result.Truncated || strings.Contains(result.Output, "more source lines remain") {
+		t.Fatalf("exact-end read should only report line clipping: status=%s truncated=%v output=%q", result.Status, result.Truncated, result.Output)
+	}
+}
+
+func TestReadMinifiedFileDeepOffsetReportsPrefixScan(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "deep.txt"), []byte(strings.Repeat("line\n", 150000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewScopedReadMinifiedFileTool(dir, nil).(optionsAwareTool)
+	result := tool.RunWithOptions(context.Background(), map[string]any{
+		"path": "deep.txt", "offset": 100000, "limit": 1,
+	}, RunOptions{})
+	if result.Status != StatusOK || result.Meta["partial_load"] != "true" {
+		t.Fatalf("expected streamed deep read: status=%s meta=%#v", result.Status, result.Meta)
+	}
+	if result.Meta["prefix_lines_skipped"] != "99999" || result.Meta["prefix_bytes_scanned"] == "" {
+		t.Fatalf("expected prefix scan metadata, got %#v", result.Meta)
+	}
+	if !strings.Contains(result.Output, "skipped 99999 source line(s)") {
+		t.Fatalf("expected deep-offset load note, got %q", result.Output)
 	}
 }
 
