@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // THE PROXY IS NOT THE TARGET. With HTTPS_PROXY pointing at a local forward
@@ -83,5 +84,58 @@ func TestWebFetchSafeDialStillRefusesLoopbackWithoutAProxy(t *testing.T) {
 	}
 	if dialCalled {
 		t.Fatal("loopback was dialed with no proxy configured")
+	}
+}
+
+// THE WIRING, END TO END. The transport's dialer asks that same transport for
+// its proxy, so a fetch routed through a loopback proxy reaches the proxy. The
+// proxy is a live listener that records the first line it receives and hangs
+// up; the request fails after that, and the point is that the CONNECT arrived
+// rather than dying in the dialer as "loopback hosts are blocked". The proxy
+// is set on the transport directly rather than through HTTPS_PROXY because
+// http.ProxyFromEnvironment reads the environment once per process, which
+// would make this test depend on test order.
+func TestWebFetchTransportTunnelsThroughTheConfiguredProxy(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	arrived := make(chan string, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 256)
+		n, _ := conn.Read(buf)
+		arrived <- string(buf[:n])
+	}()
+	proxyURL, err := url.Parse("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A proxied fetch never resolves the target on this side; the CONNECT
+	// carries the hostname and the proxy resolves it.
+	roundTripper := webFetchSafeTransport(nil, webFetchResolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		return nil, errors.New("resolver must not be called for a proxied fetch")
+	}))
+	transport, ok := roundTripper.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", roundTripper)
+	}
+	transport.Proxy = func(*http.Request) (*url.URL, error) { return proxyURL, nil }
+	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+
+	_, err = client.Get("https://public.example/resource")
+	select {
+	case first := <-arrived:
+		if line := strings.SplitN(first, "\r\n", 2)[0]; line != "CONNECT public.example:443 HTTP/1.1" {
+			t.Fatalf("proxy received %q, want a CONNECT for the target", line)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the proxy never received a connection; request error: %v", err)
 	}
 }

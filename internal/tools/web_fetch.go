@@ -326,10 +326,11 @@ func webFetchSafeTransport(roundTripper http.RoundTripper, resolver webFetchReso
 	// through the resolver, with the same block list the dialer applies. What a
 	// forward proxy removes is only the re-check at dial time, and that is
 	// inherent to using any forward proxy; a user who sets HTTPS_PROXY has chosen
-	// it. The dialer is handed this same Proxy function, so the one address it
-	// lets past the guard is exactly the one this transport dials as its proxy.
+	// it. The dialer asks this transport for its Proxy at dial time, so the one
+	// address it lets past the guard is exactly the one this transport dials as
+	// its proxy.
 	transport.Proxy = http.ProxyFromEnvironment
-	transport.DialContext = webFetchSafeDialContext(resolver, dialer, transport.Proxy)
+	transport.DialContext = webFetchSafeDialContext(resolver, dialer, proxydial.TransportProxy(transport))
 	transport.DialTLSContext = nil
 	return transport
 }

@@ -518,10 +518,10 @@ func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHe
 	} else {
 		transport = &http.Transport{}
 	}
-	// The dialer is handed this transport's own Proxy function, so the proxy
+	// The dialer asks this transport for its Proxy at dial time, so the proxy
 	// exemption matches the dial it exempts by construction. The cloned default
 	// transport already reads HTTPS_PROXY and friends; nothing new is enabled.
-	transport.DialContext = safeDialContext(resolver, allowLoopbackOrPrivate, transport.Proxy)
+	transport.DialContext = safeDialContext(resolver, allowLoopbackOrPrivate, proxydial.TransportProxy(transport))
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,

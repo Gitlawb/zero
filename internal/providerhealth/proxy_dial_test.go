@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 // THE PROXY IS NOT THE TARGET, AND THE GUARD HAS TO KNOW THE DIFFERENCE.
@@ -74,20 +76,67 @@ func TestSafeDialContextStillRefusesLoopbackWithoutAProxy(t *testing.T) {
 	}
 }
 
-// The transport hands its own Proxy function to the dialer, so the exemption
-// cannot disagree with the dial it exempts. A cloned default transport carries
-// http.ProxyFromEnvironment, and this pins that the dialer received it rather
-// than nil, which would silently reintroduce #569.
-func TestConnectivityClientHandsItsProxyToTheDialer(t *testing.T) {
+// THE WIRING, END TO END. The client's dialer asks the client's own transport
+// for its proxy, so a request whose transport routes through a loopback proxy
+// reaches that proxy. The proxy here is a live listener that records the first
+// line it receives and hangs up; the request fails after that, and the point
+// is that the CONNECT arrived rather than dying in the dialer as "loopback
+// hosts are blocked". The proxy is set on the transport directly rather than
+// through HTTPS_PROXY because http.ProxyFromEnvironment reads the environment
+// once per process, which would make this test depend on test order.
+func TestConnectivityClientTunnelsThroughTheConfiguredProxy(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	arrived := make(chan string, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 256)
+		n, _ := conn.Read(buf)
+		arrived <- string(buf[:n])
+	}()
+	proxyURL, err := url.Parse("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := newConnectivityClient(3*time.Second, staticResolver{err: errors.New("resolver must not be called")}, nil, false)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", client.Transport)
+	}
+	transport.Proxy = func(*http.Request) (*url.URL, error) { return proxyURL, nil }
+
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.example.com/v1/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Do(request)
+	select {
+	case first := <-arrived:
+		if line := strings.SplitN(first, "\r\n", 2)[0]; line != "CONNECT api.example.com:443 HTTP/1.1" {
+			t.Fatalf("proxy received %q, want a CONNECT for the validated target", line)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the proxy never received a connection; request error: %v", err)
+	}
+}
+
+// With nothing substituted the transport keeps a Proxy function, which is
+// what makes HTTPS_PROXY take effect at all.
+func TestConnectivityClientKeepsAProxyFunction(t *testing.T) {
 	client := newConnectivityClient(0, staticResolver{}, nil, false)
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport = %T, want *http.Transport", client.Transport)
 	}
 	if transport.Proxy == nil {
-		t.Fatal("the connectivity transport has no Proxy function, so the dialer has nothing to exempt and a proxied probe fails as loopback")
-	}
-	if transport.DialContext == nil {
-		t.Fatal("no safe dialer installed")
+		t.Fatal("the connectivity transport has no Proxy function, so HTTPS_PROXY is ignored and a proxied probe fails as loopback")
 	}
 }

@@ -26,15 +26,29 @@ import (
 // ProxyFunc is the shape of http.Transport.Proxy.
 type ProxyFunc func(*http.Request) (*url.URL, error)
 
+// TransportProxy is a ProxyFunc that asks transport for its Proxy at call
+// time rather than copying the field at construction. A dialer installed on
+// the transport then exempts exactly the proxy that transport dials, and a
+// test can substitute transport.Proxy after the client is built and drive a
+// real request through the whole chain without touching the environment.
+func TransportProxy(transport *http.Transport) ProxyFunc {
+	return func(request *http.Request) (*url.URL, error) {
+		if transport == nil || transport.Proxy == nil {
+			return nil, nil
+		}
+		return transport.Proxy(request)
+	}
+}
+
 // IsProxyTarget reports whether address is the host:port that proxyFor would
 // have the transport dial for an https or http request.
 //
-// proxyFor should be the transport's own Proxy field, not a fresh read of the
-// environment. http.ProxyFromEnvironment caches the environment once per
-// process, so a separate read can disagree with what the transport actually
-// uses, and it also makes the check untestable without re-executing the
-// binary. Taking the function the transport uses means the exemption matches
-// the dial it is exempting, by construction.
+// proxyFor should be TransportProxy of the transport the dialer is installed
+// on, not a fresh read of the environment. http.ProxyFromEnvironment caches
+// the environment once per process, so a separate read can disagree with what
+// the transport actually uses, and it also makes the check untestable without
+// re-executing the binary. Asking the transport itself means the exemption
+// matches the dial it is exempting, by construction.
 //
 // THE PORT IS MATCHED EXACTLY, with a missing proxy port taken as the scheme
 // default the transport would dial. Treating a missing port as "any port" would
