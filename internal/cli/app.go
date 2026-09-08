@@ -323,19 +323,23 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme, allowEscalation)
 	}
 
-	// --add-dir grants an extra write root, and only the interactive TUI and
-	// exec dispatch paths consume one. Fail loud everywhere else rather than
-	// silently discarding an explicit grant — including help/version, which
-	// run no agent and could only ignore it. The allowlist names exactly the
-	// cases below that forward addDirs; a future subcommand is rejected by
-	// default until it opts in here.
-	if len(addDirs) > 0 {
-		switch args[0] {
-		case "--skip-permissions-unsafe", "-p", "--prompt", "exec":
-			// Forwarded by the matching case below.
-		default:
-			return writeAppError(stderr, "--add-dir is only supported for the interactive TUI and exec", 1)
-		}
+	// --add-dir grants an extra write root and --allow-escalation opts a run
+	// into mid-run model escalation; only the interactive TUI and exec consume
+	// either. Both are forwarded to exec below and rejected loudly everywhere
+	// else rather than silently discarded, including help/version, which run
+	// no agent and could only ignore them. The allowlist names exactly the
+	// cases below that forward; a future subcommand is rejected by default
+	// until it opts in here.
+	forwardsRootFlags := false
+	switch args[0] {
+	case "--skip-permissions-unsafe", "-p", "--prompt", "exec":
+		forwardsRootFlags = true
+	}
+	if len(addDirs) > 0 && !forwardsRootFlags {
+		return writeAppError(stderr, "--add-dir is only supported for the interactive TUI and exec", 1)
+	}
+	if allowEscalation && !forwardsRootFlags {
+		return writeAppError(stderr, "--allow-escalation is only supported for the interactive TUI and exec", 1)
 	}
 
 	switch args[0] {
@@ -412,16 +416,16 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		if len(args) < 2 {
 			return writePromptRequired(stderr)
 		}
-		// Forward leading --add-dir occurrences so exec's own parser collects them.
+		// Forward the root flags exec consumes so its own parser collects them.
 		// Use the inline --prompt=<value> form so a prompt whose first character is a
 		// dash (e.g. `zero -p "-foo"`) is taken verbatim instead of being mistaken for
 		// a flag and rejected with "--prompt requires a value" (matches the cron path).
-		execArgs := append(addDirFlagArgs(addDirs), "--prompt="+args[1])
+		execArgs := append(rootFlagArgs(addDirs, allowEscalation), "--prompt="+args[1])
 		execArgs = append(execArgs, args[2:]...)
 		return runExec(execArgs, stdout, stderr, deps)
 	case "exec":
-		// Forward leading --add-dir occurrences so exec's own parser collects them.
-		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
+		// Forward the root flags exec consumes so its own parser collects them.
+		return runExec(append(rootFlagArgs(addDirs, allowEscalation), args[1:]...), stdout, stderr, deps)
 	case "completions":
 		return runCompletions(args[1:], stdout, stderr)
 	case "daemon":
@@ -1389,6 +1393,17 @@ func addDirFlagArgs(addDirs []string) []string {
 	flags := make([]string, 0, 2*len(addDirs))
 	for _, dir := range addDirs {
 		flags = append(flags, "--add-dir", dir)
+	}
+	return flags
+}
+
+// rootFlagArgs re-synthesises the root flags exec consumes, in the spelling
+// its own parser accepts, so a flag written before the subcommand reaches
+// the run exactly as one written after it would.
+func rootFlagArgs(addDirs []string, allowEscalation bool) []string {
+	flags := addDirFlagArgs(addDirs)
+	if allowEscalation {
+		flags = append(flags, "--allow-escalation")
 	}
 	return flags
 }
