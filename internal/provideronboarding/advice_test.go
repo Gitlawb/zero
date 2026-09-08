@@ -247,7 +247,7 @@ func TestSetupCommandWithModelShellRoundTrip(t *testing.T) {
 }
 
 func TestSetupCommandWithModelOmitsUnsafeArguments(t *testing.T) {
-	for _, value := range []string{"x&calc", `a"&calc&"b`, "$(id)", "`id`", "%PATH%", "!PATH!", "a;b", "a|b", "a^b", "a>b", "a\nb", "@args", "a\u201db"} {
+	for _, value := range []string{"x&calc", `a"&calc&"b`, "$(id)", "`id`", "%PATH%", "!PATH!", "a;b", "a|b", "a^b", "a>b", "a\nb", "@args", "a\u201db", "-x&calc", `-a"&calc&"b`, "-$(id)", "-%PATH%", "-model=value"} {
 		for _, field := range []string{"model", "name"} {
 			name, model := "local", "loaded/model"
 			if field == "model" {

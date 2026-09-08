@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/provideronboarding"
+	"mvdan.cc/sh/v3/shell"
 )
 
 // Regression for issue #555's follow-up: `zero providers check` must not
@@ -94,5 +96,31 @@ func TestProviderProfileForAddRequiresModelForAtomicChatLocal(t *testing.T) {
 	}
 	if profile.Model == "local-model" {
 		t.Fatalf("profile persisted the catalog placeholder")
+	}
+}
+
+func TestDetectedModelActionSurvivesAddParser(t *testing.T) {
+	for _, catalogID := range []string{"atomic-chat-local", "lmstudio", "ollama"} {
+		for _, modelID := range []string{"-loaded-model", "--set-active", "--model", "-loaded model", "ordinary/model", "model with spaces"} {
+			t.Run(catalogID+"/"+modelID, func(t *testing.T) {
+				detected := provideronboarding.DetectedLocalRuntime{
+					LocalRuntime: provideronboarding.LocalRuntime{CatalogID: catalogID, Name: "Local Runtime", DefaultModel: "local-model"},
+					Models:       []string{modelID},
+				}
+				command := detected.SetupAction().Command
+				args, err := shell.Fields(command, func(string) string { return "" })
+				if err != nil || len(args) < 4 {
+					t.Fatalf("invalid adoption command %q: %v", command, err)
+				}
+				options, help, err := parseProviderAddArgs(args[3:])
+				if err != nil || help {
+					t.Fatalf("generated adoption command rejected by add parser: %q: %v", command, err)
+				}
+				profile, err := providerProfileForAdd(options)
+				if err != nil || profile.Model != modelID || !options.setActive || profile.Name != "Local Runtime" {
+					t.Fatalf("adoption changed model or options: model=%q name=%q active=%v err=%v", profile.Model, profile.Name, options.setActive, err)
+				}
+			})
+		}
 	}
 }
