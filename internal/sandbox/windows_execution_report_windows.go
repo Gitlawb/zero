@@ -75,15 +75,44 @@ func (report *windowsExecutionReport) close(published bool) {
 	report.file = nil
 }
 
+// publishThenResume records the launch and only then lets the child run, and
+// unwinds the record if the child cannot run after all.
+//
+// The report says one thing to the parent: a sandboxed child could execute, and
+// enforcement was in force for it. That is what AppliedEnforcementNotices gates
+// on, and what ResolveChildLaunched treats as authoritative. It is deliberately
+// NOT "CreateProcessAsUser returned a handle": a suspended process that is reaped
+// before ResumeThread has executed no instruction and applied nothing, and a
+// report saying otherwise would disclose a write-jail trade nobody made.
+//
+// Publish before resume stays, because it closes the inherited-pipe race the
+// caller documents. What this adds is the other half: the returned published
+// flag is true only when the child actually resumed, so a resume failure hands
+// the deferred close a false and the report is removed rather than left saying
+// true about a child that never ran.
+func publishThenResume(report *windowsExecutionReport, resume func() error) (published bool, err error) {
+	if err := report.publish(true); err != nil {
+		return false, fmt.Errorf("record sandboxed child launch: %w", err)
+	}
+	if err := resume(); err != nil {
+		return false, fmt.Errorf("resume sandboxed process: %w", err)
+	}
+	return true, nil
+}
+
 // terminateSuspendedWindowsChild takes down a child that was created suspended
 // and never resumed, and waits for it to actually leave.
 //
 // Used on the paths between CreateProcessAsUser and ResumeThread. The process
 // exists and holds the inherited pipes, so it has to be closed out rather than
 // abandoned, but it has executed no instructions: there is no work to undo and
-// nothing for the parent to be told about. That is what makes returning an error
-// here honest, since the report was never published and "no child launched" is
-// exactly what happened.
+// nothing for the parent to be told about.
+//
+// Two of those paths differ in what the report holds. Before publish, nothing was
+// written and "no child launched" is simply what happened. After publish but
+// before resume, a report saying true is on disk about a child that never ran;
+// publishThenResume returns false there so the caller's deferred close removes
+// it. Either way the parent reads absence, and returning an error here is honest.
 func terminateSuspendedWindowsChild(process windows.Handle) {
 	if process == 0 {
 		return

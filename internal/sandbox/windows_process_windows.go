@@ -101,16 +101,20 @@ func runWindowsCommandAsUser(token windows.Token, config WindowsSandboxCommandCo
 	// the absence of a report becomes a fact rather than a race: every failure
 	// between creation and resume terminates a process that never ran, so "no child
 	// launched" is true when the parent reads it.
-	if err := report.publish(true); err != nil {
+	//
+	// AND THE RECORD HAS TO MEAN THE SAME THING ON THE WAY BACK OUT. The report
+	// is published before the resume, so a failure between the two leaves a report
+	// saying a child launched about a process that is being reaped without ever
+	// having run. publishThenResume unwinds the record on that path, which is
+	// what keeps "no child launched" true for the parent on every failure before
+	// the child could execute, not just the ones before the write.
+	published, err = publishThenResume(report, func() error {
+		_, err := windows.ResumeThread(process.Thread)
+		return err
+	})
+	if err != nil {
 		terminateSuspendedWindowsChild(process.Process)
-		return 1, fmt.Errorf("record sandboxed child launch: %w", err)
-	}
-	published = true
-	// AND ONLY NOW MAY IT RUN. Resuming after the fact is durable is what makes a
-	// missing report mean what the parent reads it to mean.
-	if _, err := windows.ResumeThread(process.Thread); err != nil {
-		terminateSuspendedWindowsChild(process.Process)
-		return 1, fmt.Errorf("resume sandboxed process: %w", err)
+		return 1, err
 	}
 	if _, err := windows.WaitForSingleObject(process.Process, windows.INFINITE); err != nil {
 		return 1, fmt.Errorf("wait for sandboxed process: %w", err)
