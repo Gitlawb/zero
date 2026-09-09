@@ -33,8 +33,14 @@ type WindowsACLEntry struct {
 	// down onto the target's EXISTING descendants (not just new ones it
 	// creates going forward), which is why direct-only denies must set this
 	// flag rather than rely on inheritance.
-	NoInherit   bool `json:"noInherit,omitempty"`
-	Materialize bool `json:"materialize,omitempty"`
+	NoInherit bool `json:"noInherit,omitempty"`
+	// Anchor is the write root Path was DERIVED from, for the paths this
+	// package constructs rather than the operator naming. The apply requires
+	// the object it finally opens to still live under it, so a reparse point
+	// planted on the derived tail cannot walk an elevated ACL write out of the
+	// sandbox. Empty for an operator-named path, which has no owned tail.
+	Anchor      string `json:"anchor,omitempty"`
+	Materialize bool   `json:"materialize,omitempty"`
 }
 
 type WindowsACLPlan struct {
@@ -61,6 +67,8 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 				Action:     WindowsACLDenyWrite,
 				Path:       path,
 				Capability: capability.SID,
+				// Derived from this root, so the apply holds it inside it.
+				Anchor: capability.Root,
 			})
 		}
 	}
