@@ -180,7 +180,9 @@ func verifyWindowsACLPathUnderAnchor(anchor, target string) error {
 		}
 		existing = parent
 	}
-	if _, ok := windowsACLTailUnderAnchor(anchor, existing); !ok {
+	tail, ok := windowsACLTailUnderAnchor(anchor, existing)
+	if !ok || tail == "" {
+		// Above or at the write root, which is the operator's to arrange.
 		return nil
 	}
 	handle, err := windowsACLOpenForContainment(existing)
@@ -188,6 +190,20 @@ func verifyWindowsACLPathUnderAnchor(anchor, target string) error {
 		return err
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
+	// THE ANCESTOR ITSELF IS THE REDIRECTION, WHICH IS WHY ITS NAME LOOKS RIGHT.
+	//
+	// Asking only where this object lives answers "exactly where you asked": the
+	// open above does not follow a final-component reparse point, so a junction
+	// at <root>/.git comes back as <root>/.git. os.MkdirAll does follow it, and
+	// creates the missing components on the far side. So what disqualifies this
+	// ancestor is that it IS a reparse point, not where it reports living.
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return fmt.Errorf("inspect windows ACL target %s: %w", existing, err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return windowsACLContainmentError{Anchor: anchor, Target: target, Actual: existing + " (a reparse point)"}
+	}
 	return verifyWindowsACLHandleUnderAnchor(handle, anchor, existing)
 }
 
