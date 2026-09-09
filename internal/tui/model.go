@@ -5906,9 +5906,19 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.OnUsage = func(event zeroruntime.Usage) {
 			usageEvents = append(usageEvents, event)
 			usageModelIDs = append(usageModelIDs, usageModelID)
+			payload := usage.EventUsagePayload(event)
+			// AND ON THE PERSISTED EVENT TOO, not only the in-memory record: the
+			// report reconstructs cost from the payload, falling back to the
+			// session-wide model, so an escalated run would be priced entirely at
+			// the model it started on. Written only under escalation, which is the
+			// only way the model in force can change mid-run, matching what exec
+			// records under the same flag.
+			if m.allowEscalation {
+				payload["model"] = usageModelID
+			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventUsage,
-				Payload: usage.EventUsagePayload(event),
+				Payload: payload,
 			})
 			m.sendAgentUsage(runID, usageModelID, event)
 			if onUsage != nil {
