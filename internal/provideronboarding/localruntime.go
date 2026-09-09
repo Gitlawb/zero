@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 )
 
 // LocalRuntime describes a local, OpenAI-compatible model server that ZERO can
@@ -107,14 +108,12 @@ func (runtime DetectedLocalRuntime) SetupAction() Action {
 	if name == "" {
 		name = runtime.CatalogID
 	}
-	// Atomic Chat serves whichever model the user loaded, so with no real model
-	// there is nothing safe to pin and a bare adopt command would only persist
-	// the catalog placeholder that fails on first use. Offer guidance instead of
-	// a command that cannot work.
-	if runtime.CatalogID == "atomic-chat-local" && model == "" {
+	// Do not fall back to an unserved/default model when all advertised IDs
+	// were rejected. Preserve other runtimes' existing empty-response behavior.
+	if model == "" && (runtime.CatalogID == "atomic-chat-local" || len(runtime.Models) > 0) {
 		return Action{
-			Label:  "Load a model",
-			Detail: "Detected " + name + " on " + runtime.BaseURL + " but no usable model ID was discovered. Load a model in Atomic Chat, then run zero providers detect again.",
+			Label:  "Load a chat model",
+			Detail: "Detected " + name + " on " + runtime.BaseURL + " but no usable chat model ID was discovered. Load a chat model in " + name + ", then run zero providers detect again.",
 		}
 	}
 	command := SetupCommandWithModel(descriptor, runtime.Name, model, true)
@@ -135,23 +134,32 @@ func (runtime DetectedLocalRuntime) SetupAction() Action {
 	}
 }
 
-// AdoptModel returns an advertised model, preferring the catalog default when
-// served. Atomic Chat's placeholder is never eligible for adoption. Shell syntax
-// is handled when rendering the command, so valid IDs are not silently replaced.
+// AdoptModel returns an advertised model eligible for automatic chat adoption,
+// preferring the catalog default when served. Shell syntax is handled when
+// rendering the command, so eligible IDs are not silently replaced for quoting.
 func (runtime DetectedLocalRuntime) AdoptModel() string {
 	want := strings.TrimSpace(runtime.DefaultModel)
 	first := ""
+	defaultAlias := ""
 	for _, raw := range runtime.Models {
 		id := strings.TrimSpace(raw)
-		if id == "" || runtime.CatalogID == "atomic-chat-local" && id == "local-model" {
+		if id == "" || providermodelcatalog.IsKnownNonCodingModelID(id) || runtime.CatalogID == "atomic-chat-local" && id == "local-model" {
 			continue
 		}
 		if id == want {
 			return id
 		}
+		// Ollama's untagged default is equivalent to its :latest spelling.
+		// Retain the advertised ID and prefer an exact match if one follows.
+		if runtime.CatalogID == "ollama" && want != "" && !strings.Contains(want, ":") && id == want+":latest" {
+			defaultAlias = id
+		}
 		if first == "" {
 			first = id
 		}
+	}
+	if defaultAlias != "" {
+		return defaultAlias
 	}
 	return first
 }

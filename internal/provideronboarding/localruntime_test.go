@@ -187,6 +187,43 @@ func TestAdoptModelPrefersCatalogDefaultWhenServed(t *testing.T) {
 	}
 }
 
+func TestAdoptModelChatEligibilityAndOllamaDefault(t *testing.T) {
+	tests := []struct {
+		name, provider, defaultModel string
+		models                       []string
+		want                         string
+	}{
+		{"skip embedding", "atomic-chat-local", "local-model", []string{"text-embedding-local", "qwen3-coder-30b"}, "qwen3-coder-30b"},
+		{"reject nonchat default", "lmstudio", "text-embedding-local", []string{"text-embedding-local", "chat-model"}, "chat-model"},
+		{"latest alias", "ollama", "llama3.1", []string{"qwen3:8b", "llama3.1:latest"}, "llama3.1:latest"},
+		{"exact before alias", "ollama", "llama3.1", []string{"llama3.1:latest", "llama3.1"}, "llama3.1"},
+		{"absent default", "ollama", "llama3.1", []string{"text-embedding-local", "qwen3:8b", "other-chat"}, "qwen3:8b"},
+		{"different tag", "ollama", "llama3.1", []string{"qwen3:8b", "llama3.1:custom"}, "qwen3:8b"},
+		{"explicit default tag", "ollama", "llama3.1:custom", []string{"qwen3:8b", "llama3.1:latest"}, "qwen3:8b"},
+		{"other runtime", "lmstudio", "llama3.1", []string{"qwen3:8b", "llama3.1:latest"}, "qwen3:8b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detected := DetectedLocalRuntime{LocalRuntime: LocalRuntime{CatalogID: tt.provider, DefaultModel: tt.defaultModel}, Models: tt.models}
+			if got := detected.AdoptModel(); got != tt.want {
+				t.Fatalf("AdoptModel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetupActionOmitsKnownNonChatOnlyModels(t *testing.T) {
+	for _, provider := range []string{"atomic-chat-local", "lmstudio", "ollama"} {
+		for _, defaultModel := range []string{"local-model", "text-embedding-local"} {
+			detected := DetectedLocalRuntime{LocalRuntime: LocalRuntime{CatalogID: provider, DefaultModel: defaultModel}, Models: []string{"text-embedding-local", "whisper-1"}}
+			action := detected.SetupAction()
+			if detected.AdoptModel() != "" || action.Command != "" || !strings.Contains(action.Detail, "zero providers detect") {
+				t.Fatalf("%s must offer guidance without adopting non-chat models: %+v", provider, action)
+			}
+		}
+	}
+}
+
 func TestDetectLocalRuntimesSkipsUnreachableRuntime(t *testing.T) {
 	// A client whose transport always fails simulates a closed local port.
 	failing := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
