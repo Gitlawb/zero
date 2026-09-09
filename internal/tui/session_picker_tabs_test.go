@@ -404,6 +404,54 @@ func TestNewSessionPickerSurvivesAnEmptyLocalHistory(t *testing.T) {
 	}
 }
 
+func TestNewSessionPickerStillOffersForeignSessionsWhenLocalHistoryFails(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "work")
+	transcript := filepath.Join(home, ".claude", "projects", "-work", "abc.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, foreignSessionRecord(t, workspace, "abc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := "sk-ant-api03-" + strings.Repeat("A", 24)
+	badParent := filepath.Join(home, secret)
+	if err := os.MkdirAll(badParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	badRoot := filepath.Join(badParent, "sessions")
+	if err := os.WriteFile(badRoot, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agentsessions.InvalidateDiscovery()
+	m := model{
+		sessionStore:     sessions.NewStore(sessions.StoreOptions{RootDir: badRoot}),
+		agentSessionsEnv: agentsessions.Env{Home: home},
+		cwd:              workspace,
+		now:              func() time.Time { return time.Unix(0, 0) },
+	}
+	msg, ok := m.sessionPickerCmd()().(sessionPickerLoadedMsg)
+	if !ok {
+		t.Fatalf("session picker command returned an unexpected message")
+	}
+	if msg.picker == nil || len(msg.picker.items) != 1 || msg.picker.items[0].Value != "claude-code:abc" {
+		t.Fatalf("local store failure hid the foreign session: %+v", msg.picker)
+	}
+	if !strings.Contains(msg.text, "could not read local Zero sessions") {
+		t.Fatalf("local store failure was not surfaced separately: %q", msg.text)
+	}
+	if strings.Contains(msg.text, secret) {
+		t.Fatalf("local store warning leaked an unredacted secret: %q", msg.text)
+	}
+	updated, _ := m.updateModel(msg)
+	next := updated.(model)
+	if next.picker == nil || !transcriptContains(next.transcript, "could not read local Zero sessions") {
+		t.Fatalf("picker and local-store warning were not surfaced together: picker=%+v transcript=%+v", next.picker, next.transcript)
+	}
+}
+
 // A FAILED IMPORT MUST NOT HIDE THE WORK IT FAILED TO COPY. Import creates the
 // local session and appends its transcript separately, so an append that fails
 // leaves a session carrying the import tag and no events. That tag alone used to

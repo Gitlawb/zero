@@ -241,9 +241,16 @@ func (m model) sessionPickerCmd() tea.Cmd {
 		now:              m.now,
 	}
 	return func() tea.Msg {
-		picker := snapshot.newSessionPicker()
+		picker, localErr := snapshot.buildSessionPicker()
+		warning := ""
+		if localErr != nil {
+			warning = "Sessions\nWarning: could not read local Zero sessions; showing external sessions only: " + agentsessions.DisplayField(localErr.Error())
+		}
 		if picker != nil {
-			return sessionPickerLoadedMsg{picker: picker}
+			return sessionPickerLoadedMsg{picker: picker, text: warning}
+		}
+		if warning != "" {
+			return sessionPickerLoadedMsg{text: warning}
 		}
 		return sessionPickerLoadedMsg{text: snapshot.resumeText()}
 	}
@@ -430,8 +437,16 @@ func foreignSessionAge(updatedAt time.Time, now time.Time) string {
 // project/model/size line (Detail). Returns nil when there are no resumable
 // sessions so the caller falls back to the text path.
 func (m model) newSessionPicker() *commandPicker {
+	picker, _ := m.buildSessionPicker()
+	return picker
+}
+
+// buildSessionPicker keeps the local and external sources independent. A local
+// store failure removes only local rows; callers receive the error separately
+// so they can warn without hiding discoverable external work.
+func (m model) buildSessionPicker() (*commandPicker, error) {
 	if m.sessionStore == nil {
-		return nil
+		return nil, nil
 	}
 	// A FAILED READ IS THE ONLY REASON TO GIVE UP HERE. An EMPTY local history is
 	// not: foreign sessions are discovered independently of the store, and the
@@ -442,7 +457,7 @@ func (m model) newSessionPicker() *commandPicker {
 	// already done the thing it was meant to save them.
 	metas, err := m.sessionStore.ListResumable()
 	if err != nil {
-		return nil
+		metas = nil
 	}
 	now := m.now()
 	items := make([]pickerItem, 0, len(metas))
@@ -484,7 +499,7 @@ func (m model) newSessionPicker() *commandPicker {
 			Detail: m.sessionPickerDetail(meta),
 		})
 	}
-	return pickerFromParts(items, m.foreignSessionItems(metas, now))
+	return pickerFromParts(items, m.foreignSessionItems(metas, now)), err
 }
 
 // pickerFromParts assembles the picker from the two independent sources, and
