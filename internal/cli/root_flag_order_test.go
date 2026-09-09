@@ -160,7 +160,7 @@ func TestRootAllowEscalationIsRejectedWhereNothingConsumesIt(t *testing.T) {
 // whether escalate_model was among them.
 func execAdvertisesEscalateModel(t *testing.T, args []string) bool {
 	t.Helper()
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	isolateCLIUserState(t)
 	provider := &toolListingProvider{}
 	var stdout, stderr bytes.Buffer
 	exitCode := runWithDeps(args, &stdout, &stderr, appDeps{

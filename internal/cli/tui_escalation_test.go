@@ -13,6 +13,7 @@ import (
 // returns the options the interactive session would have started with.
 func captureTUIOptions(t *testing.T, args ...string) tui.Options {
 	t.Helper()
+	isolateCLIUserState(t)
 	var captured tui.Options
 	var stdout, stderr bytes.Buffer
 	workspace := t.TempDir()
