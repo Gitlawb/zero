@@ -1403,12 +1403,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case sessionPickerLoadedMsg:
+		if msg.text != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.text})
+		}
 		if msg.picker != nil {
 			m.picker = msg.picker
 			return m, nil
-		}
-		if msg.text != "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.text})
 		}
 		return m, nil
 	case peerMessageMsg:
