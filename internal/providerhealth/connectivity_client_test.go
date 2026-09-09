@@ -67,7 +67,7 @@ type stubConn struct{ net.Conn }
 func (stubConn) Close() error { return nil }
 
 func TestSafeDialContextRejectsResolvedPrivateAddress(t *testing.T) {
-	dial := safeDialContext(staticResolver{addr: netip.MustParseAddr("10.0.0.5")}, false, nil)
+	dial := safeDialContext(staticResolver{addr: netip.MustParseAddr("10.0.0.5")}, false)
 
 	conn, err := dial(context.Background(), "tcp", "api.example.com:443")
 	if conn != nil {
@@ -83,7 +83,7 @@ func TestSafeDialContextRejectsResolvedPrivateAddress(t *testing.T) {
 func TestSafeDialContextRejectsLiteralLinkLocalAddress(t *testing.T) {
 	// The cloud metadata address must be refused even when supplied as a literal,
 	// without consulting the resolver and without opening a socket.
-	dial := safeDialContext(staticResolver{err: errors.New("resolver must not be called")}, false, nil)
+	dial := safeDialContext(staticResolver{err: errors.New("resolver must not be called")}, false)
 
 	conn, err := dial(context.Background(), "tcp", "169.254.169.254:80")
 	if conn != nil {
