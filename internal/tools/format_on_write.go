@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,8 +23,44 @@ import (
 // the conflict guard.
 
 // formatOnWriteTimeout bounds one formatter run; a wedged formatter must never
-// hang a tool call. On timeout the unformatted write stands.
-const formatOnWriteTimeout = 10 * time.Second
+// hang a tool call. On timeout the unformatted write stands, and the caller
+// says so: see formatOnWriteResult.
+//
+// A var rather than a const so a test can shorten it. Nothing outside a test
+// assigns to it, and the deadline path was previously unreachable in a test at
+// any speed, which is part of why it went unnoticed that it reported nothing.
+var formatOnWriteTimeout = 10 * time.Second
+
+// formatOnWriteResult is the content after formatting, plus whether the
+// formatting that was supposed to happen actually did.
+//
+// A TIMEOUT IS NOT THE SAME KIND OF MISS AS THE OTHERS. Every other way this
+// falls back is a standing fact about the environment: the toggle is off, the
+// extension has no formatter, the binary is not installed. Those are silent on
+// purpose, because nothing is wrong and saying so on every write would be
+// noise. A deadline firing is different: formatting was configured, available
+// and expected, and the file was written unformatted anyway, on a machine that
+// was merely slow. Left silent, the caller believes it wrote canonical style
+// and finds out from a CI format check it cannot see, which is the thing this
+// feature exists to prevent.
+type formatOnWriteResult struct {
+	Content string
+	// Formatter is the binary that was run, named in the notice so the user can
+	// tell a slow gofmt from a slow prettier.
+	Formatter string
+	TimedOut  bool
+}
+
+// notice is the line appended to the tool summary when formatting was expected
+// and did not happen, and empty in every other case.
+func (result formatOnWriteResult) notice(relativePath string) string {
+	if !result.TimedOut {
+		return ""
+	}
+	return "\n\nNote: " + relativePath + " was written but not formatted: " +
+		result.Formatter + " did not finish within " + formatOnWriteTimeout.String() +
+		". The file holds exactly what was written, so a project format check may still flag it."
+}
 
 // formatterCommands maps a file extension to the formatter argv; the file path
 // is appended as the final argument. Only in-place, config-respecting,
@@ -69,18 +106,20 @@ func formatOnWriteEnabled() bool {
 // enabled and on PATH) and returns the file's content afterwards. Best-effort
 // throughout: any failure — no formatter, formatter error, timeout, unreadable
 // result — returns writtenContent so the caller's state matches the last write
-// it performed itself.
-func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) string {
+// it performed itself. Only the timeout is reported back, for the reason on
+// formatOnWriteResult.
+func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) formatOnWriteResult {
+	unformatted := formatOnWriteResult{Content: writtenContent}
 	if !formatOnWriteEnabled() {
-		return writtenContent
+		return unformatted
 	}
 	command, ok := formatterCommands[strings.ToLower(filepath.Ext(absolutePath))]
 	if !ok {
-		return writtenContent
+		return unformatted
 	}
 	binaryPath, err := exec.LookPath(command[0])
 	if err != nil {
-		return writtenContent
+		return unformatted
 	}
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
@@ -89,11 +128,20 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	formatter.Dir = filepath.Dir(absolutePath)
 	formatter.Stdin = strings.NewReader("")
 	if err := formatter.Run(); err != nil {
-		return writtenContent
+		// OUR deadline, not the caller's cancellation and not the formatter's own
+		// exit status. A cancelled tool call is already being reported as
+		// cancelled, and a formatter that ran and refused the file usually means
+		// content it could not parse, which the write itself does not promise to
+		// fix. Neither is this notice's business.
+		if errors.Is(formatCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			unformatted.Formatter = command[0]
+			unformatted.TimedOut = true
+		}
+		return unformatted
 	}
 	formatted, err := os.ReadFile(absolutePath)
 	if err != nil {
-		return writtenContent
+		return unformatted
 	}
-	return string(formatted)
+	return formatOnWriteResult{Content: string(formatted), Formatter: command[0]}
 }
