@@ -4,7 +4,6 @@ package sandbox
 
 import (
 	"fmt"
-	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -21,26 +20,20 @@ import (
 // has its DACL rewritten by an Administrator; the milder junction-only case still
 // plants the deterministic secret somewhere the caller then owns.
 //
-// One handle, one resolution. The parent is opened no-follow, the leaf is created
-// relative to that handle so its name can never be resolved again, and both the
-// DACL and the bytes are applied to the handle rather than to a path.
+// One handle, one resolution. The parent chain is built no-follow by the caller
+// and its deepest handle is passed in here, the leaf is created relative to that
+// handle so its name can never be resolved again, and both the DACL and the
+// bytes are applied to the handle rather than to a path.
 //
 // FILE_OVERWRITE_IF, not FILE_CREATE: an existing secret must be replaced, since
 // a stale password makes LogonUser fail in a way that reads as a sandbox bug.
 // FILE_OPEN_REPARSE_POINT means a leaf that IS a reparse point comes back as
 // itself rather than being followed, and the attribute check below then refuses
 // it instead of writing through it.
-func createWindowsSecretFileNoFollow(path string) (windows.Handle, error) {
-	parentPath := filepath.Dir(path)
-	name := filepath.Base(path)
+func createWindowsSecretFileAt(parent windows.Handle, name string) (windows.Handle, error) {
 	if err := validateWindowsACLComponent(name); err != nil {
 		return 0, fmt.Errorf("secret file name: %w", err)
 	}
-	parent, err := openWindowsACLDirectoryNoFollow(parentPath)
-	if err != nil {
-		return 0, fmt.Errorf("open secret directory %s: %w", parentPath, err)
-	}
-	defer func() { _ = windows.CloseHandle(parent) }()
 
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
@@ -72,7 +65,7 @@ func createWindowsSecretFileNoFollow(path string) (windows.Handle, error) {
 		0,
 		0,
 	); err != nil {
-		return 0, fmt.Errorf("create secret file %s: %w", path, err)
+		return 0, fmt.Errorf("create secret file %s: %w", name, err)
 	}
 	if err := rejectWindowsACLReparseHandle(handle, name); err != nil {
 		_ = windows.CloseHandle(handle)

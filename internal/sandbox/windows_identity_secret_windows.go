@@ -135,8 +135,27 @@ func writeWindowsSandboxSecret(path string, password string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	// THE PARENT CHAIN IS PART OF THE RESOLUTION COUNT. os.MkdirAll walks a
+	// pathname, so a junction planted on the way down pointed this elevated
+	// create at a directory of the caller's choosing, and the no-follow open
+	// below then refused a tree this process had already made outside the
+	// sandbox home. The chain is built the same way the ACL targets are: from
+	// the deepest existing ancestor, one component at a time relative to the
+	// handle above it, with a record of what was created so a later failure
+	// unwinds exactly that and nothing else.
+	created, parent, err := makeWindowsACLDirChainNoFollow(filepath.Dir(path))
+	if err != nil {
+		if _, unwindErr := rollbackWindowsACLMaterialization(created); unwindErr != nil {
+			err = errors.Join(err, unwindErr)
+		}
 		return fmt.Errorf("create secret directory: %w", err)
+	}
+	defer func() { _ = windows.CloseHandle(parent) }()
+	unwindChain := func(cause error) error {
+		if _, unwindErr := rollbackWindowsACLMaterialization(created); unwindErr != nil {
+			return errors.Join(cause, unwindErr)
+		}
+		return cause
 	}
 	// Sealed BEFORE the file exists, so a failure here leaves nothing on disk at
 	// all rather than an empty file for someone else to win a race on.
@@ -147,16 +166,16 @@ func writeWindowsSandboxSecret(path string, password string) error {
 	// another.
 	sealed, err := protectWindowsSecret(password, windowsSandboxSecretEntropy(path))
 	if err != nil {
-		return err
+		return unwindChain(err)
 	}
-	// ONE resolution of the path, not four. The leaf is created relative to a
-	// pinned no-follow parent handle, and the DACL and the bytes are both applied
-	// to that handle. Resolving the name again between those steps is what let a
-	// junction or symlink swap point an elevated write at a file of the caller's
-	// choosing.
-	handle, err := createWindowsSecretFileNoFollow(path)
+	// ONE resolution of the path, not four. The parent chain above was built
+	// relative to handles, the leaf is created relative to the deepest of them,
+	// and the DACL and the bytes are both applied to the leaf handle. Resolving
+	// the name again between any two of those steps is what let a junction or
+	// symlink swap point an elevated write at a file of the caller's choosing.
+	handle, err := createWindowsSecretFileAt(parent, filepath.Base(path))
 	if err != nil {
-		return err
+		return unwindChain(err)
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
 	if err := lockWindowsSecretHandleToOwner(handle, owner); err != nil {
@@ -165,11 +184,11 @@ func writeWindowsSandboxSecret(path string, password string) error {
 		// cleanup misses and leaves a locked-down file, never that it deletes
 		// something it did not create.
 		_ = os.Remove(path)
-		return err
+		return unwindChain(err)
 	}
 	if err := writeWindowsSecretHandle(handle, sealed); err != nil {
 		_ = os.Remove(path)
-		return err
+		return unwindChain(err)
 	}
 	return nil
 }

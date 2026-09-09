@@ -648,7 +648,18 @@ func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) ([]strin
 	// Every candidate is created, because setup grants an ACE on every candidate
 	// and applyWindowsACLPlan fails the whole run on a target that does not exist.
 	for _, root := range roots {
-		if err := os.MkdirAll(root, 0o700); err != nil {
+		// Built relative to handles rather than by pathname, for the reason the
+		// secret directory is: this runs elevated over a tree the invoking user
+		// owns, so a junction planted mid-walk turns an os.MkdirAll into an
+		// elevated create wherever that junction points.
+		created, parent, err := makeWindowsACLDirChainNoFollow(root)
+		if parent != 0 {
+			_ = windows.CloseHandle(parent)
+		}
+		if err != nil {
+			if _, unwindErr := rollbackWindowsACLMaterialization(created); unwindErr != nil {
+				err = errors.Join(err, unwindErr)
+			}
 			return nil, fmt.Errorf("create sandbox runtime root: %w", err)
 		}
 	}
