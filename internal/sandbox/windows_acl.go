@@ -63,12 +63,22 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 			Capability: capability.SID,
 		})
 		for _, path := range capability.ProtectedWriteDenyPaths {
+			// ANCHORED ONLY WHERE THE ANCHOR IS TRUE. Most of these are derived
+			// from the root and sit under it, and holding those inside it is the
+			// point. But ReadOnlySubpaths is a profile field an operator can set to
+			// any path, and one deliberately placed outside the root is a
+			// configuration that works today; anchoring it would turn that into a
+			// containment refusal. A path that is not under the root gets no
+			// anchor and keeps the final-component guard it always had.
+			anchor := ""
+			if pathWithinRoot(capability.Root, path) {
+				anchor = capability.Root
+			}
 			entries = append(entries, WindowsACLEntry{
 				Action:     WindowsACLDenyWrite,
 				Path:       path,
 				Capability: capability.SID,
-				// Derived from this root, so the apply holds it inside it.
-				Anchor: capability.Root,
+				Anchor:     anchor,
 			})
 		}
 	}

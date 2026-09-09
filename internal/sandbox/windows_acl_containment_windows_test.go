@@ -11,6 +11,14 @@ import (
 	"testing"
 )
 
+// windowsACLTestDenySID is a well-known group this process is not a member of.
+//
+// A deny ACE is what the carveouts actually are, and denying a group the test
+// runs as revokes its own WRITE_DAC: the apply succeeds and then nothing can
+// put the DACL back, so the temporary tree cannot be removed. Guests keeps the
+// deny semantics without locking the test out of its own fixture.
+const windowsACLTestDenySID = "S-1-5-32-546"
+
 // makeACLJunction plants a directory junction at link pointing at target.
 //
 // A junction rather than a symlink on purpose: mklink /J needs no privilege, so
@@ -49,7 +57,7 @@ func TestApplyWindowsACLRefusesACarveoutRedirectedByAJunction(t *testing.T) {
 		Entries: []WindowsACLEntry{{
 			Action:     WindowsACLDenyWrite,
 			Path:       carveout,
-			Capability: "S-1-5-32-545",
+			Capability: windowsACLTestDenySID,
 			Anchor:     root,
 		}},
 	}
@@ -81,7 +89,7 @@ func TestApplyWindowsACLStillAppliesAnOrdinaryCarveout(t *testing.T) {
 		Entries: []WindowsACLEntry{{
 			Action:     WindowsACLDenyWrite,
 			Path:       carveout,
-			Capability: "S-1-5-32-545",
+			Capability: windowsACLTestDenySID,
 			Anchor:     root,
 		}},
 	}
@@ -89,6 +97,16 @@ func TestApplyWindowsACLStillAppliesAnOrdinaryCarveout(t *testing.T) {
 	snapshot, applied, err := applyWindowsACLPathGroup(group)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
+	}
+	// PUT IT BACK, OR THE TEMP TREE CANNOT BE REMOVED. The ACE just written
+	// denies write to the group this test runs as, and t.TempDir removes the
+	// tree when the test ends.
+	if applied {
+		t.Cleanup(func() {
+			if err := rollbackWindowsACLSnapshots([]windowsACLSnapshot{snapshot}); err != nil {
+				t.Errorf("rollback: %v", err)
+			}
+		})
 	}
 	if !applied {
 		t.Fatal("an ordinary carveout inside the write root was not applied")
@@ -121,7 +139,7 @@ func TestApplyWindowsACLRefusesToMaterializeThroughAJunction(t *testing.T) {
 		Entries: []WindowsACLEntry{{
 			Action:      WindowsACLDenyRead,
 			Path:        carveout,
-			Capability:  "S-1-5-32-545",
+			Capability:  windowsACLTestDenySID,
 			Anchor:      root,
 			Materialize: true,
 		}},
@@ -153,13 +171,20 @@ func TestApplyWindowsACLLeavesAnUnanchoredPathAlone(t *testing.T) {
 		Entries: []WindowsACLEntry{{
 			Action:     WindowsACLDenyWrite,
 			Path:       named,
-			Capability: "S-1-5-32-545",
+			Capability: windowsACLTestDenySID,
 		}},
 	}
 
-	_, applied, err := applyWindowsACLPathGroup(group)
+	snapshot, applied, err := applyWindowsACLPathGroup(group)
 	if err != nil {
 		t.Fatalf("an operator-named path below a junction was refused: %v", err)
+	}
+	if applied {
+		t.Cleanup(func() {
+			if err := rollbackWindowsACLSnapshots([]windowsACLSnapshot{snapshot}); err != nil {
+				t.Errorf("rollback: %v", err)
+			}
+		})
 	}
 	if !applied {
 		t.Fatal("an operator-named path below a junction was not applied")
