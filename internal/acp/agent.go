@@ -284,7 +284,8 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	// Load history BEFORE publishing the session so no concurrent prompt observes
 	// a half-initialized session (registerSession sets history under the lock and
 	// reuses an already-live session rather than orphaning its in-flight turn).
-	history, messages, historyWarning, historyErr := a.loadHistory(meta.SessionID)
+	requireHistoryLog := operation == persistedSessionResume && meta.EventCount > 0
+	history, messages, historyWarning, historyErr := a.loadHistory(meta.SessionID, requireHistoryLog)
 	// RESUME PROMISES RESTORED CONTEXT, SO A FAILED RESTORATION IS A FAILED
 	// RESUME. historyErr used to do nothing but suppress replay and raise a
 	// warning: the session was registered and reported ready regardless, so a
@@ -311,7 +312,7 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	}
 	sess, existed := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
 	if existed {
-		_, messages, historyWarning, historyErr = a.refreshSessionHistory(sess)
+		_, messages, historyWarning, historyErr = a.refreshSessionHistory(sess, requireHistoryLog)
 		if operation == persistedSessionResume && historyErr != nil {
 			return nil, RPCError(codeInternalError, "restore session history: "+historyErr.Error())
 		}
@@ -881,7 +882,7 @@ type persistedMessage struct {
 	tool *ToolCallUpdate
 }
 
-func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage, error, error) {
+func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRecord, []persistedMessage, error, error) {
 	if a.deps.Store == nil {
 		return nil, nil, nil, nil
 	}
@@ -899,18 +900,21 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage,
 	// enough: rehydration substitutes the compaction event in place of the events
 	// it replaced, so a loop that skips everything but EventMessage would drop the
 	// summary exactly as before. It is projected below. Reported by @jatmn.
-	events, err := a.deps.Store.ReadRehydratedEvents(sessionID)
+	events, eventLogPresent, err := a.deps.Store.ReadRehydratedEventsWithPresence(sessionID)
 	var rehydrateWarning error
 	if err != nil {
 		rehydrateWarning = err
-		events, err = a.deps.Store.ReadEvents(sessionID)
+		events, eventLogPresent, err = a.deps.Store.ReadEventsWithPresence(sessionID)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 	}
+	if requireHistoryLog && !eventLogPresent {
+		return nil, nil, nil, fmt.Errorf("zero session %s event log is missing", sessionID)
+	}
 	var records []turnRecord
 	var messages []persistedMessage
-	seenToolCalls := make(map[string]struct{})
+	activeToolCalls := make(map[string]string)
 	var pendingUser string
 	havePending := false
 	for _, e := range events {
@@ -948,12 +952,18 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage,
 		// only the wire rendering differs. Reported by @jatmn.
 		if e.Type == sessions.EventToolCall || e.Type == sessions.EventToolResult {
 			if upd := replayToolUpdate(e); upd != nil {
+				rawID := upd.ToolCallID
 				if e.Type == sessions.EventToolResult {
-					if _, ok := seenToolCalls[upd.ToolCallID]; !ok {
+					replayID, ok := activeToolCalls[rawID]
+					if !ok {
 						continue
 					}
+					upd.ToolCallID = replayID
+					delete(activeToolCalls, rawID)
 				} else {
-					seenToolCalls[upd.ToolCallID] = struct{}{}
+					replayID := replayToolCallID(persistedMessageIdentity(sessionID, e))
+					activeToolCalls[rawID] = replayID
+					upd.ToolCallID = replayID
 				}
 				messages = append(messages, persistedMessage{
 					eventID: persistedMessageIdentity(sessionID, e),
@@ -999,11 +1009,11 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, []persistedMessage,
 
 // replayToolUpdate rebuilds the ACP notification for one stored tool event.
 //
-// The stored toolCallId is reused verbatim rather than re-derived, because the
-// client pairs a result with its call by that id alone; minting a new one would
-// replay the result as an orphan update against a call the client never saw.
-// Older records wrote the field as "id", so both spellings are accepted — the
-// TUI projection already does the same (internal/tui/session.go).
+// The stored toolCallId is returned here as a correlation key. loadHistory maps
+// each call occurrence to a stable session-wide replay identity and applies that
+// identity to its result. Older records wrote the field as "id", so both
+// spellings are accepted — the TUI projection already does the same
+// (internal/tui/session.go).
 //
 // A record that carries no usable id is skipped rather than replayed under a
 // synthesized one: an unpairable update is worse than a missing row.
@@ -1061,7 +1071,15 @@ func persistedMessageIdentity(sessionID string, event sessions.Event) string {
 // receives the same opaque id across loads, which also gives clients an exact
 // chunk boundary when two adjacent persisted messages have the same role.
 func replayMessageID(eventID string) string {
-	sum := sha256.Sum256([]byte("zero-acp-message:" + eventID))
+	return replayOpaqueID("message", eventID)
+}
+
+func replayToolCallID(eventID string) string {
+	return replayOpaqueID("tool-call", eventID)
+}
+
+func replayOpaqueID(kind, eventID string) string {
+	sum := sha256.Sum256([]byte("zero-acp-" + kind + ":" + eventID))
 	b := sum[:16]
 	b[6] = (b[6] & 0x0f) | 0x50
 	b[8] = (b[8] & 0x3f) | 0x80
@@ -1144,10 +1162,10 @@ func (a *Agent) registerSession(id, cwd string, history []turnRecord, model stri
 // same object the prompt path uses. Re-reading here avoids overwriting a turn
 // that committed between activatePersistedSession's pre-publication read and
 // discovering that another activation had already registered the session.
-func (a *Agent) refreshSessionHistory(sess *acpSession) ([]turnRecord, []persistedMessage, error, error) {
+func (a *Agent) refreshSessionHistory(sess *acpSession, requireHistoryLog bool) ([]turnRecord, []persistedMessage, error, error) {
 	sess.turnMu.Lock()
 	defer sess.turnMu.Unlock()
-	history, messages, warning, err := a.loadHistory(sess.id)
+	history, messages, warning, err := a.loadHistory(sess.id, requireHistoryLog)
 	if err == nil {
 		sess.setHistory(history)
 	}

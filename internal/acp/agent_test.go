@@ -1782,14 +1782,14 @@ func TestACPCompactedHistoryReplacesCompactedTurnsWithTheirSummary(t *testing.T)
 // Tool activity is part of the transcript a client redraws on session/load, and
 // a result is only renderable if it pairs with its call by the SAME id. Resume
 // stays replay-free.
-func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
+func TestACPLoadReplaysToolCallsPairedByTheirStoredOccurrence(t *testing.T) {
 	deps := testDeps(t)
 	workspace := t.TempDir()
 	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "tool-replay-session", Title: "Tools", Cwd: workspace})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+	appended, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
 		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "read the file"}},
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "read_file", "toolCallId": "call-77", "arguments": `{"path":"scope.go"}`}},
 		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "read_file", "toolCallId": "call-77", "status": "ok", "output": "package sandbox", "changedFiles": []string{"scope.go", "scope_test.go"}}},
@@ -1802,7 +1802,8 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "orphan", "arguments": "{}"}},
 		// An identified result is still unpairable when its start is absent.
 		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "orphan", "toolCallId": "missing-call", "status": "ok", "output": "must not replay"}},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -1817,11 +1818,11 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
 		locations        []string
 	}
 	wants := []want{
-		{UpdateToolCall, "call-77", ToolStatusInProgress, nil},
-		{UpdateToolCallUpdate, "call-77", ToolStatusCompleted, []string{"scope.go", "scope_test.go"}},
-		{UpdateToolCall, "call-88", ToolStatusInProgress, nil},
-		{UpdateToolCallUpdate, "call-88", ToolStatusFailed, nil},
-		{UpdateToolCall, "call-99", ToolStatusInProgress, nil},
+		{UpdateToolCall, replayToolCallID(appended[1].ID), ToolStatusInProgress, nil},
+		{UpdateToolCallUpdate, replayToolCallID(appended[1].ID), ToolStatusCompleted, []string{"scope.go", "scope_test.go"}},
+		{UpdateToolCall, replayToolCallID(appended[3].ID), ToolStatusInProgress, nil},
+		{UpdateToolCallUpdate, replayToolCallID(appended[3].ID), ToolStatusFailed, nil},
+		{UpdateToolCall, replayToolCallID(appended[5].ID), ToolStatusInProgress, nil},
 	}
 	for i, w := range wants {
 		select {
@@ -1857,6 +1858,63 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredID(t *testing.T) {
 	case update := <-resumer.tools:
 		t.Fatalf("session/resume replayed tool activity: %+v", update)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestACPLoadDisambiguatesRepeatedStoredToolIDs(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "repeated-tool-ids", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "read_file", "toolCallId": "gemini_tool_1", "arguments": `{"path":"a.go"}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "read_file", "toolCallId": "gemini_tool_1", "status": "ok", "output": "alpha"}},
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "grep", "toolCallId": "gemini_tool_1", "arguments": `{"pattern":"TODO"}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "grep", "toolCallId": "gemini_tool_1", "status": "error", "output": "not found"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	load := func() []ToolCallUpdate {
+		t.Helper()
+		h := newHarness(t, deps)
+		defer h.stop()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+			SessionID: created.SessionID, Cwd: workspace,
+		}, &LoadSessionResult{}); err != nil {
+			t.Fatalf("session/load: %v", err)
+		}
+		updates := make([]ToolCallUpdate, 0, 4)
+		for len(updates) < 4 {
+			select {
+			case update := <-h.tools:
+				updates = append(updates, update)
+			case <-ctx.Done():
+				t.Fatalf("received %d tool updates, want four", len(updates))
+			}
+		}
+		return updates
+	}
+
+	first := load()
+	if first[0].ToolCallID == "" || first[0].ToolCallID != first[1].ToolCallID {
+		t.Fatalf("first call/result pairing = %q/%q", first[0].ToolCallID, first[1].ToolCallID)
+	}
+	if first[2].ToolCallID == "" || first[2].ToolCallID != first[3].ToolCallID {
+		t.Fatalf("second call/result pairing = %q/%q", first[2].ToolCallID, first[3].ToolCallID)
+	}
+	if first[0].ToolCallID == first[2].ToolCallID {
+		t.Fatalf("separate invocations reused replay identity %q", first[0].ToolCallID)
+	}
+	second := load()
+	for index := range first {
+		if second[index].ToolCallID != first[index].ToolCallID {
+			t.Fatalf("load two identity %d = %q, want stable %q", index, second[index].ToolCallID, first[index].ToolCallID)
+		}
 	}
 }
 
@@ -1945,10 +2003,11 @@ func TestACPPromptPersistsToolActivityForFreshLoad(t *testing.T) {
 	}
 	start := nextReplay("tool start")
 	result := nextReplay("tool result")
-	if start.SessionUpdate != UpdateToolCall || start.ToolCallID != "call-live" || start.Status != ToolStatusInProgress {
+	replayID := replayToolCallID(events[1].ID)
+	if start.SessionUpdate != UpdateToolCall || start.ToolCallID != replayID || start.Status != ToolStatusInProgress {
 		t.Fatalf("replayed tool start = %+v", start)
 	}
-	if result.SessionUpdate != UpdateToolCallUpdate || result.ToolCallID != "call-live" || result.Status != ToolStatusCompleted {
+	if result.SessionUpdate != UpdateToolCallUpdate || result.ToolCallID != replayID || result.Status != ToolStatusCompleted {
 		t.Fatalf("replayed tool result = %+v", result)
 	}
 	if len(result.Locations) != 2 || result.Locations[0].Path != "a.go" || result.Locations[1].Path != "b.go" {
@@ -2028,7 +2087,7 @@ func TestACPPersistenceStopsAtFirstFailedEventDependency(t *testing.T) {
 			}
 			select {
 			case update := <-loader.tools:
-				if tc.failAt != 3 || update.SessionUpdate != UpdateToolCall || update.ToolCallID != "call-prefix" || update.Status != ToolStatusInProgress {
+				if tc.failAt != 3 || update.SessionUpdate != UpdateToolCall || update.ToolCallID != replayToolCallID(events[1].ID) || update.Status != ToolStatusInProgress {
 					t.Fatalf("replayed tool update = %+v", update)
 				}
 			case <-time.After(100 * time.Millisecond):
@@ -2172,5 +2231,47 @@ func TestACPResumeFailsWhenHistoryCannotBeRestored(t *testing.T) {
 	defer loader.stop()
 	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: cwd, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
 		t.Fatalf("session/load must stay best-effort, got: %v", err)
+	}
+}
+
+func TestACPResumeRejectsMissingPopulatedEventLog(t *testing.T) {
+	deps := testDeps(t)
+	cwd := t.TempDir()
+	populated, err := deps.Store.Create(sessions.CreateInput{SessionID: "missing-populated-log", Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.AppendEvent(populated.SessionID, sessions.AppendEventInput{
+		Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "retain me"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(deps.Store.RootDir, populated.SessionID, sessions.EventsFile)); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{
+		SessionID: populated.SessionID, Cwd: cwd,
+	}, &ResumeSessionResult{}); err == nil {
+		t.Fatal("session/resume accepted missing populated history")
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: populated.SessionID, Prompt: []ContentBlock{TextBlock("must stay closed")},
+	}, &PromptResult{}); err == nil {
+		t.Fatal("failed missing-history resume became promptable")
+	}
+
+	empty, err := deps.Store.Create(sessions.CreateInput{SessionID: "valid-empty-log", Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{
+		SessionID: empty.SessionID, Cwd: cwd,
+	}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume rejected valid empty history: %v", err)
 	}
 }
