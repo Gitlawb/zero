@@ -21,24 +21,68 @@ import (
 // would have been told a write-jail trade applied to a child that never became
 // runnable. The record has to be unwound on that path, not only on the ones
 // before it was written.
-func TestResumeFailureLeavesNoLaunchReport(t *testing.T) {
+// AND IT HAS TO SAY SO, RATHER THAN SAY NOTHING. Removing the file leaves the
+// parent reading absence, which is also what a normal cleanup leaves, so a
+// reader that saw the publication during the window keeps its positive through
+// completion. The retraction states the negative instead.
+func TestResumeFailureRetractsTheLaunchReport(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.json")
 	report, err := openWindowsExecutionReport(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	published, err := publishThenResume(report, func() error { return errors.New("STATUS_ACCESS_DENIED") })
+	keep, err := publishThenResume(report, func() error { return errors.New("STATUS_ACCESS_DENIED") })
 	if err == nil {
 		t.Fatal("SETUP INVALID: the injected resume failure was not reported")
 	}
-	if published {
-		t.Fatal("publishThenResume reported the child as published after its resume failed, so the deferred close would keep a report saying true about a child that never ran")
+	if !keep {
+		t.Fatal("publishThenResume discarded the report after its resume failed, so the parent reads absence and a live reader keeps the launch it already saw")
 	}
-	report.close(published)
+	report.close(keep)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the retracted report is not readable: %v", err)
+	}
+	var decoded execution.AdapterReport
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("decode report %q: %v", data, err)
+	}
+	if decoded.ChildLaunched == nil {
+		t.Fatalf("report = %s, want an explicit childLaunched false; silence does not revoke a launch a live reader already latched", data)
+	}
+	if *decoded.ChildLaunched {
+		t.Fatalf("report = %s, want childLaunched false for a child that executed no instruction", data)
+	}
+}
+
+// A retraction that cannot be written falls back to discarding the file, which
+// is where this path was before: absence is weaker than an explicit false, and
+// still better than a report left saying true.
+func TestAnUnwritableRetractionDiscardsTheReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.json")
+	report, err := openWindowsExecutionReport(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keep, err := publishThenResume(report, func() error {
+		// Close the handle underneath the retraction, so its write fails the
+		// way a broken report file would.
+		_ = report.file.Close()
+		return errors.New("STATUS_ACCESS_DENIED")
+	})
+	if err == nil {
+		t.Fatal("SETUP INVALID: the injected resume failure was not reported")
+	}
+	if keep {
+		t.Fatal("publishThenResume kept a report it could not retract, so the file still says a child launched")
+	}
+	report.close(keep)
 
 	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Fatalf("a launch report survived a resume failure (stat: %v); the parent would read a child as launched that executed no instruction", statErr)
+		t.Fatalf("a report that could not be retracted survived (stat: %v); the parent would read a child as launched that executed no instruction", statErr)
 	}
 }
 
@@ -50,11 +94,11 @@ func TestSuccessfulResumeKeepsTheLaunchReport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	published, err := publishThenResume(report, func() error { return nil })
-	if err != nil || !published {
-		t.Fatalf("publishThenResume = (%v, %v), want (true, nil)", published, err)
+	keep, err := publishThenResume(report, func() error { return nil })
+	if err != nil || !keep {
+		t.Fatalf("publishThenResume = (%v, %v), want (true, nil)", keep, err)
 	}
-	report.close(published)
+	report.close(keep)
 
 	data, err := os.ReadFile(path)
 	if err != nil {
