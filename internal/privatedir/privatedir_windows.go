@@ -129,7 +129,7 @@ func windowsTokenOwner(token windows.Token) (*windows.SID, error) {
 	}
 	owner := (*tokenOwnerInfo)(unsafe.Pointer(&buffer[0])).owner
 	if owner == nil {
-		return nil, errors.New("Windows access token has no default owner")
+		return nil, errors.New("windows access token has no default owner")
 	}
 	return owner.Copy()
 }

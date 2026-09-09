@@ -87,6 +87,11 @@ func writeStatusFileAtomicallyRoot(
 	if replace != nil {
 		rename = func(src, dst string) error { return replace(root, src, dst) }
 	}
+	// On Windows an existing reader that omitted FILE_SHARE_DELETE can block
+	// this replacement even though an in-place write would succeed. Keep the
+	// atomic publication boundary: RenameWithRetry bounds transient sharing
+	// failures to ten short attempts, and a persistent failure leaves the old
+	// status document intact instead of exposing a partially written one.
 	var committedWarning error
 	if err := fsutil.RenameWithRetry(tempName, statusName, rename); err != nil {
 		var committedReplacement *fsutil.CommittedReplacementCleanupError

@@ -15,24 +15,6 @@ import (
 // safe cross-platform ceiling.
 const maxUnixSocketPath = 103
 
-// secureRuntimeParents creates every directory that can influence daemon
-// coordination. The known default runtime root is owner-verified and hardened;
-// caller-supplied layouts are created when missing but existing parents are
-// never chmodded because the daemon does not own that policy boundary.
-func secureRuntimeParents(paths Paths) error {
-	root, isDefault, err := openDefaultRuntimeRoot(paths)
-	if err != nil {
-		return err
-	}
-	if isDefault {
-		if err := root.Close(); err != nil {
-			return fmt.Errorf("daemon: close runtime directory: %w", err)
-		}
-		return nil
-	}
-	return secureCustomRuntimeParents(paths)
-}
-
 func secureCustomRuntimeParents(paths Paths) error {
 	parents := []struct {
 		name string

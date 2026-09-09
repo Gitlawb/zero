@@ -13,64 +13,6 @@ import (
 	"github.com/Gitlawb/zero/internal/observability"
 )
 
-func TestSecureRuntimeParentsLeaveCustomDirectoryPermissionsUntouched(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix permission regression")
-	}
-	dir, err := os.MkdirTemp("/tmp", "zero-custom-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	paths := Paths{
-		Socket: filepath.Join(dir, "daemon.sock"),
-		Lock:   filepath.Join(dir, "daemon.lock"),
-		Status: filepath.Join(dir, "daemon.status"),
-	}
-	if err := secureRuntimeParents(paths); err != nil {
-		t.Fatalf("secureRuntimeParents: %v", err)
-	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o755 {
-		t.Fatalf("custom directory permissions = %04o, want unchanged 0755", got)
-	}
-}
-
-func TestSecureRuntimeParentsLeaveRelativeWorkingDirectoryPermissionsUntouched(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix permission regression")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	oldWorkingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
-
-	if err := secureRuntimeParents(Paths{Socket: "daemon.sock", Lock: "daemon.lock", Status: "daemon.status"}); err != nil {
-		t.Fatalf("secureRuntimeParents: %v", err)
-	}
-	info, err := os.Stat(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o755 {
-		t.Fatalf("working directory permissions = %04o, want unchanged 0755", got)
-	}
-}
-
 func TestServeSupportsReadOnlyCustomRuntimeDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permission compatibility regression")
