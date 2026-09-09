@@ -112,7 +112,16 @@ const sandboxRenameProtectedMetadataName = ".git"
 // subprocesses. Nonexistent paths are harmless no-ops in every backend's
 // enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
 func gitMetadataWriteCarveouts(root string) []string {
-	specs := gitMetadataWriteCarveoutSpecs(root)
+	return gitMetadataWriteCarveoutsWithLstat(root, os.Lstat)
+}
+
+// gitMetadataWriteCarveoutsWithLstat is the seam the worktree tests drive.
+// Which carveouts apply is decided by the SHAPE of .git, and a test cannot
+// create every shape it needs to cover: an lstat that fails is a real state
+// (a racing checkout, a permission error) with its own required answer, and
+// there is no filesystem it can be staged on.
+func gitMetadataWriteCarveoutsWithLstat(root string, lstat func(string) (os.FileInfo, error)) []string {
+	specs := gitMetadataWriteCarveoutSpecsWithLstat(root, lstat)
 	out := make([]string, 0, len(specs))
 	for _, spec := range specs {
 		out = append(out, spec.Path)
@@ -134,6 +143,10 @@ type gitMetadataCarveout struct {
 // set. gitMetadataWriteCarveouts derives its list from this so a path can never
 // be added in one place and have its shape forgotten in the other.
 func gitMetadataWriteCarveoutSpecs(root string) []gitMetadataCarveout {
+	return gitMetadataWriteCarveoutSpecsWithLstat(root, os.Lstat)
+}
+
+func gitMetadataWriteCarveoutSpecsWithLstat(root string, lstat func(string) (os.FileInfo, error)) []gitMetadataCarveout {
 	gitPath := filepath.Join(root, ".git")
 	// A LINKED WORKTREE OR SUBMODULE HAS .git AS A FILE, NOT A DIRECTORY.
 	//
@@ -154,7 +167,7 @@ func gitMetadataWriteCarveoutSpecs(root string) []gitMetadataCarveout {
 	// checkout, and the two layouts want different ACEs. A missing .git (git has
 	// not run yet) keeps the directory-shaped carveouts, which is what makes them
 	// materialize before git first runs.
-	if info, err := os.Lstat(gitPath); err == nil && !info.IsDir() {
+	if info, err := lstat(gitPath); err == nil && !info.IsDir() {
 		return []gitMetadataCarveout{{Path: gitPath, IsFile: true}}
 	}
 	// A MISSING .git IS NOT THE SAME AS "THIS WILL BECOME A REPOSITORY".
