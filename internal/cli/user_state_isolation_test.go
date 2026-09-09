@@ -21,13 +21,13 @@ var userStateEnvNames = []string{
 // throwaway directories, and keeps credential work off the host keyring.
 //
 // A TEMPORARY WORKING DIRECTORY IS NOT ISOLATION. runWithDeps fills the
-// dependencies a test leaves out with the production ones, and the interactive
-// launch path reads user config, opens stores, refreshes the models.dev cache
-// and migrates any inline plaintext API key into the credential store before it
-// ever reaches an injected runTUI callback. Without this, running these tests on
-// a developer machine rewrites that developer's config.json and moves their key
-// into their keychain, and the results depend on whatever providers, MCP servers
-// and plugins that machine has configured.
+// dependencies a test leaves out with the production ones, and the launch paths
+// read user config, open stores, refresh the models.dev cache and, for an
+// interactive run, migrate any inline plaintext API key into the credential
+// store before they ever reach an injected callback. Without this, running these
+// tests on a developer machine rewrites that developer's config.json and moves
+// their key into their keychain, makes a real network call, and reports results
+// that depend on whatever providers, MCP servers and plugins that machine has.
 func isolateCLIUserState(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
@@ -47,7 +47,8 @@ func isolateCLIUserState(t *testing.T) {
 // AND THE ISOLATION IS ITSELF PINNED, ONE HELPER AT A TIME. A seeded config
 // outside the helper fixture roots stands in for a developer's real one: the
 // launch helper must leave it exactly as it found it, inline API key included,
-// and must not write a credential file beside it.
+// must not write a credential file beside it, and must have moved the per-user
+// paths off that root before running anything.
 //
 // EACH HELPER GETS ITS OWN SUBTEST because t.Setenv restores at the end of the
 // test, not when the helper returns: exercising both in one test would let the
@@ -63,7 +64,7 @@ func TestCLILaunchHelpersLeaveUserStateAlone(t *testing.T) {
 		}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			configPath, seeded, before := seedEmulatedUserConfig(t)
+			seedRoot, configPath, seeded, before := seedEmulatedUserConfig(t)
 
 			testCase.exercise(t)
 
@@ -85,15 +86,32 @@ func TestCLILaunchHelpersLeaveUserStateAlone(t *testing.T) {
 				}
 				t.Errorf("the user config directory gained entries: %v", names)
 			}
+
+			// The checks above catch what this platform happens to write. This
+			// one catches the missing isolation itself, so a startup path that
+			// writes somewhere else, or only sometimes, is covered too.
+			resolved, err := config.DefaultUserConfigPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(resolved, seedRoot) {
+				t.Errorf("user config still resolves inside the seeded root (%s): the helper installed no isolation", resolved)
+			}
+			if os.Getenv("ZERO_DISABLE_MODELS_FETCH") == "" {
+				t.Error("the helper left the background models.dev refresh enabled, so this test can make a network call and write a cache file")
+			}
+			if os.Getenv("ZERO_CRED_STORAGE") == "" {
+				t.Error("the helper left credential storage resolving keyring-first, so a migrated key can reach the host keychain")
+			}
 		})
 	}
 }
 
 // seedEmulatedUserConfig points the per-user base directories at a throwaway
 // root and writes a config carrying an inline plaintext API key there, which is
-// what the startup migration rewrites. It returns the config path, its bytes,
-// and the directory listing to compare against.
-func seedEmulatedUserConfig(t *testing.T) (string, []byte, []os.DirEntry) {
+// what the startup migration rewrites. It returns that root, the config path,
+// its bytes, and the directory listing to compare against.
+func seedEmulatedUserConfig(t *testing.T) (string, string, []byte, []os.DirEntry) {
 	t.Helper()
 	seedRoot := t.TempDir()
 	for _, name := range userStateEnvNames {
@@ -117,5 +135,5 @@ func seedEmulatedUserConfig(t *testing.T) (string, []byte, []os.DirEntry) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return configPath, seeded, before
+	return seedRoot, configPath, seeded, before
 }
