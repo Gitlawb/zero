@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // releaseJSON returns a minimal GitHub release JSON body.
@@ -120,28 +121,56 @@ func TestFetchReleaseNoAuthToCustomEndpoint(t *testing.T) {
 }
 
 func TestFetchReleaseNoAuthToHttpGithub(t *testing.T) {
-	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, releaseJSON("v0.2.0"))
-	}))
-	defer srv.Close()
+	// Verify the scheme guard independently of the hostname guard: an http://
+	// api.github.com request must not carry a token even when tokens are
+	// configured. Use the transport seam with the logical URL so the
+	// githubAPIToken precondition (https + api.github.com) is exercised.
+	calls := 0
+	var firstAuth, firstURL string
+	tr := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			firstAuth = req.Header.Get("Authorization")
+			firstURL = req.URL.String()
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(releaseJSON("v0.2.0"))),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
 
 	old := httpClient
-	httpClient = srv.Client()
+	httpClient = &http.Client{Transport: tr}
 	t.Cleanup(func() { httpClient = old })
 
 	t.Setenv(EnvUpdateToken, "secret")
-	t.Setenv(EnvGitHubToken, "")
+	t.Setenv(EnvGitHubToken, "fallback")
 
-	_, err := fetchRelease(context.Background(), srv.URL+"/repos/Gitlawb/zero/releases/latest")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := fetchRelease(ctx, "http://api.github.com/repos/Gitlawb/zero/releases/latest")
 	if err != nil {
 		t.Fatalf("fetchRelease error: %v", err)
 	}
-	if gotAuth != "" {
-		t.Fatalf("expected no auth over HTTP, got %q", gotAuth)
+	if calls != 1 {
+		t.Fatalf("expected 1 request, got %d", calls)
 	}
+	if firstAuth != "" {
+		t.Fatalf("auth should not be sent over HTTP even with tokens: got %q", firstAuth)
+	}
+	if firstURL != "http://api.github.com/repos/Gitlawb/zero/releases/latest" {
+		t.Fatalf("unexpected URL %q", firstURL)
+	}
+}
+
+// roundTripperFunc adapts a function to http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestFetchReleaseNoAuthWhenTokensNotSet(t *testing.T) {
@@ -163,28 +192,47 @@ func TestFetchReleaseNoAuthWhenTokensNotSet(t *testing.T) {
 }
 
 func TestFetchReleaseRefusesRedirectToHttp(t *testing.T) {
-	// Server redirects HTTPS→HTTP. The CheckRedirect in fetchRelease should block this
-	// when the original request carried credentials.
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "http://evil.example.com/releases/latest", http.StatusFound)
-	}))
-	defer srv.Close()
+	calls := 0
+	var firstAuth, firstURL string
+	tr := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			firstAuth = req.Header.Get("Authorization")
+			firstURL = req.URL.String()
+			return &http.Response{
+				StatusCode: 301,
+				Header:     http.Header{"Location": []string{"http://api.github.com/repos/Gitlawb/zero/releases/latest"}},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}
+		t.Fatalf("HTTP downgrade destination should not be contacted: %s %s calls=%d", req.Method, req.URL.String(), calls)
+		return nil, fmt.Errorf("unexpected request to HTTP destination")
+	})
 
 	old := httpClient
-	httpClient = srv.Client()
+	httpClient = &http.Client{Transport: tr}
 	t.Cleanup(func() { httpClient = old })
 
 	t.Setenv(EnvUpdateToken, "secret")
 	t.Setenv(EnvGitHubToken, "")
 
-	// The httptest server URL is not api.github.com, so githubAPIToken returns ""
-	// and no auth is attached. This means CheckRedirect won't block the redirect
-	// (no credentials were on the request). We just verify the redirect doesn't
-	// cause an auth leak — the redirect to HTTP will either succeed (no creds) or
-	// fail with a connection error. Neither should leak credentials.
-	_, _ = fetchRelease(context.Background(), srv.URL+"/repos/Gitlawb/zero/releases/latest")
-	// If we got here, either the redirect succeeded (no creds leaked) or it
-	// failed with a connection error to evil.example.com. Both are acceptable.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := fetchRelease(ctx, "https://api.github.com/repos/Gitlawb/zero/releases/latest")
+	if err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+		t.Fatalf("expected redirect refusal error, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 transport call, HTTP destination should not be contacted: got %d", calls)
+	}
+	if firstAuth != "Bearer secret" {
+		t.Fatalf("initial HTTPS request should carry Bearer token: got %q", firstAuth)
+	}
+	if firstURL != "https://api.github.com/repos/Gitlawb/zero/releases/latest" {
+		t.Fatalf("unexpected initial URL %q", firstURL)
+	}
 }
 
 func TestFetchReleaseRejectsUserinfoHostTrick(t *testing.T) {
@@ -271,30 +319,43 @@ func TestHTTPMirrorRedirectAllowedWithDummyTokens(t *testing.T) {
 }
 
 func TestHTTPSDowngradeBlockedWhenCredentialsPresent(t *testing.T) {
-	// The CheckRedirect should block HTTPS→HTTP when the initial request had
-	// credentials. We verify the behavior by checking that an HTTPS→HTTP
-	// redirect from a URL that githubAPIToken recognizes is blocked.
-	// Since we can't easily make httptest serve api.github.com, we test the
-	// CheckRedirect logic indirectly: the redirect from an HTTPS server to HTTP
-	// should not succeed silently (connection error or redirect refusal).
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "http://evil.example.com/releases/latest", http.StatusFound)
-	}))
-	defer srv.Close()
+	calls := 0
+	var firstAuth string
+	tr := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			firstAuth = req.Header.Get("Authorization")
+			return &http.Response{
+				StatusCode: 301,
+				Header:     http.Header{"Location": []string{"http://api.github.com/other"}},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}
+		t.Fatalf("HTTP downgrade destination should not be contacted: %s %s calls=%d", req.Method, req.URL.String(), calls)
+		return nil, fmt.Errorf("unexpected request")
+	})
 
 	old := httpClient
-	httpClient = srv.Client()
+	httpClient = &http.Client{Transport: tr}
 	t.Cleanup(func() { httpClient = old })
 
 	t.Setenv(EnvUpdateToken, "secret")
-	t.Setenv(EnvGitHubToken, "")
+	t.Setenv(EnvGitHubToken, "fallback_should_not_be_used")
 
-	// The httptest server URL is not api.github.com, so no auth is attached.
-	// The redirect to http://evil.example.com will fail with a DNS/connection
-	// error. This is expected — we just verify no crash or auth leak.
-	_, err := fetchRelease(context.Background(), srv.URL+"/repos/Gitlawb/zero/releases/latest")
-	// Connection error to evil.example.com is acceptable.
-	_ = err
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := fetchRelease(ctx, "https://api.github.com/repos/Gitlawb/zero/releases/latest")
+	if err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+		t.Fatalf("expected redirect refusal, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 call, got %d", calls)
+	}
+	if firstAuth != "Bearer secret" {
+		t.Fatalf("expected Bearer secret on first request, got %q", firstAuth)
+	}
 }
 
 func TestHTTPSSameHostRedirectAllowed(t *testing.T) {
