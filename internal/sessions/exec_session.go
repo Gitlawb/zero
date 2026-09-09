@@ -326,6 +326,12 @@ func redactedIdentityValue(value any) any {
 	return redaction.RedactString(text, redaction.Options{})
 }
 
+// toolCallIdentityFields are the top-level payload fields a projected call
+// keeps: which call it was, and which tool. Everything else on the payload is
+// dropped, including a field added by a future producer that this file has
+// never seen.
+var toolCallIdentityFields = []string{"id", "name"}
+
 // toolCallIdentity keeps a tool call's identity and drops its payload, the
 // symmetric half of toolResultOutcome.
 //
@@ -333,40 +339,48 @@ func redactedIdentityValue(value any) any {
 // reduced to the identity keys, and re-encoded; anything that does not decode as
 // an object is removed outright rather than passed through as text, since text
 // that could not be read is text that cannot be checked.
+//
+// REBUILT, NOT PATCHED, WHICH IS WHAT MAKES IT THE SYMMETRIC HALF.
+// toolResultOutcome constructs its output from the two fields it keeps, so a
+// field it has never heard of cannot reach a prompt through it. Editing
+// arguments in place and returning the rest of the payload is the opposite
+// contract: it drops what it recognises as a body and forwards every sibling
+// key, so a producer recording one more top-level field would put that field
+// into the next turn. The projection names what survives.
 func toolCallIdentity(event Event) Event {
 	var decoded map[string]json.RawMessage
 	if err := json.Unmarshal(event.Payload, &decoded); err != nil {
 		event.Payload = json.RawMessage(`{}`)
 		return event
 	}
-	raw, present := decoded["arguments"]
-	if !present {
-		return event
+	projected := map[string]json.RawMessage{}
+	for _, field := range toolCallIdentityFields {
+		if value, present := decoded[field]; present {
+			projected[field] = value
+		}
 	}
 	kept := map[string]any{}
-	var argumentsText string
-	if err := json.Unmarshal(raw, &argumentsText); err == nil {
-		var arguments map[string]any
-		if err := json.Unmarshal([]byte(argumentsText), &arguments); err == nil {
-			for key, value := range arguments {
-				if toolCallIdentityKeys[strings.ToLower(key)] {
-					kept[key] = redactedIdentityValue(value)
+	if raw, present := decoded["arguments"]; present {
+		var argumentsText string
+		if err := json.Unmarshal(raw, &argumentsText); err == nil {
+			var arguments map[string]any
+			if err := json.Unmarshal([]byte(argumentsText), &arguments); err == nil {
+				for key, value := range arguments {
+					if toolCallIdentityKeys[strings.ToLower(key)] {
+						kept[key] = redactedIdentityValue(value)
+					}
 				}
 			}
 		}
 	}
-	if len(kept) == 0 {
-		delete(decoded, "arguments")
-	} else {
-		reduced, err := json.Marshal(kept)
-		if err != nil {
-			delete(decoded, "arguments")
-		} else {
-			quoted, _ := json.Marshal(string(reduced))
-			decoded["arguments"] = quoted
+	if len(kept) > 0 {
+		if reduced, err := json.Marshal(kept); err == nil {
+			if quoted, err := json.Marshal(string(reduced)); err == nil {
+				projected["arguments"] = quoted
+			}
 		}
 	}
-	rebuilt, err := json.Marshal(decoded)
+	rebuilt, err := json.Marshal(projected)
 	if err != nil {
 		event.Payload = json.RawMessage(`{}`)
 		return event

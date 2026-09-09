@@ -203,3 +203,40 @@ func TestResumePromptKeepsOrdinaryIdentitiesThroughTheScrub(t *testing.T) {
 		t.Errorf("a numeric read window did not survive the scrub:\n%s", out)
 	}
 }
+
+// AND A FIELD THIS FILE HAS NEVER HEARD OF DOES NOT RIDE ALONG.
+//
+// toolResultOutcome builds its output from the fields it keeps, so an unknown
+// one cannot reach a prompt through it. The call side edited arguments in place
+// and returned every sibling key, which is the opposite contract: a producer
+// recording one more top-level field, or the same payload with no arguments at
+// all, put that field straight into the next turn. The projection names what
+// survives, so both halves now drop what they do not name.
+func TestResumePromptProjectsTopLevelToolCallFields(t *testing.T) {
+	const body = "opaque top-level payload that must not be replayed"
+	events := []Event{
+		{Sequence: 1, Type: EventMessage, Payload: toolContextPayload(t, map[string]any{"role": "user", "content": "go"})},
+		{Sequence: 2, Type: EventToolCall, Payload: toolContextPayload(t, map[string]any{
+			"id": "c1", "name": "write_file", "arguments": `{"path":"deploy/prod.env"}`, "rawInput": body,
+		})},
+		// The same shape with no arguments at all, which used to return the whole
+		// payload untouched.
+		{Sequence: 3, Type: EventToolCall, Payload: toolContextPayload(t, map[string]any{
+			"id": "c2", "name": "read_file", "stashedContent": body,
+		})},
+		{Sequence: 4, Type: EventError, Payload: toolContextPayload(t, map[string]any{"message": "provider error"})},
+	}
+	out := resumePrompt(t, events)
+
+	for _, leaked := range []string{body, "rawInput", "stashedContent"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("an unnamed top-level field %q reached the resume prompt:\n%s", leaked, out)
+		}
+	}
+	// The identity itself still survives, from both calls.
+	for _, kept := range []string{"c1", "write_file", "deploy/prod.env", "c2", "read_file"} {
+		if !strings.Contains(out, kept) {
+			t.Errorf("call identity %q was lost to the projection:\n%s", kept, out)
+		}
+	}
+}
