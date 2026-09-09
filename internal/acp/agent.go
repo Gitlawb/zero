@@ -203,7 +203,7 @@ func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (a
 	if err != nil {
 		return nil, RPCError(codeInternalError, "create session: "+err.Error())
 	}
-	sess := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels)
+	sess, _ := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels)
 	return NewSessionResult{
 		SessionID:     sess.id,
 		ConfigOptions: a.configOptions(sess),
@@ -309,7 +309,13 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 			models = append(models, SessionConfigOptionValue{Value: persistedModel, Name: persistedModel})
 		}
 	}
-	sess := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
+	sess, existed := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
+	if existed {
+		_, messages, historyWarning, historyErr = a.refreshSessionHistory(sess)
+		if operation == persistedSessionResume && historyErr != nil {
+			return nil, RPCError(codeInternalError, "restore session history: "+historyErr.Error())
+		}
+	}
 	note := &notifier{conn: a.conn, sessionID: sess.id}
 	if operation == persistedSessionLoad && historyErr == nil {
 		for _, message := range messages {
@@ -325,12 +331,14 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 		"rehydrate session compaction",
 		"Could not apply session compaction. Raw session history was restored instead.",
 		historyWarning,
+		operation == persistedSessionLoad,
 	)
 	a.warnPersistence(
 		note,
 		"load session history",
 		"Could not load session history. The session is open, but earlier turns may be missing until storage recovers.",
 		historyErr,
+		operation == persistedSessionLoad,
 	)
 	return LoadSessionResult{
 		ConfigOptions: a.configOptions(sess),
@@ -488,10 +496,16 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 			note.text("\n\n[zero warning] " + text + "\n")
 		}
 	}
-	// Persist the user message before the agent can emit tool callbacks. Tool
-	// starts and results are appended synchronously from those callbacks, so the
-	// durable log has the same order the client observed and an interrupted call
-	// remains visible after a fresh-process load.
+	// Buffer the complete turn until RunAgent has a valid ACP outcome. A hard run
+	// failure is an aborted turn: neither live history nor durable history may
+	// retain its user/tool prefix under an RPC error. StopCancelled is a valid
+	// outcome and commits through the same boundary below.
+	pendingEvents := make([]sessions.AppendEventInput, 0, 4)
+	queue := func(input sessions.AppendEventInput) {
+		pendingEvents = append(pendingEvents, input)
+	}
+	queue(messageEvent("user", userText))
+
 	var persistenceErr error
 	persistenceFailed := false
 	persist := func(input sessions.AppendEventInput) {
@@ -503,8 +517,6 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 			persistenceFailed = true
 		}
 	}
-	persist(messageEvent("user", userText))
-
 	opts := agent.Options{
 		Cwd:            sess.cwd,
 		SessionID:      sess.id,
@@ -519,11 +531,11 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		OnText:         note.text,
 		OnReasoning:    note.thought,
 		OnToolCall: func(call agent.ToolCall) {
-			persist(toolCallEvent(call))
+			queue(toolCallEvent(call))
 			note.toolCall(call)
 		},
 		OnToolResult: func(result agent.ToolResult) {
-			persist(toolResultEvent(result))
+			queue(toolResultEvent(result))
 			note.toolResult(result)
 			if result.Name == "update_plan" {
 				a.emitPlan(registry, note)
@@ -537,7 +549,14 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	agentPrompt := buildPrompt(sess.snapshotHistory(), userText)
 	result, runErr := a.deps.RunAgent(ctx, agentPrompt, provider, opts)
 	if result.FinalAnswer != "" {
-		persist(messageEvent("assistant", result.FinalAnswer))
+		queue(messageEvent("assistant", result.FinalAnswer))
+	}
+	reason, stopErr := stopReasonFor(result, runErr)
+	if stopErr != nil {
+		return "", RPCError(codeInternalError, stopErr.Error())
+	}
+	for _, event := range pendingEvents {
+		persist(event)
 	}
 	sess.appendHistory(turnRecord{user: userText, assistant: result.FinalAnswer})
 	a.warnPersistence(
@@ -545,12 +564,8 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		"save session history",
 		"Could not save session history. This turn is available in memory, but future resume may miss it until storage recovers.",
 		persistenceErr,
+		true,
 	)
-
-	reason, stopErr := stopReasonFor(result, runErr)
-	if stopErr != nil {
-		return "", RPCError(codeInternalError, stopErr.Error())
-	}
 	return reason, nil
 }
 
@@ -1053,7 +1068,7 @@ func replayMessageID(eventID string) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-func (a *Agent) warnPersistence(note *notifier, action string, message string, err error) {
+func (a *Agent) warnPersistence(note *notifier, action string, message string, err error, notify bool) {
 	if err == nil {
 		return
 	}
@@ -1062,7 +1077,7 @@ func (a *Agent) warnPersistence(note *notifier, action string, message string, e
 		sessionID = note.sessionID
 	}
 	log.Printf("zero acp: failed to %s for session %s: %v", action, sessionID, err)
-	if note != nil {
+	if note != nil && notify {
 		note.text("\n\n[zero warning] " + message + "\n")
 	}
 }
@@ -1109,18 +1124,34 @@ func promptImages(blocks []ContentBlock) []zeroruntime.ImageBlock {
 
 // registerSession publishes a session under the agent's lock. If one is already
 // registered for id (e.g. a re-load of an in-flight session) the existing live
-// session is returned unchanged rather than orphaning its turn or resetting its
-// mode/model. history is set BEFORE publishing so no concurrent prompt can read a
-// half-initialized session.
-func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool) *acpSession {
+// session is returned rather than orphaning its turn or resetting its mode/model.
+// The bool reports that case so persisted activation can re-read and apply disk
+// history under turnMu. history is set BEFORE first publication so no concurrent
+// prompt can read a half-initialized session.
+func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool) (*acpSession, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if existing := a.sessions[id]; existing != nil {
-		return existing
+		return existing, true
 	}
 	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, model: model, models: models, restrictModels: restrictModels, history: history}
 	a.sessions[id] = sess
-	return sess
+	return sess, false
+}
+
+// refreshSessionHistory is the activation apply boundary for an already-live
+// session. The history is read while prompts are excluded, then applied to the
+// same object the prompt path uses. Re-reading here avoids overwriting a turn
+// that committed between activatePersistedSession's pre-publication read and
+// discovering that another activation had already registered the session.
+func (a *Agent) refreshSessionHistory(sess *acpSession) ([]turnRecord, []persistedMessage, error, error) {
+	sess.turnMu.Lock()
+	defer sess.turnMu.Unlock()
+	history, messages, warning, err := a.loadHistory(sess.id)
+	if err == nil {
+		sess.setHistory(history)
+	}
+	return history, messages, warning, err
 }
 
 func (a *Agent) session(id string) *acpSession {
@@ -1200,6 +1231,12 @@ func (s *acpSession) configState() (string, []SessionConfigOptionValue, agent.Pe
 func (s *acpSession) appendHistory(rec turnRecord) {
 	s.mu.Lock()
 	s.history = append(s.history, rec)
+	s.mu.Unlock()
+}
+
+func (s *acpSession) setHistory(history []turnRecord) {
+	s.mu.Lock()
+	s.history = append([]turnRecord(nil), history...)
 	s.mu.Unlock()
 }
 

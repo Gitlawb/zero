@@ -100,6 +100,7 @@ func testDeps(t *testing.T) Deps {
 // clientHarness wires a client Conn to an Agent over in-memory pipes and collects
 // session/update text chunks.
 type clientHarness struct {
+	agent         *Agent
 	client        *Conn
 	updates       chan string
 	notifications chan ContentChunk
@@ -118,7 +119,7 @@ func newHarness(t *testing.T, deps Deps) *clientHarness {
 	client := NewConn(br, bw)
 	a := NewAgent(agentConn, deps)
 
-	h := &clientHarness{client: client, updates: make(chan string, 128), notifications: make(chan ContentChunk, 128), tools: make(chan ToolCallUpdate, 128)}
+	h := &clientHarness{agent: a, client: client, updates: make(chan string, 128), notifications: make(chan ContentChunk, 128), tools: make(chan ToolCallUpdate, 128)}
 	client.HandleNotify(MethodSessionUpdate, func(_ context.Context, params json.RawMessage) {
 		// Decode the discriminator ALONE first. ContentChunk and ToolCallUpdate
 		// disagree on the shape of "content" (a block vs an array of them), so
@@ -891,6 +892,88 @@ func TestACPPromptWarnsWhenTurnPersistenceFails(t *testing.T) {
 	}
 }
 
+func TestACPHardTurnFailureDoesNotCommitHistory(t *testing.T) {
+	deps := testDeps(t)
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		call := agent.ToolCall{ID: "failed-call", Name: "read_file", Arguments: `{"path":"a.go"}`}
+		opts.OnToolCall(call)
+		opts.OnToolResult(agent.ToolResult{ToolCallID: call.ID, Name: call.Name, Status: tools.StatusOK, Output: "content"})
+		return agent.Result{FinalAnswer: "partial answer"}, errors.New("injected hard run failure")
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var created NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("failed question")},
+	}, &PromptResult{}); err == nil {
+		t.Fatal("hard RunAgent failure was reported as a successful turn")
+	}
+
+	sess := h.agent.session(created.SessionID)
+	if sess == nil || len(sess.snapshotHistory()) != 0 {
+		t.Fatalf("failed turn changed live history: %+v", sess)
+	}
+	events, err := deps.Store.ReadEvents(created.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("failed turn changed durable history: %+v", events)
+	}
+	loader := newHarness(t, deps)
+	defer loader.stop()
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+		SessionID: created.SessionID, Cwd: sess.cwd,
+	}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("fresh session/load: %v", err)
+	}
+	loaded := loader.agent.session(created.SessionID)
+	if loaded == nil || len(loaded.snapshotHistory()) != 0 {
+		t.Fatalf("fresh load disagreed with the uncommitted turn: %+v", loaded)
+	}
+}
+
+func TestACPCancelledTurnCommitsAtOutcomeBoundary(t *testing.T) {
+	deps := testDeps(t)
+	deps.RunAgent = func(context.Context, string, zeroruntime.Provider, agent.Options) (agent.Result, error) {
+		return agent.Result{}, context.Canceled
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var created NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+		t.Fatal(err)
+	}
+	var result PromptResult
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("cancelled question")},
+	}, &result); err != nil {
+		t.Fatalf("cancelled turn returned an RPC error: %v", err)
+	}
+	if result.StopReason != StopCancelled {
+		t.Fatalf("stop reason = %q, want %q", result.StopReason, StopCancelled)
+	}
+	sess := h.agent.session(created.SessionID)
+	if got := sess.snapshotHistory(); len(got) != 1 || got[0].user != "cancelled question" {
+		t.Fatalf("cancelled turn was not committed to live history: %+v", got)
+	}
+	events, err := deps.Store.ReadEvents(created.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != sessions.EventMessage {
+		t.Fatalf("cancelled turn was not committed to durable history: %+v", events)
+	}
+}
+
 func TestACPLoadWarnsWhenHistoryReadFails(t *testing.T) {
 	deps := testDeps(t)
 	cwd := t.TempDir()
@@ -915,6 +998,79 @@ func TestACPLoadWarnsWhenHistoryReadFails(t *testing.T) {
 	})
 	if !strings.Contains(got, "Could not load session history") {
 		t.Fatalf("streamed text = %q, want load warning", got)
+	}
+}
+
+func TestACPSameConnectionReloadRefreshesRecoveredHistory(t *testing.T) {
+	deps := testDeps(t)
+	cwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsPath := filepath.Join(deps.Store.RootDir, meta.SessionID, sessions.EventsFile)
+	if err := os.WriteFile(eventsPath, []byte("{bad json}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prompts := make(chan string, 1)
+	deps.RunAgent = func(_ context.Context, prompt string, _ zeroruntime.Provider, _ agent.Options) (agent.Result, error) {
+		prompts <- prompt
+		return agent.Result{FinalAnswer: "continued"}, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	params := LoadSessionParams{SessionID: meta.SessionID, Cwd: cwd}
+	if err := h.client.Call(ctx, MethodSessionLoad, params, &LoadSessionResult{}); err != nil {
+		t.Fatalf("initial best-effort load: %v", err)
+	}
+	select {
+	case <-h.notifications: // discard the expected best-effort load warning
+	case <-ctx.Done():
+		t.Fatal("initial best-effort load did not surface its warning")
+	}
+	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Store.AppendEvents(meta.SessionID, []sessions.AppendEventInput{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "recovered question"}},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "recovered answer"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Call(ctx, MethodSessionLoad, params, &LoadSessionResult{}); err != nil {
+		t.Fatalf("load after storage repair: %v", err)
+	}
+	for index, want := range []struct {
+		kind string
+		text string
+	}{
+		{UpdateUserMessageChunk, "recovered question"},
+		{UpdateAgentMessageChunk, "recovered answer"},
+	} {
+		select {
+		case update := <-h.notifications:
+			if update.SessionUpdate != want.kind || update.Content.Text != want.text {
+				t.Fatalf("replayed history %d = %+v, want %s %q", index, update, want.kind, want.text)
+			}
+		case <-ctx.Done():
+			t.Fatalf("replayed history %d never arrived", index)
+		}
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: meta.SessionID, Prompt: []ContentBlock{TextBlock("continue")},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("prompt after repaired reload: %v", err)
+	}
+	select {
+	case prompt := <-prompts:
+		if !strings.Contains(prompt, "recovered question") || !strings.Contains(prompt, "recovered answer") {
+			t.Fatalf("same-connection reload discarded recovered history:\n%s", prompt)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
 }
 
@@ -1933,6 +2089,11 @@ func TestACPCompactionFailureFallsBackToRawHistory(t *testing.T) {
 		SessionID: created.SessionID, Cwd: workspace,
 	}, &ResumeSessionResult{}); err != nil {
 		t.Fatalf("session/resume: %v", err)
+	}
+	select {
+	case update := <-resumer.notifications:
+		t.Fatalf("session/resume emitted transcript-shaped fallback warning: %+v", update)
+	case <-time.After(100 * time.Millisecond):
 	}
 	if err := resumer.client.Call(ctx, MethodSessionPrompt, PromptParams{
 		SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("continue")},
