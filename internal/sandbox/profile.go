@@ -167,7 +167,14 @@ func gitMetadataWriteCarveoutSpecsWithLstat(root string, lstat func(string) (os.
 	// checkout, and the two layouts want different ACEs. A missing .git (git has
 	// not run yet) keeps the directory-shaped carveouts, which is what makes them
 	// materialize before git first runs.
-	if info, err := lstat(gitPath); err == nil && !info.IsDir() {
+	//
+	// A REGULAR FILE, NOT MERELY A NON-DIRECTORY. The pointer this recognises is
+	// the `gitdir:` file git writes for a linked worktree or submodule. A symlink
+	// named .git, dangling or not, and a special entry such as a fifo are neither
+	// that nor a checkout git will use, so they keep the legacy child carveouts
+	// rather than being handed the stronger single-object protection on the
+	// strength of not being a directory.
+	if info, err := lstat(gitPath); err == nil && info.Mode().IsRegular() {
 		return []gitMetadataCarveout{{Path: gitPath, IsFile: true}}
 	}
 	// A MISSING .git IS NOT THE SAME AS "THIS WILL BECOME A REPOSITORY".

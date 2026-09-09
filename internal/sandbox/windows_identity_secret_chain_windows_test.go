@@ -5,7 +5,6 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -74,15 +73,22 @@ func TestSetupWindowsSandboxRuntimeRootRefusesAJunctionedAncestor(t *testing.T) 
 	if len(candidates) == 0 {
 		t.Fatal("SETUP INVALID: no runtime root candidate for a configured workspace")
 	}
+	// PICKED BY EXCLUDING THE OTHER ONE, NOT BY PATH PREFIX. The second candidate
+	// is the shared fallback under the system temp directory, which this test
+	// must not junction. Selecting the cache-derived one by prefix looks
+	// equivalent and is not: a CI runner spells one directory two ways
+	// (RUNNER~1 against runneradmin), so os.UserCacheDir and t.TempDir disagree
+	// on a path they both mean and the prefix matches nothing.
+	fallback, _ := fallbackSandboxRuntimeRoot(workspace)
 	cacheCandidate := ""
 	for _, candidate := range candidates {
-		if strings.HasPrefix(candidate, cache) {
+		if candidate != fallback {
 			cacheCandidate = candidate
 			break
 		}
 	}
 	if cacheCandidate == "" {
-		t.Fatalf("SETUP INVALID: no candidate under the isolated cache root: %v", candidates)
+		t.Fatalf("SETUP INVALID: no cache-derived candidate among %v (fallback %q)", candidates, fallback)
 	}
 
 	// The swap: the candidate's parent is a junction out of the cache tree, and
