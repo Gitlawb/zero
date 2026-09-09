@@ -151,3 +151,55 @@ func TestResumePromptKeepsIdentityForUnknownTools(t *testing.T) {
 		t.Errorf("an unlisted tool lost its url identity:\n%s", out)
 	}
 }
+
+// AND AN ALLOW-LISTED KEY IS NOT A SAFE VALUE.
+//
+// web_fetch accepts a credential in the query string and redacts the URL it
+// reports back, so an interrupted fetch had its token dropped from the result
+// and kept verbatim in the call. This projection is what admits the call into a
+// later turn's prompt, so the token rode into the next resume or fork. The
+// identity the resumed turn actually needs is the host and path, and those
+// survive.
+func TestResumePromptRedactsCredentialsInsideRetainedValues(t *testing.T) {
+	const token = "secret-value-9f8e7d6c5b4a"
+	events := []Event{
+		{Sequence: 1, Type: EventMessage, Payload: toolContextPayload(t, map[string]any{"role": "user", "content": "check the feed"})},
+		{Sequence: 2, Type: EventToolCall, Payload: toolContextPayload(t, map[string]any{"id": "c1", "name": "web_fetch", "arguments": `{"url":"https://api.example/data?access_token=` + token + `&page=2"}`})},
+		{Sequence: 3, Type: EventToolCall, Payload: toolContextPayload(t, map[string]any{"id": "c2", "name": "web_fetch", "arguments": `{"url":"https://reader:hunter2@api.example/feed"}`})},
+		{Sequence: 4, Type: EventError, Payload: toolContextPayload(t, map[string]any{"message": "provider error: upstream timeout"})},
+	}
+	out := resumePrompt(t, events)
+
+	for _, leaked := range []string{token, token[:12], "hunter2"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("credential %q reached the resume prompt:\n%s", leaked, out)
+		}
+	}
+	// The non-secret identity is the whole reason calls are admitted at all.
+	for _, kept := range []string{"api.example", "/data", "page=2", "/feed"} {
+		if !strings.Contains(out, kept) {
+			t.Errorf("URL identity %q was lost to the scrub:\n%s", kept, out)
+		}
+	}
+}
+
+// The scrub must not eat ordinary identities. A path, a glob and a query are
+// what the resumed turn navigates by, and none of them is a credential.
+func TestResumePromptKeepsOrdinaryIdentitiesThroughTheScrub(t *testing.T) {
+	events := []Event{
+		{Sequence: 1, Type: EventMessage, Payload: toolContextPayload(t, map[string]any{"role": "user", "content": "go"})},
+		{Sequence: 2, Type: EventToolCall, Payload: toolContextPayload(t, map[string]any{"id": "c1", "name": "read_file", "arguments": `{"path":"internal/sessions/exec_session.go","offset":1,"limit":40}`})},
+		{Sequence: 3, Type: EventToolCall, Payload: toolContextPayload(t, map[string]any{"id": "c2", "name": "grep", "arguments": `{"pattern":"func toolCallIdentity","glob":"src/**/*.tsx"}`})},
+		{Sequence: 4, Type: EventError, Payload: toolContextPayload(t, map[string]any{"message": "provider error"})},
+	}
+	out := resumePrompt(t, events)
+	for _, kept := range []string{"internal/sessions/exec_session.go", "func toolCallIdentity", "src/**/*.tsx"} {
+		if !strings.Contains(out, kept) {
+			t.Errorf("identity %q was lost to the scrub:\n%s", kept, out)
+		}
+	}
+	// Numbers are not strings and are nothing to scrub; they must survive whole.
+	if !strings.Contains(out, "40") {
+		t.Errorf("a numeric read window did not survive the scrub:\n%s", out)
+	}
+}

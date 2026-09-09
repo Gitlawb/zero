@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 type ExecMode string
@@ -305,6 +307,25 @@ var toolCallIdentityKeys = map[string]bool{
 	"offset": true, "limit": true,
 }
 
+// redactedIdentityValue scrubs credentials out of a value the projection keeps.
+//
+// AN ALLOW-LISTED KEY IS NOT A SAFE VALUE. A url is a valid place for a
+// credential to appear: web_fetch accepts a query token and redacts the URL it
+// reports back, so an interrupted fetch of
+// https://api.example/data?access_token=... had its token dropped from the
+// result and kept verbatim in the call. This projection is what admits call
+// arguments into a later turn's prompt, so the same scrub belongs here or the
+// credential is replayed on resume. Host and path survive it, which is the
+// identity the resumed turn needs; non-string values (an offset, a limit) are
+// nothing to scrub.
+func redactedIdentityValue(value any) any {
+	text, ok := value.(string)
+	if !ok {
+		return value
+	}
+	return redaction.RedactString(text, redaction.Options{})
+}
+
 // toolCallIdentity keeps a tool call's identity and drops its payload, the
 // symmetric half of toolResultOutcome.
 //
@@ -329,7 +350,7 @@ func toolCallIdentity(event Event) Event {
 		if err := json.Unmarshal([]byte(argumentsText), &arguments); err == nil {
 			for key, value := range arguments {
 				if toolCallIdentityKeys[strings.ToLower(key)] {
-					kept[key] = value
+					kept[key] = redactedIdentityValue(value)
 				}
 			}
 		}
