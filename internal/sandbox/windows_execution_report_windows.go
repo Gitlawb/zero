@@ -5,6 +5,7 @@ package sandbox
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -62,17 +63,47 @@ func (report *windowsExecutionReport) publish(childLaunched bool) error {
 	return nil
 }
 
-// close releases the handle. Discards the file when nothing was published, so a
-// truncated or empty report can never be read back as a launch that happened.
-func (report *windowsExecutionReport) close(published bool) {
+// close releases the handle. keep is false when nothing worth reading was
+// written, and the file is discarded then, so a truncated or empty report can
+// never be read back as a launch that happened. A retracted report is worth
+// reading: an explicit false is the only answer that outranks a launch a live
+// reader has already seen.
+func (report *windowsExecutionReport) close(keep bool) {
 	if report == nil || report.file == nil {
 		return
 	}
 	closeErr := report.file.Close()
-	if !published || closeErr != nil {
+	if !keep || closeErr != nil {
 		_ = os.Remove(report.path)
 	}
 	report.file = nil
+}
+
+// retract replaces a published launch with an explicit denial of it.
+//
+// REMOVING THE FILE IS NOT ENOUGH, BECAUSE ABSENCE ALREADY MEANS SOMETHING
+// ELSE. The parent reads this report while the command is still running and
+// latches a launch it sees, precisely because the file is expected to be gone
+// by the time the command finishes: a normal cleanup removes it, and the
+// manager restores the launch it observed rather than reading that absence as a
+// child that never started. So a reader that looked during the window between
+// publish and resume keeps its positive no matter what is deleted afterwards.
+// An explicit false is the one answer that outranks it.
+func (report *windowsExecutionReport) retract() error {
+	if report == nil || report.file == nil {
+		return nil
+	}
+	if err := report.file.Truncate(0); err != nil {
+		return fmt.Errorf("retract sandbox execution report: %w", err)
+	}
+	if _, err := report.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("retract sandbox execution report: %w", err)
+	}
+	launched := false
+	if err := json.NewEncoder(report.file).Encode(execution.AdapterReport{ChildLaunched: &launched}); err != nil {
+		return fmt.Errorf("retract sandbox execution report: %w", err)
+	}
+	return nil
 }
 
 // publishThenResume records the launch and only then lets the child run, and
@@ -86,16 +117,27 @@ func (report *windowsExecutionReport) close(published bool) {
 // report saying otherwise would disclose a write-jail trade nobody made.
 //
 // Publish before resume stays, because it closes the inherited-pipe race the
-// caller documents. What this adds is the other half: the returned published
-// flag is true only when the child actually resumed, so a resume failure hands
-// the deferred close a false and the report is removed rather than left saying
-// true about a child that never ran.
-func publishThenResume(report *windowsExecutionReport, resume func() error) (published bool, err error) {
+// caller documents. What this adds is the other half: a resume failure retracts
+// the record, so the report stops saying true about a child that never ran.
+//
+// RETRACTED, NOT DELETED. The publication is readable for as long as the window
+// between it and the resume lasts, and the parent reads it live: a poll landing
+// in that window latches a launch, and that latch outlives the file, because a
+// normal cleanup deletes the report too and the parent must not read that
+// deletion as a child that never started. Deleting on this path would therefore
+// leave the latched positive standing in both the live and the final result. An
+// explicit false is the one answer that revokes it, so the returned flag keeps
+// the file when the retraction was written. If it could not be written the file
+// is discarded after all, which is no worse than before.
+func publishThenResume(report *windowsExecutionReport, resume func() error) (keep bool, err error) {
 	if err := report.publish(true); err != nil {
 		return false, fmt.Errorf("record sandboxed child launch: %w", err)
 	}
-	if err := resume(); err != nil {
-		return false, fmt.Errorf("resume sandboxed process: %w", err)
+	if resumeErr := resume(); resumeErr != nil {
+		if retractErr := report.retract(); retractErr != nil {
+			return false, fmt.Errorf("resume sandboxed process: %w", resumeErr)
+		}
+		return true, fmt.Errorf("resume sandboxed process: %w", resumeErr)
 	}
 	return true, nil
 }

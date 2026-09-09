@@ -442,29 +442,42 @@ func (process *managedProcess) markDone(err error, exitCode int, report AdapterR
 // away. The MCP launcher already reads the report while its server is live;
 // this is the same read, in the launcher that was left behind.
 //
-// ONLY THE POSITIVE IS PROMOTED, AND ONLY ONCE. An absent, partial, or
+// SILENCE IS NOT A NEGATIVE, BUT AN EXPLICIT NEGATIVE IS. An absent, partial or
 // undecodable report, and a helper that failed before it ever created the child,
 // must all leave the live result exactly as it was: not confirmed, nothing
-// disclosed. Latching false, or surfacing a read error or a denial from here,
-// would let a mid-flight poll rewrite a running command into a setup failure.
-// The latch also keeps a wrapped plan to one file read rather than one per poll,
-// and leaves every unwrapped plan doing no extra work at all.
+// disclosed. Reading absence as false, or surfacing a read error or a denial
+// from here, would let a mid-flight poll rewrite a running command into a setup
+// failure, and absence is the normal state once the plan's cleanup has removed
+// the file.
+//
+// A report that SAYS false is different, and it revokes. The Windows helper
+// publishes the launch before it resumes the suspended child, so there is a
+// window where the fact is readable and the child has still executed nothing; if
+// the resume then fails, the helper retracts the record with an explicit false.
+// Without this, a poll that landed inside that window would hold a launch that
+// never happened, and hold it through completion, since the final read finds the
+// file cleaned away and restores what was latched.
+//
+// Which is why the observation is repeated while the command runs rather than
+// latched once. It costs one small read per poll on a wrapped plan, and every
+// unwrapped plan still does no extra work at all; a fact that can be withdrawn
+// is not one to cache.
 func (process *managedProcess) observeLaunch() {
 	if process.report == nil {
 		return
 	}
 	process.mu.Lock()
-	skip := !process.ownedLaunch || process.launchObserved
+	skip := !process.ownedLaunch
 	process.mu.Unlock()
 	if skip || process.doneClosed() {
 		return
 	}
 	report, err := process.report()
-	if err != nil || report.ChildLaunched == nil || !*report.ChildLaunched {
+	if err != nil || report.ChildLaunched == nil {
 		return
 	}
 	process.mu.Lock()
-	process.launchObserved = true
+	process.launchObserved = *report.ChildLaunched
 	process.mu.Unlock()
 }
 
