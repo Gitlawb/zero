@@ -150,6 +150,14 @@ func (b *Bridge) receiveBundle(conn net.Conn) bundleResult {
 	// extractBundle starts the clone's own gitTimeout once it holds the lock for
 	// dest, so an upload queued behind another does not spend that budget waiting.
 	if err := extractBundle(context.Background(), tmpName, dest, b.logf); err != nil {
+		if errors.Is(err, errCommittedNotReleased) {
+			// The tree at dest is the one this upload sent. Reporting a
+			// rejection would have the client send it again over itself, so the
+			// result carries both facts and the fault is logged for an operator
+			// rather than turned into a retry.
+			b.logf("remote: extracted %s but could not release its extract lock: %v", dest, err)
+			return bundleResult{OK: true, Path: dest, Message: "extract bundle: " + err.Error()}
+		}
 		return bundleResult{Message: "extract bundle: " + err.Error()}
 	}
 	return bundleResult{OK: true, Path: dest}
@@ -245,6 +253,29 @@ var stagingFS = fsOps{
 	writeFile:  os.WriteFile,
 	create:     os.OpenFile,
 	createTemp: os.CreateTemp,
+}
+
+// errCommittedNotReleased reports the one failure an operation can have after
+// its own mutation already landed: the extract lock is released last, so a
+// release failure is all that is left to go wrong. A caller that read it as a
+// plain failure would repeat a destructive step that already ran, so the error
+// says both facts and every caller that can act on the difference tests for it.
+var errCommittedNotReleased = errors.New("remote: the change landed but its extract lock was not released")
+
+// extractFileLock is the part of lockutil.FileLock this file uses. Release joins
+// the platform unlock and the close, and neither can be made to fail through a
+// real lock, so without a seam the one path that reports a cleanup failure could
+// only be reasoned about.
+type extractFileLock interface{ Release() error }
+
+// acquireExtractLock is the seam the cross-process extract lock is taken
+// through. Tests swap it and restore it; nothing else writes to it.
+var acquireExtractLock = func(root, path string) (extractFileLock, error) {
+	lock, err := lockutil.TryAcquireFileLockAt(root, path)
+	if err != nil {
+		return nil, err
+	}
+	return lock, nil
 }
 
 // extractLocks serializes extracts per destination. Each bundle upload runs in
@@ -343,7 +374,7 @@ func dropExtractRef(dest string) {
 // lockExtractFile takes the cross-process advisory lock for dest, waiting until
 // ctx is done or the wait budget runs out. The in-process lock already excludes
 // this daemon's own goroutines; this excludes a second daemon sharing the dir.
-func lockExtractFile(ctx context.Context, bundleDir, dest string) (func(), error) {
+func lockExtractFile(ctx context.Context, bundleDir, dest string) (func() error, error) {
 	deadline := time.NewTimer(gitTimeout)
 	defer deadline.Stop()
 	for {
@@ -367,19 +398,43 @@ func lockExtractFile(ctx context.Context, bundleDir, dest string) (func(), error
 // tryLockExtractFile takes the per-link advisory lock without waiting. It
 // reports held when a live extract owns the link, which is never an error: the
 // caller either waits or leaves that link alone.
-func tryLockExtractFile(bundleDir, dest string) (release func(), held bool, err error) {
+func tryLockExtractFile(bundleDir, dest string) (release func() error, held bool, err error) {
 	lockDir := filepath.Join(bundleDir, lockDirName)
 	if err := os.MkdirAll(lockDir, 0o700); err != nil {
 		return nil, false, err
 	}
-	lock, err := lockutil.TryAcquireFileLockAt(bundleDir, filepath.Join(lockDir, filepath.Base(dest)+".lock"))
+	lock, err := acquireExtractLock(bundleDir, filepath.Join(lockDir, filepath.Base(dest)+".lock"))
 	if err != nil {
 		if errors.Is(err, lockutil.ErrLockHeld) {
 			return nil, true, nil
 		}
 		return nil, false, err
 	}
-	return func() { _ = lock.Release() }, false, nil
+	// Release joins the platform unlock and the close, and a failure in either
+	// can mean the lock file is still held: the next caller for this link waits
+	// it out rather than working over it. The caller merges it into its own
+	// outcome, so nothing reports a clean run over a lock nobody let go of.
+	return lock.Release, false, nil
+}
+
+// mergeReleaseFailure folds a lock release failure into an operation's own
+// outcome. committed says the operation's mutation already landed, which the
+// error has to keep saying: a caller that read this as "nothing happened" would
+// repeat a destructive step that already ran, publishing a bundle over the tree
+// it just installed or re-running a removal that is done.
+func mergeReleaseFailure(err, relErr error, committed bool, id string) error {
+	if relErr == nil {
+		return err
+	}
+	if err != nil {
+		// The primary cause stays the wrapped one: it is what the operation
+		// failed on, and the lock is a second fact about the same run.
+		return fmt.Errorf("%w (releasing the extract lock on %s also failed: %v)", err, id, relErr)
+	}
+	if committed {
+		return fmt.Errorf("%w: %s: %v", errCommittedNotReleased, id, relErr)
+	}
+	return fmt.Errorf("remote: could not release the extract lock on %s: %w", id, relErr)
 }
 
 // recoverBundleDir repairs what a crash left behind in dir. It runs in two
@@ -421,7 +476,10 @@ type bundleCandidate struct {
 // by the destination its marker names. It mutates nothing: a directory that is
 // going to be deleted is decided on under the destination's lock, and this runs
 // before any lock is held. Entries it cannot attribute are reported here, once
-// per pass, because a copy nothing names is one an operator cannot find.
+// per pass, because a copy nothing names is one an operator cannot find. An
+// entry whose probe failed is grouped too, when its marker still names a
+// destination, so the fault reaches the reconcile that can stop that
+// destination rather than disappearing with the entry.
 func scanBundleDir(dir string, logf func(string, ...any)) map[string][]bundleCandidate {
 	entries, err := stagingFS.readDir(dir)
 	if err != nil {
@@ -441,10 +499,22 @@ func scanBundleDir(dir string, logf func(string, ...any)) map[string][]bundleCan
 			logf("remote: %s does not carry a name this code writes; leaving it in place", staging)
 			continue
 		}
-		id, ok, _ := attributeStagingDir(dir, staging, seq, logf)
-		if !ok {
+		id, ok, unreadable := attributeStagingDir(dir, staging, seq, logf)
+		if unreadable && id == "" {
+			// Nothing on disk names a destination for this entry, so no group
+			// can carry the fault and stopping every link in the directory
+			// would cost more than the one wrong restore it prevents. The
+			// refusal is already logged, and the copy stays where it is.
 			continue
 		}
+		if !ok && !unreadable {
+			continue
+		}
+		// An entry that could not be read is grouped like any other candidate
+		// for the destination it names: reconcile re-probes it under the lock,
+		// and a fault that is still there stops that destination. Dropping it
+		// here would leave the group holding only the older copies, and one of
+		// those would be published over the copy nobody could read.
 		byDest[id] = append(byDest[id], bundleCandidate{path: staging, seq: seq, dest: id})
 	}
 	return byDest
@@ -465,7 +535,10 @@ func attributeStagingDir(dir, staging string, seq int64, logf func(string, ...an
 		// can carry a file named txn at its own root, so falling through on an
 		// unreadable probe would let the tree answer for itself.
 		logf("remote: %s could not be checked for a work tree (%v); leaving it in place", staging, err)
-		return "", false, true
+		// The marker is still read, for the destination's name alone. ok stays
+		// false, so nothing the marker says can license an action here; the name
+		// only tells the caller which destination this fault has to stop.
+		return markerDest(dir, staging, seq), false, true
 	}
 	m, err := readMarker(staging)
 	if err != nil {
@@ -501,6 +574,24 @@ func attributeStagingDir(dir, staging string, seq int64, logf func(string, ...an
 		return "", false, false
 	}
 	return id, true, false
+}
+
+// markerDest reads the destination a staged tree names, with none of the
+// authority attributeStagingDir grants a clean read: it exists so an entry whose
+// probe failed can still be attributed to the destination whose recovery has to
+// stop. Every check attribution makes is repeated, because a marker that fails
+// one of them names no destination this code would have written, and refusing to
+// answer is what keeps a fault from stopping a link it never belonged to.
+func markerDest(dir, staging string, seq int64) string {
+	m, err := readMarker(staging)
+	if err != nil || m.Kind != txnKindBundleExtract || m.Seq != seq {
+		return ""
+	}
+	id, err := sanitizeLinkID(m.Dest)
+	if err != nil || !withinDir(dir, filepath.Join(dir, id)) {
+		return ""
+	}
+	return id
 }
 
 // candidateState is one candidate classified per the recovery design. empty,
@@ -548,7 +639,14 @@ func reconcileLink(dir, id string, cands []bundleCandidate, logf func(string, ..
 		logf("remote: another process holds %s; leaving its staged copies alone", id)
 		return
 	}
-	defer unlockFile()
+	defer func() {
+		// Recovery returns nothing, so this log is the only place a lock it
+		// could not let go of can be seen. A silent failure here reads as a
+		// clean pass while the next one waits out a lock nobody holds.
+		if err := unlockFile(); err != nil {
+			logf("remote: could not release the extract lock on %s: %v", id, err)
+		}
+	}()
 
 	states, ok := classifyCandidates(dir, id, cands, logf)
 	if !ok {
@@ -1030,7 +1128,7 @@ func ListKeptBackups(dir string) ([]KeptBackup, error) {
 // else is refused and left for the operator to remove by hand, because this is
 // the only command that deletes a Kept backup and a wrong answer here is the
 // last copy of a tree.
-func RemoveKeptBackup(dir, name string) error {
+func RemoveKeptBackup(dir, name string) (err error) {
 	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
 		// Ahead of every filesystem call: a name carrying a separator joins to a
 		// path outside dir, which would make this a remote rm.
@@ -1058,14 +1156,22 @@ func RemoveKeptBackup(dir, name string) error {
 	if heldFile {
 		return fmt.Errorf("remote: another process holds %s; try again once it finishes", id)
 	}
-	defer unlockFile()
+	// removed is what keeps a release failure from reading as "nothing was
+	// removed": this is the only command that deletes a Kept backup, and an
+	// operator sent back to it by an ambiguous error finds the entry gone.
+	removed := false
+	defer func() { err = mergeReleaseFailure(err, unlockFile(), removed, id) }()
 	// Re-read under the lock. The attribution above ran with nothing excluding a
 	// live extract, and a directory that stopped being this link's in between is
 	// one that must not be deleted on the strength of the earlier reading.
 	if again, ok, _ := attributeStagingDir(dir, path, seq, discardLog); !ok || again != id {
 		return fmt.Errorf("remote: %s is no longer attributable to %s; leaving it in place", name, id)
 	}
-	return stagingFS.removeAll(path)
+	if rmErr := stagingFS.removeAll(path); rmErr != nil {
+		return rmErr
+	}
+	removed = true
+	return nil
 }
 
 // dirBytes sums the regular files under path. Unreadable entries are skipped
@@ -1177,7 +1283,7 @@ func readMarker(dir string) (txnMarker, error) {
 // atomic, so a crash between them leaves dest absent with the prior tree in
 // staging/backup, which the marker is what lets recovery attribute and put back.
 // logf may be nil.
-func extractBundle(ctx context.Context, bundleFile, dest string, logf func(string, ...any)) error {
+func extractBundle(ctx context.Context, bundleFile, dest string, logf func(string, ...any)) (err error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -1194,7 +1300,12 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 	if err != nil {
 		return err
 	}
-	defer unlockFile()
+	// published is the fact the release failure must not erase. The lock is let
+	// go of after the swap, so a bare release error would tell the client the
+	// upload did nothing and have it send the same bundle again over the tree
+	// this extract just installed.
+	published := false
+	defer func() { err = mergeReleaseFailure(err, unlockFile(), published, filepath.Base(dest)) }()
 
 	// The sequence records this extract's place in the order, which is what lets
 	// recovery tell an older leftover staging dir from a newer one. It is one
@@ -1260,6 +1371,7 @@ func extractBundle(ctx context.Context, bundleFile, dest string, logf func(strin
 		}
 		return err
 	}
+	published = true
 	// The flag is the only evidence that the copy in backup was published over.
 	// Without it that copy has to be kept, so a failure here costs one retained
 	// tree and never the publish, which has already landed and is reported as

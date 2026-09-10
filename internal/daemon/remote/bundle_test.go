@@ -2588,6 +2588,65 @@ func TestRecoverBundleDirStopsOnAnUnreadableCandidate(t *testing.T) {
 	}
 }
 
+// The scan is where a fault has to reach the destination it belongs to. The
+// work-tree probe on a staging dir is the one attribution step that runs before
+// the marker is read, and dropping the entry there leaves the group for that
+// link carrying only the older copies: recovery then publishes one of those over
+// the copy nobody could read, which is the fallback the no-fallback rule exists
+// to prevent.
+func TestRecoverBundleDirStopsWhenACandidateWorkTreeProbeFails(t *testing.T) {
+	t.Run("the fault stops the destination it names", func(t *testing.T) {
+		dir := t.TempDir()
+		older := stageBackup(t, dir, "", "proj-1", "v1", 3)
+		newest := stageBackup(t, dir, "", "proj-1", "v2", 5)
+		injectFault(t, "stat", func(args ...string) bool {
+			return args[0] == filepath.Join(newest, ".git")
+		}, errors.New("injected work-tree probe failure"))
+
+		logs := recoverAndLog(t, dir)
+
+		if _, err := os.Lstat(filepath.Join(dir, "proj-1")); !os.IsNotExist(err) {
+			t.Fatalf("recovery published a copy while a newer candidate could not be probed: %v", err)
+		}
+		for _, staging := range []string{newest, older} {
+			if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
+				t.Errorf("every copy for that destination must be retained: %v", err)
+			}
+		}
+		if !logged(logs, newest) {
+			t.Errorf("the copy that could not be probed should be reported, got %v", logs)
+		}
+	})
+
+	// The fault is carried as a candidate for the destination, not as a verdict
+	// of its own, so a probe that answers under the lock leaves the entry a
+	// candidate like any other and the newest copy still wins.
+	t.Run("a fault that clears under the lock restores the newest", func(t *testing.T) {
+		dir := t.TempDir()
+		older := stageBackup(t, dir, "", "proj-1", "v1", 3)
+		newest := stageBackup(t, dir, "", "proj-1", "v2", 5)
+		var scanned atomic.Bool
+		injectFault(t, "stat", func(args ...string) bool {
+			if args[0] != filepath.Join(newest, ".git") {
+				return false
+			}
+			// Only the scan's probe fails; the re-read under the lock is the
+			// one that has to see the real filesystem.
+			return scanned.CompareAndSwap(false, true)
+		}, errors.New("injected work-tree probe failure"))
+
+		recoverAndLog(t, dir)
+
+		got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+		if err != nil || string(got) != "v2" {
+			t.Fatalf("restored a.txt = %q err %v, want the newest %q", got, err, "v2")
+		}
+		if _, err := os.Stat(filepath.Join(parkedStaging(older), "backup", "a.txt")); err != nil {
+			t.Errorf("the older copy must be kept, not deleted: %v", err)
+		}
+	})
+}
+
 // The reap is licensed by ownership plus the destination's lock, never by a
 // prefix and a clock. A live extract sits between its marker write and its
 // set-aside with exactly this shape, and the lock is the only thing that tells
@@ -3428,5 +3487,191 @@ func TestSanitizeLinkIDRefusesNamesThatAreNotDistinctOnWindows(t *testing.T) {
 	trimmed, err := sanitizeLinkID("proj-1 ")
 	if err != nil || trimmed != "proj-1" {
 		t.Errorf(`sanitizeLinkID("proj-1 ") = %q, %v; want it normalized to "proj-1"`, trimmed, err)
+	}
+}
+
+// ---- lock release seam -----------------------------------------------------
+
+// failExtractRelease makes the cross-process extract lock fail its release while
+// the lock itself is really taken and really let go. Release is the last step of
+// every operation that holds it, so it is the one cleanup failure that can
+// follow a mutation that already landed.
+func failExtractRelease(t *testing.T, err error) {
+	t.Helper()
+	real := acquireExtractLock
+	t.Cleanup(func() { acquireExtractLock = real })
+	acquireExtractLock = func(root, path string) (extractFileLock, error) {
+		lock, aerr := real(root, path)
+		if aerr != nil {
+			return nil, aerr
+		}
+		return failingRelease{lock: lock, err: err}, nil
+	}
+}
+
+// failingRelease still releases the real lock, so the operations after the one
+// under test are not left waiting on a lock this test never gives back.
+type failingRelease struct {
+	lock extractFileLock
+	err  error
+}
+
+func (f failingRelease) Release() error {
+	_ = f.lock.Release()
+	return f.err
+}
+
+// Release joins the platform unlock and the close, so a failure can mean the
+// lock file is still held and the next extract for this link waits it out. An
+// extract that swallowed it reported a clean run over a lock nobody let go of.
+func TestExtractBundleReportsAPublishItCouldNotUnlock(t *testing.T) {
+	dir := t.TempDir()
+	bundle := testBundle(t, "a.txt", "v1")
+	dest := filepath.Join(dir, "proj-1")
+	failExtractRelease(t, errors.New("injected release failure"))
+
+	err := extractBundle(context.Background(), bundle, dest, nil)
+	if err == nil {
+		t.Fatal("an extract that could not release its lock must not report a clean run")
+	}
+	if !errors.Is(err, errCommittedNotReleased) {
+		t.Fatalf("err = %v, want it to say the publish landed", err)
+	}
+	if !strings.Contains(err.Error(), "injected release failure") {
+		t.Errorf("err = %v, want the release failure named", err)
+	}
+	got, rerr := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if rerr != nil || string(got) != "v1" {
+		t.Fatalf("extracted a.txt = %q err %v, want the published tree %q", got, rerr, "v1")
+	}
+}
+
+// The primary cause is what the extract failed on; the release failure is a
+// second fact about the lock. Folding the first into the second would leave the
+// caller with a lock error and no reason for the extract itself.
+func TestExtractBundleKeepsThePrimaryCauseWhenTheReleaseAlsoFails(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "proj-1")
+	failExtractRelease(t, errors.New("injected release failure"))
+
+	err := extractBundle(context.Background(), filepath.Join(dir, "absent.bundle"), dest, nil)
+	if err == nil {
+		t.Fatal("a clone of a bundle that is not there must fail")
+	}
+	if !strings.Contains(err.Error(), "git clone") {
+		t.Errorf("err = %v, want the clone failure kept as the cause", err)
+	}
+	if !strings.Contains(err.Error(), "injected release failure") {
+		t.Errorf("err = %v, want the release failure carried too", err)
+	}
+	if errors.Is(err, errCommittedNotReleased) {
+		t.Errorf("err = %v, but nothing was published", err)
+	}
+	if _, serr := os.Stat(dest); !os.IsNotExist(serr) {
+		t.Errorf("a failed clone must publish nothing, got %v", serr)
+	}
+}
+
+// The removal is the mutation here, and it has already happened by the time the
+// lock is released. A bare release error reads as "nothing was removed", which
+// sends an operator back to a command whose work is done.
+func TestRemoveKeptBackupReportsARemovalItCouldNotUnlock(t *testing.T) {
+	t.Run("the removal landed", func(t *testing.T) {
+		dir := t.TempDir()
+		kept := plantKeptBackup(t, dir, "proj-1", "v1", 1)
+		failExtractRelease(t, errors.New("injected release failure"))
+
+		err := RemoveKeptBackup(dir, filepath.Base(kept))
+		if err == nil {
+			t.Fatal("a removal that could not release its lock must not report a clean run")
+		}
+		if !errors.Is(err, errCommittedNotReleased) {
+			t.Fatalf("err = %v, want it to say the removal landed", err)
+		}
+		if _, serr := os.Stat(kept); !os.IsNotExist(serr) {
+			t.Errorf("the removal itself landed, so the backup should be gone: %v", serr)
+		}
+	})
+
+	t.Run("the removal failed", func(t *testing.T) {
+		dir := t.TempDir()
+		kept := plantKeptBackup(t, dir, "proj-1", "v1", 1)
+		injectFault(t, "removeAll", func(args ...string) bool { return args[0] == kept }, errors.New("injected remove failure"))
+		failExtractRelease(t, errors.New("injected release failure"))
+
+		err := RemoveKeptBackup(dir, filepath.Base(kept))
+		if err == nil {
+			t.Fatal("a removal that failed must be reported")
+		}
+		if !strings.Contains(err.Error(), "injected remove failure") {
+			t.Errorf("err = %v, want the removal failure kept as the cause", err)
+		}
+		if !strings.Contains(err.Error(), "injected release failure") {
+			t.Errorf("err = %v, want the release failure carried too", err)
+		}
+		if errors.Is(err, errCommittedNotReleased) {
+			t.Errorf("err = %v, but nothing was removed", err)
+		}
+	})
+}
+
+// Recovery returns nothing, so its log is the only place a release failure can
+// surface. Silence there is a lock left held with no record of who held it.
+func TestRecoverBundleDirReportsALockItCouldNotRelease(t *testing.T) {
+	dir := t.TempDir()
+	staging := stageBackup(t, dir, "", "proj-1", "v1", 1)
+	failExtractRelease(t, errors.New("injected release failure"))
+
+	logs := recoverAndLog(t, dir)
+
+	if !logged(logs, "injected release failure") {
+		t.Errorf("the release failure should be reported, got %v", logs)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("restored a.txt = %q err %v, want the recovered tree %q", got, err, "v1")
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("the copy recovery restored from should be gone, got %v", err)
+	}
+}
+
+// The tree the client sent is at dest. Reporting the upload as rejected because
+// of the release would have the client send the same bundle again over the tree
+// it just published, so the result carries both facts: the path it landed at,
+// and the fault, which the bridge's log is what an operator sees.
+func TestBridgeUploadReportsAPublishItCouldNotUnlock(t *testing.T) {
+	srv := newBridgeServer(t, staticLauncher())
+	auth, _ := NewTokenAuthenticator("tok")
+	bundleRoot := t.TempDir()
+	var mu sync.Mutex
+	var logs []string
+	addr, ca := startBridge(t, srv, BridgeOptions{
+		Authenticator: auth,
+		BundleDir:     bundleRoot,
+		Log: func(line string) {
+			mu.Lock()
+			defer mu.Unlock()
+			logs = append(logs, line)
+		},
+	})
+	failExtractRelease(t, errors.New("injected release failure"))
+
+	repo := initTestRepo(t, "hello.txt", "hi there")
+	link, err := UploadRepoBundle(RemoteConfig{Address: addr, Token: "tok", CACertFile: ca}, repo, "proj-1")
+	if err != nil {
+		t.Fatalf("an upload whose tree landed must not come back rejected: %v", err)
+	}
+	if want := filepath.Join(bundleRoot, "proj-1"); link.RemotePath != want {
+		t.Fatalf("remote path = %q, want %q", link.RemotePath, want)
+	}
+	data, err := os.ReadFile(filepath.Join(link.RemotePath, "hello.txt"))
+	if err != nil || string(data) != "hi there" {
+		t.Fatalf("extracted hello.txt = %q err %v, want %q", data, err, "hi there")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !logged(logs, "injected release failure") {
+		t.Errorf("the bridge should report the lock it could not release, got %v", logs)
 	}
 }
