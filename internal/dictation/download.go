@@ -413,6 +413,63 @@ var curatedDescriptions = func() map[string]string {
 	return m
 }()
 
+// engineTagDigestChars is how much of the raw tag's SHA256 an encoded name
+// carries. Enough that two tags cannot be brought to the same destination by
+// picking their punctuation, short enough that the name stays readable.
+const engineTagDigestChars = 12
+
+// safeInstallTag reports whether a release tag is already one safe path
+// component: letters, digits, and the three separators a version string
+// actually uses. Anything else (a '/' above all, but also a ':' or a backslash
+// Windows would read as one) has to be encoded rather than joined.
+func safeInstallTag(tag string) bool {
+	if tag == "" {
+		return false
+	}
+	for i := 0; i < len(tag); i++ {
+		if !safeInstallTagByte(tag[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// safeInstallTagByte is the safe set itself, one byte at a time, so the check
+// and the sanitizer below cannot drift into disagreeing about which bytes are
+// the ones that have to be encoded.
+func safeInstallTagByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '.', c == '_', c == '-':
+		return true
+	}
+	return false
+}
+
+// engineDestName is an engine install's identity: one path component, derived
+// from a release tag that can be any string a release is named. The name is
+// also the Install lock's key and the destination recovery reads out of a
+// holder marker, so a separator in it would have the lock file, the marker, and
+// the install itself disagree about which object is protected. A tag that is
+// already safe encodes to itself byte for byte, which is what keeps every
+// engine already on disk under the name it has; anything else is sanitized and
+// carries a digest of the RAW tag, so two tags that sanitize alike still name
+// two destinations.
+func engineDestName(version, key string) string {
+	if safeInstallTag(version) {
+		return "engine-" + version + "-" + key
+	}
+	sanitized := []byte(version)
+	for i, c := range sanitized {
+		if !safeInstallTagByte(c) {
+			sanitized[i] = '_'
+		}
+	}
+	sum := sha256.Sum256([]byte(version))
+	return "engine-" + string(sanitized) + "-" + hex.EncodeToString(sum[:])[:engineTagDigestChars] + "-" + key
+}
+
 // EngineComponents identifies the resolved local-engine paths.
 type EngineComponents struct {
 	BinaryPath string // extracted sherpa-onnx-offline
@@ -494,38 +551,69 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 		apiBase = defaultAPIBase
 	}
 
-	engineName := "engine-" + version + "-" + key
+	engineName := engineDestName(version, key)
 	engineDir := filepath.Join(opts.DestRoot, engineName)
 	targetWindows := strings.HasPrefix(key, "windows-")
 	// Resolve through the tarball's flattened subdir so an ALREADY-extracted
 	// engine is found and not needlessly re-downloaded (the idempotency check).
-	enginePublished := func(dir string) bool {
+	enginePublished := func(dir string) (bool, error) {
 		bin, _ := resolveEnginePaths(dir, targetWindows)
-		return fileExists(bin)
+		return fileExistsErr(bin)
+	}
+	// Released versions joined the raw tag to DestRoot, so a tag that is not one
+	// path component extracted into a nested directory. That copy is a real
+	// engine and may be the only one on the disk, so it is reused rather than
+	// downloaded again beside a name it would never be found under. Nothing is
+	// installed when it is, which is why this runs outside the Install lock: the
+	// lock covers a destination this call then does not touch.
+	installed := false
+	if rawDir := filepath.Join(opts.DestRoot, "engine-"+version+"-"+key); rawDir != engineDir {
+		// A probe that could not run has not ruled the older layout out, and
+		// downloading over an answer nobody has is what orphans it.
+		published, err := usability(enginePublished).check(rawDir)
+		if err != nil {
+			return EngineComponents{}, err
+		}
+		if published {
+			engineDir = rawDir
+			installed = true
+		}
 	}
 	// The engine lock covers recovery, the decision to download, and the
 	// promotion, and it is released before the model lock is taken. Holding
 	// both would give two concurrent installs of different models an ordering
 	// to get wrong for no gain.
-	if err := withDestinationLock(ctx, opts.DestRoot, engineName, enginePublished, func(txn *destTxn) error {
-		// A previous run may have been stopped mid-promotion, leaving the only
-		// install in a holder beside engineDir. Put it back before deciding
-		// whether anything needs downloading.
-		restoreInterruptedPromotion(txn, engineDir, enginePublished, progress)
-		if enginePublished(engineDir) {
-			return nil
+	if !installed {
+		if err := withDestinationLock(ctx, opts.DestRoot, engineName, enginePublished, func(txn *destTxn) error {
+			// A previous run may have been stopped mid-promotion, leaving the only
+			// install in a holder beside engineDir. Put it back before deciding
+			// whether anything needs downloading.
+			// A recovery that stopped on a state it could not read has ruled on
+			// nothing. Deciding anything past this point would read "no evidence"
+			// as "nothing to recover" and download over an install that is sitting
+			// in a holder beside the destination.
+			if err := restoreInterruptedPromotion(txn, engineDir, enginePublished, progress); err != nil {
+				return err
+			}
+			published, err := usability(enginePublished).check(engineDir)
+			if err != nil {
+				return err
+			}
+			if published {
+				return nil
+			}
+			pinned := ""
+			if version == DefaultSherpaVersion && !opts.skipPinned {
+				pinned = pinnedEngineDigest[key]
+			}
+			asset, err := resolveAsset(ctx, client, apiBase, version, "sherpa-onnx-", suffix)
+			if err != nil {
+				return err
+			}
+			return downloadVerifyExtract(ctx, client, asset, pinned, false, "Engine", engineDir, txn, progress)
+		}); err != nil {
+			return EngineComponents{}, err
 		}
-		pinned := ""
-		if version == DefaultSherpaVersion && !opts.skipPinned {
-			pinned = pinnedEngineDigest[key]
-		}
-		asset, err := resolveAsset(ctx, client, apiBase, version, "sherpa-onnx-", suffix)
-		if err != nil {
-			return err
-		}
-		return downloadVerifyExtract(ctx, client, asset, pinned, false, "Engine", engineDir, txn, progress)
-	}); err != nil {
-		return EngineComponents{}, err
 	}
 	binPath, serverPath := resolveEnginePaths(engineDir, targetWindows)
 	if !fileExists(binPath) {
@@ -546,8 +634,14 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 		// leaves the model in a holder too. Put it back before deciding
 		// anything is missing: without this an offline user has no download to
 		// fall back on.
-		restoreInterruptedPromotion(txn, modelDir, dirHasModel, progress)
-		if dirHasModel(modelDir) {
+		if err := restoreInterruptedPromotion(txn, modelDir, dirHasModel, progress); err != nil {
+			return err
+		}
+		present, err := usability(dirHasModel).check(modelDir)
+		if err != nil {
+			return err
+		}
+		if present {
 			return nil
 		}
 		asset, err := resolveAsset(ctx, client, apiBase, modelReleaseTag, modelName, "")
@@ -577,12 +671,20 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 		return EngineComponents{}, err
 	}
 	resolvedModel := modelDir
-	if !hasTokensFile(resolvedModel) {
+	present, presentErr := hasTokensFile(resolvedModel)
+	if presentErr != nil && !errors.Is(presentErr, fs.ErrNotExist) {
+		return EngineComponents{}, presentErr
+	}
+	if !present {
 		if child, err := flattenSingleChild(modelDir); err == nil {
 			resolvedModel = child
 		}
+		present, presentErr = hasTokensFile(resolvedModel)
+		if presentErr != nil && !errors.Is(presentErr, fs.ErrNotExist) {
+			return EngineComponents{}, presentErr
+		}
 	}
-	if !hasTokensFile(resolvedModel) {
+	if !present {
 		return EngineComponents{}, fmt.Errorf("dictation download: model files not found after extraction in %s", modelDir)
 	}
 	return EngineComponents{BinaryPath: binPath, ServerPath: serverPath, ModelPath: resolvedModel}, nil
@@ -833,6 +935,32 @@ var holderFS = fsOps{
 	createTemp: os.CreateTemp,
 }
 
+// installFileLock is the part of lockutil.FileLock this file uses. Release joins
+// the platform unlock and the close, and neither can be made to fail through a
+// real lock, so without a seam the one path that reports a cleanup failure could
+// only be reasoned about.
+type installFileLock interface{ Release() error }
+
+// acquireInstallLock is the seam a destination's Install lock is taken through.
+// Tests swap it and restore it; nothing else writes to it.
+var acquireInstallLock = func(root, path string) (installFileLock, error) {
+	lock, err := lockutil.TryAcquireFileLockAt(root, path)
+	if err != nil {
+		// A typed nil in the interface would be non-nil to every caller, so the
+		// failure is returned as an untyped nil lock.
+		return nil, err
+	}
+	return lock, nil
+}
+
+// errInstalledNotReleased reports the one failure an operation can have after
+// its own mutation already landed: the Install lock is released last, so a
+// release failure is all that is left to go wrong. A caller that read it as a
+// plain failure would repeat a step that already ran, downloading an engine
+// that is installed or re-running a removal that is done, so the error says
+// both facts and every caller that can act on the difference tests for it.
+var errInstalledNotReleased = errors.New("dictation download: the operation completed but its install lock was not released")
+
 // errInstallInProgress reports that another process held this destination's
 // Install lock for the whole wait budget and the destination is still not
 // usable. It is not an install failure: nothing was attempted, and the caller
@@ -862,7 +990,7 @@ const installLockDir = ".install-locks"
 type destTxn struct {
 	root string
 	dest string
-	lock *lockutil.FileLock
+	lock installFileLock
 	// released is atomic because holds is the guard every locked entry point
 	// consults, and a handle can be released on one goroutine while another is
 	// still asking whether it is safe to act.
@@ -880,16 +1008,40 @@ func (t *destTxn) holds(destDir string) bool {
 	return t != nil && t.lock != nil && !t.released.Load() && t.destDir() == destDir
 }
 
-// release drops the Install lock. Idempotent, so a caller can release early and
-// still defer it.
-func (t *destTxn) release() {
+// release drops the Install lock and reports what releasing it cost. Release
+// joins the platform unlock and the close, and a failure in either can mean the
+// lock file is still held, so the caller merges it into its own outcome rather
+// than reporting a clean run over a lock nobody let go of. Idempotent, so a
+// caller can release early and still defer it; the flag flips in the same step
+// that yields the error, so no caller both fails to release and reports a clean
+// release, and holds stops claiming the destination either way.
+func (t *destTxn) release() error {
 	if t == nil || t.lock == nil {
-		return
+		return nil
 	}
 	if t.released.Swap(true) {
-		return
+		return nil
 	}
-	_ = t.lock.Release()
+	return t.lock.Release()
+}
+
+// mergeReleaseFailure folds an Install lock release failure into an operation's
+// own outcome. done says the operation's mutation already landed, which the
+// error has to keep saying: a caller that read this as "nothing happened" would
+// repeat a step that already ran.
+func mergeReleaseFailure(err, relErr error, done bool, dest string) error {
+	if relErr == nil {
+		return err
+	}
+	if err != nil {
+		// The primary cause stays the wrapped one: it is what the operation
+		// failed on, and the lock is a second fact about the same run.
+		return fmt.Errorf("%w (releasing the install lock on %s also failed: %v)", err, dest, relErr)
+	}
+	if done {
+		return fmt.Errorf("%w: %s: %v", errInstalledNotReleased, dest, relErr)
+	}
+	return fmt.Errorf("dictation download: could not release the install lock on %s: %w", dest, relErr)
 }
 
 // isInstallDestName reports whether name is one path component naming an install
@@ -950,7 +1102,7 @@ func tryLockDestination(destRoot, dest string) (txn *destTxn, held bool, err err
 	if err := holderFS.mkdir(lockDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return nil, false, err
 	}
-	lock, err := lockutil.TryAcquireFileLockAt(destRoot, filepath.Join(lockDir, dest+".lock"))
+	lock, err := acquireInstallLock(destRoot, filepath.Join(lockDir, dest+".lock"))
 	if err != nil {
 		if errors.Is(err, lockutil.ErrLockHeld) {
 			return nil, true, nil
@@ -960,19 +1112,54 @@ func tryLockDestination(destRoot, dest string) (txn *destTxn, held bool, err err
 	return &destTxn{root: destRoot, dest: dest, lock: lock}, false, nil
 }
 
+// usability answers whether a directory holds an install the caller can use.
+// The error is the third answer a bool cannot carry: a probe that could not run
+// says nothing about the copy, and reading it as "not usable" is what lets a
+// transient fault license moving, parking, or deleting the last copy there is.
+type usability func(dir string) (bool, error)
+
+// check applies the predicate and settles the one error that is an answer: the
+// expected install content being absent is what "not usable" means, and every
+// other failure is the probe saying nothing at all. Callers stop the whole
+// destination on the second, because a copy nobody could read may be the newest
+// one there is.
+func (p usability) check(dir string) (bool, error) {
+	ok, err := p(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return ok, nil
+}
+
 // withDestinationLock runs fn under dest's Install lock. A wait that runs out is
 // not by itself a failure: the likeliest reason is that the other process
 // finished this exact install, so usable re-checks the destination before the
 // caller is told anything is wrong.
-func withDestinationLock(ctx context.Context, destRoot, dest string, usable func(string) bool, fn func(*destTxn) error) error {
+func withDestinationLock(ctx context.Context, destRoot, dest string, usable usability, fn func(*destTxn) error) (err error) {
 	txn, err := lockDestination(ctx, destRoot, dest)
 	if err != nil {
-		if errors.Is(err, errInstallInProgress) && usable(filepath.Join(destRoot, dest)) {
-			return nil
+		if errors.Is(err, errInstallInProgress) {
+			// The recheck is the only evidence the wait was harmless. A probe
+			// that could not run is not that evidence, so both facts are
+			// reported rather than the timeout alone being answered with a
+			// silent success.
+			ok, probeErr := usable.check(filepath.Join(destRoot, dest))
+			if probeErr != nil {
+				return errors.Join(err, probeErr)
+			}
+			if ok {
+				return nil
+			}
 		}
 		return err
 	}
-	defer txn.release()
+	// fn returning nil means the destination is in the state the caller asked
+	// for, which is exactly what a bare lock error would hide: the caller would
+	// download the engine it just installed again.
+	defer func() { err = mergeReleaseFailure(err, txn.release(), err == nil, dest) }()
 	return fn(txn)
 }
 
@@ -1153,7 +1340,7 @@ type holderCandidate struct {
 // with no such marker behind it, which is retained and reported, never moved.
 // An entry that only collides with the prefix is neither: it was never this
 // install's, so it is not even reported on its account.
-func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []string, unreadable string) {
+func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []string, unreadable string, err error) {
 	// ReadDir and a prefix rather than filepath.Glob: destDir is a real path,
 	// and a '[' anywhere in it opens a character class to Glob, which then
 	// matches nothing and strands the install this exists to put back.
@@ -1161,7 +1348,11 @@ func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []stri
 	base := filepath.Base(destDir)
 	entries, err := holderFS.readDir(parent)
 	if err != nil {
-		return nil, nil, ""
+		// A listing that failed is not a listing that found nothing. The two
+		// are byte-identical to a caller reading only the slices, and reading
+		// the second for the first is how an install still sitting in a holder
+		// gets downloaded over.
+		return nil, nil, "", err
 	}
 	prefix := base + holderSuffix
 	for _, entry := range entries {
@@ -1182,7 +1373,7 @@ func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []stri
 				// install an older copy and let the next pass read that copy as
 				// proof this one was superseded, which is the provenance loss
 				// the no-fallback rule exists to prevent.
-				return nil, nil, path
+				return nil, nil, path, nil
 			}
 			unowned = append(unowned, path)
 			continue
@@ -1196,7 +1387,7 @@ func ownedHoldersBeside(destDir string) (owned []holderCandidate, unowned []stri
 		}
 		owned = append(owned, holderCandidate{path: path, seq: seq})
 	}
-	return owned, unowned, ""
+	return owned, unowned, "", nil
 }
 
 // parkKeptHolder renames a holder under the Kept prefix, which is how a copy
@@ -1312,7 +1503,7 @@ func ownedKeptHolder(path, base string, seq int64) error {
 // and the destination's Install lock has to be free. Anything else is refused
 // and left for the operator to remove by hand, because a Kept backup here is
 // often the only offline copy of an engine or a model.
-func RemoveKeptBackup(destRoot, name string) error {
+func RemoveKeptBackup(destRoot, name string) (err error) {
 	if !isInstallDestName(name) {
 		// Ahead of every filesystem call: the Kept grammar accepts a leading
 		// install name with a separator in it, so without this the join reaches
@@ -1334,7 +1525,10 @@ func RemoveKeptBackup(destRoot, name string) error {
 	if held {
 		return fmt.Errorf("dictation download: %s is being installed by another process; try again once it finishes", base)
 	}
-	defer txn.release()
+	// The removal is the mutation, and it has already happened by the time the
+	// lock is released. Reported bare, a release failure reads as "nothing was
+	// removed" and sends an operator back to a command whose work is done.
+	defer func() { err = mergeReleaseFailure(err, txn.release(), err == nil, base) }()
 	// Re-read under the lock. The check above ran with nothing excluding a live
 	// promotion, and a directory that stopped being this install's in between is
 	// one that must not be deleted on the strength of the earlier reading.
@@ -1442,7 +1636,7 @@ type holderState struct {
 // durable and the copy is skipped and kept, the second is a filesystem fault,
 // and turning a fault into a classification is how a transient error becomes a
 // permanent ruling about a copy nobody can get back.
-func classifyHolder(c holderCandidate, published func(string) bool) (holderState, error) {
+func classifyHolder(c holderCandidate, published usability) (holderState, error) {
 	st := holderState{holderCandidate: c}
 	install := filepath.Join(c.path, "install")
 	// ReadDir rather than Stat: a copy whose contents cannot be listed is one
@@ -1460,7 +1654,11 @@ func classifyHolder(c holderCandidate, published func(string) bool) (holderState
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return holderState{}, err
 	}
-	st.usable = published(install)
+	usable, err := published.check(install)
+	if err != nil {
+		return holderState{}, err
+	}
+	st.usable = usable
 	return st, nil
 }
 
@@ -1538,7 +1736,7 @@ func setAsideUnusableDest(destDir string) (string, error) {
 // actually use. It is the whole basis of every decision here, because "there is
 // something at destDir" and "a promotion published there" are different claims,
 // and only the second makes a copy beside it superseded.
-func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(string) bool, report func(string)) {
+func restoreInterruptedPromotion(txn *destTxn, destDir string, published usability, report func(string)) error {
 	if report == nil {
 		report = func(string) {}
 	}
@@ -1547,22 +1745,26 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 	// remove it, leaving that promotion's rollback nothing to put back.
 	if !txn.holds(destDir) {
 		report(fmt.Sprintf("Skipping recovery of %s: no install lock is held for it", filepath.Base(destDir)))
-		return
+		return nil
 	}
 	// Every ruling below rests on the predicate. With none there is no evidence
 	// for any of them, and acting anyway would delete or publish a copy on the
 	// strength of a directory merely existing.
 	if published == nil {
 		report(fmt.Sprintf("Skipping recovery of %s: no usability check was supplied", filepath.Base(destDir)))
-		return
+		return nil
 	}
 	// Only holders this code can prove it wrote for THIS destination. A sibling
 	// that merely collides with the prefix is not a copy of this install and is
 	// never restored from, removed, or reported on its account.
-	owned, unowned, unreadable := ownedHoldersBeside(destDir)
+	owned, unowned, unreadable, err := ownedHoldersBeside(destDir)
+	if err != nil {
+		report(fmt.Sprintf("Stopping recovery of %s: the copies beside it could not be listed (%v)", filepath.Base(destDir), err))
+		return err
+	}
 	if unreadable != "" {
 		report(fmt.Sprintf("dictation: leaving every retained copy for %s in place until %s can be read", filepath.Base(destDir), unreadable))
-		return
+		return nil
 	}
 	for _, path := range unowned {
 		report(fmt.Sprintf("Keeping %s: nothing in it identifies it as a copy of %s", path, filepath.Base(destDir)))
@@ -1575,7 +1777,7 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 			// the rest would mean choosing between copies while one of them is
 			// unread, and the copy nobody could read may be the newest.
 			report(fmt.Sprintf("Stopping recovery of %s: %s could not be read (%v)", filepath.Base(destDir), candidate.path, err))
-			return
+			return err
 		}
 		states = append(states, st)
 	}
@@ -1591,10 +1793,23 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 		destPresent = true
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		report(fmt.Sprintf("Stopping recovery of %s: it could not be read (%v)", filepath.Base(destDir), err))
-		return
+		return err
 	}
 
-	if destPresent && published(destDir) {
+	destUsable := false
+	if destPresent {
+		usable, err := published.check(destDir)
+		if err != nil {
+			// Same rule as an unreadable candidate: without an answer about the
+			// destination there is no telling whether a copy beside it is
+			// superseded or the last one left, and every branch below turns on
+			// exactly that.
+			report(fmt.Sprintf("Stopping recovery of %s: it could not be read (%v)", filepath.Base(destDir), err))
+			return err
+		}
+		destUsable = usable
+	}
+	if destUsable {
 		// The destination holds a real install, so every copy beside it was set
 		// aside by some earlier transaction. Only the ones carrying the commit
 		// flag are provably superseded by it; the rest may still be the last
@@ -1608,7 +1823,7 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 			}
 			retainHolder(st, report)
 		}
-		return
+		return nil
 	}
 
 	// The destination is absent or holds nothing this caller can use, so a
@@ -1639,7 +1854,7 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 		for _, st := range states {
 			retainHolder(st, report)
 		}
-		return
+		return nil
 	}
 
 	// Classify, select, THEN set aside. A husk moved before a candidate is
@@ -1651,7 +1866,7 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 		husk, err = setAsideUnusableDest(destDir)
 		if err != nil {
 			report(fmt.Sprintf("Leaving %s as it is: it could not be set aside (%v)", destDir, err))
-			return
+			return nil
 		}
 	}
 	winner := states[selected]
@@ -1667,7 +1882,7 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 			}
 		}
 		report(fmt.Sprintf("Keeping the copy of %s in %s: it could not be moved back into place (%v)", filepath.Base(destDir), winner.path, err))
-		return
+		return nil
 	}
 	// The winner's holder is owned and now holds nothing.
 	if err := holderFS.removeAll(winner.path); err != nil {
@@ -1681,6 +1896,7 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published func(st
 			retainHolder(st, report)
 		}
 	}
+	return nil
 }
 
 // promoteStagedDir moves stageDir into place at destDir. os.Rename refuses to
@@ -1840,7 +2056,7 @@ func extractTarBz2(archivePath, destDir, label string, progress func(string)) er
 // flattenSingleChild returns the sole subdirectory of dir (the tarball's
 // top-level folder) when dir contains exactly one directory entry.
 func flattenSingleChild(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := holderFS.readDir(dir)
 	if err != nil {
 		return "", err
 	}
@@ -1863,7 +2079,12 @@ func ModelDownloaded(destRoot, dirName string) bool {
 	if destRoot == "" || dirName == "" {
 		return false
 	}
-	return dirHasModel(filepath.Join(destRoot, dirName))
+	// Deliberately boolean while the transaction's own predicate is not: the
+	// picker draws a badge, and a probe that could not run is best drawn as
+	// "not downloaded". Recovery makes the opposite call, because there it
+	// licenses moving and deleting copies.
+	present, _ := dirHasModel(filepath.Join(destRoot, dirName))
+	return present
 }
 
 // EngineDownloaded reports whether the shared sherpa-onnx engine is already on
@@ -1876,37 +2097,65 @@ func EngineDownloaded(destRoot, version string) bool {
 	if version == "" {
 		version = DefaultSherpaVersion
 	}
-	engineDir := filepath.Join(destRoot, "engine-"+version+"-"+platformKey())
-	bin, _ := resolveEnginePaths(engineDir, runtime.GOOS == "windows")
-	return fileExists(bin)
-}
-
-func dirHasModel(dir string) bool {
-	if hasTokensFile(dir) {
-		return true
-	}
-	if child, err := flattenSingleChild(dir); err == nil && child != dir {
-		return hasTokensFile(child)
-	}
-	return false
-}
-
-// hasTokensFile reports whether dir holds a sherpa tokens file — usually
-// "tokens.txt", but some families (Whisper) prefix it as "<model>-tokens.txt".
-func hasTokensFile(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), "tokens.txt") {
+	key := platformKey()
+	// Both layouts, for the same reason EnsureLocalEngine reads both: a tag that
+	// is not one path component extracted into a nested directory before the
+	// destination name became a lock key, and a badge that missed that copy
+	// would offer a download of an engine already on the disk.
+	for _, dir := range []string{
+		filepath.Join(destRoot, engineDestName(version, key)),
+		filepath.Join(destRoot, "engine-"+version+"-"+key),
+	} {
+		bin, _ := resolveEnginePaths(dir, runtime.GOOS == "windows")
+		// Boolean for the same reason ModelDownloaded is: a badge, not a verdict.
+		if present, _ := fileExistsErr(bin); present {
 			return true
 		}
 	}
 	return false
 }
 
+func dirHasModel(dir string) (bool, error) {
+	present, err := hasTokensFile(dir)
+	if present || err != nil {
+		return present, err
+	}
+	child, err := flattenSingleChild(dir)
+	if err != nil {
+		return false, err
+	}
+	if child == dir {
+		return false, nil
+	}
+	return hasTokensFile(child)
+}
+
+// hasTokensFile reports whether dir holds a sherpa tokens file — usually
+// "tokens.txt", but some families (Whisper) prefix it as "<model>-tokens.txt".
+func hasTokensFile(dir string) (bool, error) {
+	entries, err := holderFS.readDir(dir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), "tokens.txt") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// fileExistsErr is the error-aware form: a probe that could not run is not a
+// probe that found nothing.
+func fileExistsErr(path string) (bool, error) {
+	info, err := holderFS.stat(path)
+	if err != nil {
+		return false, err
+	}
+	return !info.IsDir(), nil
+}
+
 func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	present, _ := fileExistsErr(path)
+	return present
 }

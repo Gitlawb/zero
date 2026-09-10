@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -501,13 +502,13 @@ func TestRestoreInterruptedPromotionReplacesADestThatIsNotAUsableInstall(t *test
 	for _, tc := range []struct {
 		name    string
 		seed    func(t *testing.T, dest string)
-		usable  func(string) bool
+		usable  usability
 		content string
 	}{
 		{
 			name:    "empty husk",
 			seed:    func(t *testing.T, dest string) {},
-			usable:  func(dir string) bool { bin, _ := resolveEnginePaths(dir, false); return fileExists(bin) },
+			usable:  func(dir string) (bool, error) { bin, _ := resolveEnginePaths(dir, false); return fileExistsErr(bin) },
 			content: "bin/sherpa-onnx-offline",
 		},
 		{
@@ -516,7 +517,7 @@ func TestRestoreInterruptedPromotionReplacesADestThatIsNotAUsableInstall(t *test
 				t.Helper()
 				plantUnusableDest(t, dest)
 			},
-			usable:  func(dir string) bool { bin, _ := resolveEnginePaths(dir, false); return fileExists(bin) },
+			usable:  func(dir string) (bool, error) { bin, _ := resolveEnginePaths(dir, false); return fileExistsErr(bin) },
 			content: "bin/sherpa-onnx-offline",
 		},
 		{
@@ -552,7 +553,7 @@ func TestRestoreInterruptedPromotionReplacesADestThatIsNotAUsableInstall(t *test
 
 			restoreInterruptedPromotion(lockFor(t, dest), dest, tc.usable, nil)
 
-			if !tc.usable(dest) {
+			if ok, err := tc.usable(dest); !ok || err != nil {
 				t.Errorf("the usable copy should be live at %s", dest)
 			}
 			got, err := os.ReadFile(filepath.Join(dest, "engine"))
@@ -681,15 +682,21 @@ func lockFor(t *testing.T, destDir string) *destTxn {
 	if err != nil {
 		t.Fatalf("locking %s: %v", destDir, err)
 	}
-	t.Cleanup(txn.release)
+	t.Cleanup(func() { _ = txn.release() })
 	return txn
 }
 
 // testPublished is the "is this a real install" predicate these tests use: the
 // fixtures write an "engine" file, so its presence is what publication means here.
-func testPublished(dir string) bool {
+func testPublished(dir string) (bool, error) {
 	_, err := os.Stat(filepath.Join(dir, "engine"))
-	return err == nil
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // plantHolder writes an install into a holder named and marked the way
@@ -2041,7 +2048,7 @@ func TestOwnedHoldersBesideIgnoresAPrefixCollidingSibling(t *testing.T) {
 	unmarked := fmt.Sprintf("%s%s%020d%s", dest, holderSuffix, 3, holderSeqSuffix)
 	makeDir(t, unmarked)
 
-	owned, unowned, _ := ownedHoldersBeside(dest)
+	owned, unowned, _, _ := ownedHoldersBeside(dest)
 
 	gotOwned := make([]string, 0, len(owned))
 	for _, c := range owned {
@@ -2092,7 +2099,7 @@ func TestParkKeptHolderMovesTheCopyUnderTheKeptPrefix(t *testing.T) {
 	if _, err := os.Stat(holder); !os.IsNotExist(err) {
 		t.Errorf("the holder should be gone from the scanned prefix, got %v", err)
 	}
-	owned, unowned, _ := ownedHoldersBeside(dest)
+	owned, unowned, _, _ := ownedHoldersBeside(dest)
 	if len(owned) != 0 || len(unowned) != 0 {
 		t.Errorf("a parked copy must leave the scan: owned %v unowned %v", owned, unowned)
 	}
@@ -2542,7 +2549,7 @@ func TestRestoreInterruptedPromotionLeavesAnUnusableDestinationWithNoCandidateAl
 		if _, err := os.Stat(filepath.Join(dest, "bin", "README")); err != nil {
 			t.Fatalf("pass %d: the destination must be left exactly as found: %v", pass, err)
 		}
-		if testPublished(dest) {
+		if ok, _ := testPublished(dest); ok {
 			t.Fatalf("pass %d: nothing was restored, so the destination cannot have become usable", pass)
 		}
 		parked := keptName(t, dest, unusable)
@@ -3198,4 +3205,550 @@ func TestDestTxnDoesNotClaimALockItReleased(t *testing.T) {
 	if txn.holds(destDir) {
 		t.Error("a released handle must not report that it still holds the destination")
 	}
+}
+
+// ---- a probe that could not run ---------------------------------------------
+
+// snapshotTree records every path under root with the size of each file, so a
+// test can assert nothing moved, was parked, or was removed. Names alone would
+// miss a copy restored over a destination that already existed.
+func snapshotTree(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		if d.IsDir() {
+			// The lock directory is the mechanism, not install state: it is
+			// created by taking a lock at all, so counting it would report a
+			// change on a pass that touched nothing.
+			if rel == installLockDir {
+				return filepath.SkipDir
+			}
+			out = append(out, rel+"/")
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		out = append(out, fmt.Sprintf("%s %d", rel, info.Size()))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// plantEngineHolder plants an interrupted promotion whose copy is a real engine
+// layout: bin/ holds the executables and lib/ is the second directory the
+// tarball ships, which keeps flattenSingleChild from redirecting the probe to a
+// path the fault does not name.
+func plantEngineHolder(t *testing.T, destDir string, seq int64) string {
+	t.Helper()
+	holder := plantHolder(t, destDir, seq, "engine copy", false)
+	install := filepath.Join(holder, "install")
+	if err := os.MkdirAll(filepath.Join(install, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(install, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin, server := enginePaths(install, false)
+	for _, path := range []string{bin, server} {
+		if err := os.WriteFile(path, []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return holder
+}
+
+// A scan that never ran is not a scan that found nothing. With the parent
+// unreadable there is no evidence about any copy beside the destination, so
+// EnsureLocalEngine has to stop before its idempotency check rather than read
+// the empty result as "nothing to recover" and download a replacement over an
+// install that is sitting right there.
+func TestEnsureLocalEngineStopsWhenTheHolderScanCannotBeRead(t *testing.T) {
+	root := t.TempDir()
+	engineDir := filepath.Join(root, "engine-test-linux-amd64")
+	holder := plantEngineHolder(t, engineDir, 100)
+	modelDir := filepath.Join(root, "model-moonshine-tiny-en-int8")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "tokens.txt"), []byte("t"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "the release API must not be reached on unknown state", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	injected := errors.New("injected parent listing failure")
+	faulted := true
+	injectFault(t, "readDir", func(args ...string) bool { return faulted && args[0] == root }, injected)
+	before := snapshotTree(t, root)
+
+	_, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "test", APIBase: srv.URL, platformKey: "linux-amd64", skipPinned: true,
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("EnsureLocalEngine = %v, want the scan failure", err)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the release API was contacted %d times on a state nothing could read", n)
+	}
+	if got := snapshotTree(t, root); !slices.Equal(got, before) {
+		t.Errorf("nothing may move while the scan is unreadable:\nbefore %v\nafter  %v", before, got)
+	}
+
+	// Same disk, fault removed: the holder is what the install is, and putting
+	// it back must need no download at all.
+	faulted = false
+	comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "test", APIBase: srv.URL, platformKey: "linux-amd64", skipPinned: true,
+	})
+	if err != nil {
+		t.Fatalf("the retry from the unchanged state should succeed: %v", err)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the recovered install needed no download, but the API was contacted %d times", n)
+	}
+	if !fileExists(comp.BinaryPath) {
+		t.Errorf("the restored engine binary is missing at %q", comp.BinaryPath)
+	}
+	if _, err := os.Stat(holder); !os.IsNotExist(err) {
+		t.Errorf("the restored holder should be cleared, got %v", err)
+	}
+}
+
+// The usability predicate is the whole basis of recovery's rulings, so a probe
+// that could not run must stop the destination. Reading a permission error as
+// "this copy is not usable" would skip the newest copy, park it, and restore an
+// older one over the destination, which is the provenance loss the no-fallback
+// rule exists to prevent.
+func TestRestoreInterruptedPromotionStopsWhenTheProbeCannotRun(t *testing.T) {
+	injected := errors.New("injected probe failure")
+	for _, tc := range []struct {
+		name string
+		// plant writes one holder's copy and returns the path the probe reads,
+		// which is the path the fault names.
+		plant     func(t *testing.T, destDir string, seq int64) (holder, probed string)
+		step      string
+		published usability
+		seedDest  func(t *testing.T, destDir string)
+	}{
+		{
+			name: "the engine executable cannot be stat-ed",
+			step: "stat",
+			plant: func(t *testing.T, destDir string, seq int64) (string, string) {
+				t.Helper()
+				holder := plantEngineHolder(t, destDir, seq)
+				bin, _ := enginePaths(filepath.Join(holder, "install"), false)
+				return holder, bin
+			},
+			published: func(dir string) (bool, error) {
+				bin, _ := resolveEnginePaths(dir, false)
+				return fileExistsErr(bin)
+			},
+			seedDest: plantUnusableDest,
+		},
+		{
+			name: "the model's nested directory cannot be listed",
+			step: "readDir",
+			plant: func(t *testing.T, destDir string, seq int64) (string, string) {
+				t.Helper()
+				holder := plantHolder(t, destDir, seq, "model copy", false)
+				nested := filepath.Join(holder, "install", "moonshine")
+				if err := os.MkdirAll(nested, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(nested, "tokens.txt"), []byte("t"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return holder, nested
+			},
+			published: dirHasModel,
+			seedDest: func(t *testing.T, destDir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(destDir, "something.onnx"), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+			if err := os.MkdirAll(dest, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.seedDest(t, dest)
+			older, _ := tc.plant(t, dest, 100)
+			newer, probed := tc.plant(t, dest, 200)
+
+			faulted := true
+			injectFault(t, tc.step, func(args ...string) bool { return faulted && args[0] == probed }, injected)
+			before := snapshotTree(t, root)
+			var reported []string
+
+			txn := lockFor(t, dest)
+			restoreInterruptedPromotion(txn, dest, tc.published, reporterFor(&reported))
+
+			if got := snapshotTree(t, root); !slices.Equal(got, before) {
+				t.Errorf("neither copy may move while a probe cannot run:\nbefore %v\nafter  %v", before, got)
+			}
+			assertReports(t, reported, injected.Error())
+			if _, err := os.Stat(filepath.Join(older, "install")); err != nil {
+				t.Errorf("the older copy must be left exactly where it is: %v", err)
+			}
+
+			// Same disk, fault removed: the newest copy is the one restored.
+			faulted = false
+			txn.release()
+			restoreInterruptedPromotion(lockFor(t, dest), dest, tc.published, nil)
+
+			if ok, err := tc.published(dest); !ok || err != nil {
+				t.Errorf("the retry should restore a usable install at %s: ok=%v err=%v", dest, ok, err)
+			}
+			if _, err := os.Stat(newer); !os.IsNotExist(err) {
+				t.Errorf("the restored holder should be cleared, got %v", err)
+			}
+		})
+	}
+}
+
+// The destination's own probe is what decides whether every copy beside it is
+// superseded or still the last one of something. A probe that could not run
+// answers neither, so the destination stops rather than being taken apart on the
+// strength of a fault.
+func TestRestoreInterruptedPromotionStopsWhenTheDestinationProbeCannotRun(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	if err := os.MkdirAll(filepath.Join(dest, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dest, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	destBin, _ := enginePaths(dest, false)
+	if err := os.WriteFile(destBin, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	holder := plantEngineHolder(t, dest, 100)
+	published := usability(func(dir string) (bool, error) {
+		bin, _ := resolveEnginePaths(dir, false)
+		return fileExistsErr(bin)
+	})
+
+	injected := errors.New("injected destination probe failure")
+	faulted := true
+	injectFault(t, "stat", func(args ...string) bool { return faulted && args[0] == destBin }, injected)
+	txn := lockFor(t, dest)
+	before := snapshotTree(t, root)
+	var reported []string
+
+	restoreInterruptedPromotion(txn, dest, published, reporterFor(&reported))
+
+	if got := snapshotTree(t, root); !slices.Equal(got, before) {
+		t.Errorf("nothing may move while the destination cannot be probed:\nbefore %v\nafter  %v", before, got)
+	}
+	assertReports(t, reported, injected.Error())
+
+	// Same disk, fault removed: the destination is the published install, so
+	// the copy beside it is kept rather than restored over it.
+	faulted = false
+	restoreInterruptedPromotion(txn, dest, published, nil)
+
+	if ok, err := published(dest); !ok || err != nil {
+		t.Errorf("the published destination must stay live: ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(filepath.Join(keptName(t, dest, holder), "install")); err != nil {
+		t.Errorf("the copy beside it should be kept under the Kept prefix: %v", err)
+	}
+}
+
+// Waiting out another process is only harmless if the destination is usable
+// afterwards. A recheck that could not run is no evidence of that, so the wait
+// and the probe are both reported instead of the caller being told the install
+// it never made is done.
+func TestWithDestinationLockDoesNotReportSuccessOnAnUnreadableDestination(t *testing.T) {
+	shortenInstallLockWait(t, 100*time.Millisecond)
+	root := t.TempDir()
+	dest := filepath.Join(root, "engine-1.2.3-linux-x64")
+	lockFor(t, dest)
+	injected := errors.New("injected recheck failure")
+	ran := false
+
+	err := withDestinationLock(context.Background(), root, filepath.Base(dest),
+		func(dir string) (bool, error) { return false, injected },
+		func(*destTxn) error {
+			ran = true
+			return nil
+		})
+
+	if !errors.Is(err, errInstallInProgress) || !errors.Is(err, injected) {
+		t.Errorf("withDestinationLock = %v, want both the wait and the failed recheck", err)
+	}
+	if ran {
+		t.Error("the callback must not run without the lock")
+	}
+}
+
+// ---- the engine identity ----------------------------------------------------
+
+// A tag that is already one safe path component has to encode to itself, byte
+// for byte. Every engine on disk today was named that way, and an encoding that
+// renamed even one of them would strand a cache the user already paid to
+// download.
+func TestEngineDestNameKeepsASafeTagAsItIs(t *testing.T) {
+	for _, tag := range []string{
+		DefaultSherpaVersion, "latest", "v1.13.3", "v1.13.3-rc.1", "1.2.3", "asr-models", "a_b.c-d",
+	} {
+		want := "engine-" + tag + "-linux-amd64"
+		if got := engineDestName(tag, "linux-amd64"); got != want {
+			t.Errorf("engineDestName(%q) = %q, want %q", tag, got, want)
+		}
+	}
+}
+
+// A tag that is not a safe component still has to name one destination, and two
+// different tags must never name the same one: the name is what the Install
+// lock, the holder markers, and the ownership checks all key off, so a collision
+// would have two releases sharing one install and one lock.
+func TestEngineDestNameEncodesAnUnsafeTagWithoutColliding(t *testing.T) {
+	tags := []string{"release/v1", "release\\v1", "release:v1", "release v1", "release_v1", "../v1", "release/v2"}
+	seen := map[string]string{}
+	for _, tag := range tags {
+		name := engineDestName(tag, "linux-amd64")
+		if !isInstallDestName(name) {
+			t.Errorf("engineDestName(%q) = %q, which is not an install destination name", tag, name)
+		}
+		if other, ok := seen[name]; ok {
+			t.Errorf("engineDestName(%q) and engineDestName(%q) both = %q", other, tag, name)
+		}
+		seen[name] = tag
+	}
+}
+
+// plantEngineTree writes the engine layout a released tarball extracts to, so a
+// directory planted by a test is one the publication probe accepts.
+func plantEngineTree(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin, server := enginePaths(dir, false)
+	for _, path := range []string{bin, server} {
+		if err := os.WriteFile(path, []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// plantDefaultModel writes the model the default options resolve to, so a test
+// about the engine never reaches the model download.
+func plantDefaultModel(t *testing.T, root string) {
+	t.Helper()
+	modelDir := filepath.Join(root, "model-moonshine-tiny-en-int8")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "tokens.txt"), []byte("t"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Released versions joined the raw tag to the root, so a tag with a separator in
+// it installed into a nested path. That cache is a real engine and the only copy
+// on that disk: the encoded name must not download a second one beside it or
+// leave it orphaned.
+func TestEnsureLocalEngineReusesAnEngineInstalledUnderARawTagPath(t *testing.T) {
+	root := t.TempDir()
+	legacy := filepath.Join(root, "engine-release/v1-linux-amd64")
+	plantEngineTree(t, legacy)
+	plantDefaultModel(t, root)
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "an engine that is already on disk must not be downloaded again", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "release/v1", APIBase: srv.URL, platformKey: "linux-amd64", skipPinned: true,
+	})
+	if err != nil {
+		t.Fatalf("EnsureLocalEngine = %v, want the engine already on disk", err)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the release API was contacted %d times for an engine that is already extracted", n)
+	}
+	wantBin, _ := enginePaths(legacy, false)
+	if comp.BinaryPath != wantBin {
+		t.Errorf("BinaryPath = %q, want the engine already on disk at %q", comp.BinaryPath, wantBin)
+	}
+	if _, err := os.Stat(filepath.Join(root, engineDestName("release/v1", "linux-amd64"))); !os.IsNotExist(err) {
+		t.Errorf("nothing should have been installed under the encoded name, got %v", err)
+	}
+}
+
+// The tag is documented as any release tag, and one with a separator in it was
+// installable before the destination name became a lock key. It has to stay
+// installable: the encoding is what keeps the name one component, not a refusal.
+func TestEnsureLocalEngineInstallsATagThatIsNotAPathComponent(t *testing.T) {
+	srv := fakeReleaseServer(t, engineSHA, modelSHA)
+	root := t.TempDir()
+	comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "release/v1", APIBase: srv.URL, platformKey: "linux-amd64", skipPinned: true,
+	})
+	if err != nil {
+		t.Fatalf("EnsureLocalEngine = %v, want a tag with a separator to install", err)
+	}
+	if !fileExists(comp.BinaryPath) {
+		t.Errorf("the engine binary is missing at %q", comp.BinaryPath)
+	}
+	want := filepath.Join(root, engineDestName("release/v1", "linux-amd64"))
+	if !strings.HasPrefix(comp.BinaryPath, want+string(os.PathSeparator)) {
+		t.Errorf("BinaryPath = %q, want it under the encoded destination %q", comp.BinaryPath, want)
+	}
+}
+
+// ---- the install lock's release ---------------------------------------------
+
+// failInstallRelease makes the Install lock fail its release while the lock
+// itself is really taken and really let go. Release is the last step of every
+// operation that holds it, so it is the one cleanup failure that can follow a
+// mutation that already landed.
+func failInstallRelease(t *testing.T, err error) {
+	t.Helper()
+	real := acquireInstallLock
+	t.Cleanup(func() { acquireInstallLock = real })
+	acquireInstallLock = func(root, path string) (installFileLock, error) {
+		lock, aerr := real(root, path)
+		if aerr != nil {
+			return nil, aerr
+		}
+		return failingRelease{lock: lock, err: err}, nil
+	}
+}
+
+// failingRelease still releases the real lock, so the operations after the one
+// under test are not left waiting on a lock this test never gives back.
+type failingRelease struct {
+	lock installFileLock
+	err  error
+}
+
+func (f failingRelease) Release() error {
+	_ = f.lock.Release()
+	return f.err
+}
+
+// Release joins the platform unlock and the close, so a failure can mean the
+// lock file is still held. An install that swallowed it would report a clean
+// run over a lock nobody let go of, and one reported as a plain failure would
+// send the caller back to download an engine that is already installed.
+func TestEnsureLocalEngineReportsAnInstallItCouldNotUnlock(t *testing.T) {
+	root := t.TempDir()
+	engineDir := filepath.Join(root, "engine-test-linux-amd64")
+	plantEngineTree(t, engineDir)
+	plantDefaultModel(t, root)
+	failInstallRelease(t, errors.New("injected release failure"))
+
+	_, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "test", APIBase: offlineAPIBase(t), platformKey: "linux-amd64", skipPinned: true,
+	})
+	if err == nil {
+		t.Fatal("an install that could not release its lock must not report a clean run")
+	}
+	if !errors.Is(err, errInstalledNotReleased) {
+		t.Fatalf("err = %v, want it to say the destination is installed", err)
+	}
+	if !strings.Contains(err.Error(), "injected release failure") {
+		t.Errorf("err = %v, want the release failure named", err)
+	}
+	bin, _ := enginePaths(engineDir, false)
+	if !fileExists(bin) {
+		t.Errorf("the engine itself is installed, so %q must still be there", bin)
+	}
+}
+
+// The primary cause is what the operation failed on; the release failure is a
+// second fact about the lock. Folding the first into the second would leave the
+// caller with a lock error and no reason for the install itself.
+func TestWithDestinationLockKeepsThePrimaryCauseWhenTheReleaseAlsoFails(t *testing.T) {
+	root := t.TempDir()
+	failInstallRelease(t, errors.New("injected release failure"))
+	injected := errors.New("injected install failure")
+
+	err := withDestinationLock(context.Background(), root, "engine-a", testPublished, func(*destTxn) error {
+		return injected
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("err = %v, want the install failure kept as the cause", err)
+	}
+	if !strings.Contains(err.Error(), "injected release failure") {
+		t.Errorf("err = %v, want the release failure carried too", err)
+	}
+	if errors.Is(err, errInstalledNotReleased) {
+		t.Errorf("err = %v, but nothing was installed", err)
+	}
+}
+
+// The removal is the mutation here, and it has already happened by the time the
+// lock is released. A bare release error reads as "nothing was removed", which
+// sends an operator back to a command whose work is done.
+func TestRemoveKeptBackupReportsARemovalItCouldNotUnlock(t *testing.T) {
+	t.Run("the removal landed", func(t *testing.T) {
+		root := t.TempDir()
+		destDir := filepath.Join(root, "engine-a")
+		kept := plantKeptHolder(t, destDir, 3, "engine copy")
+		failInstallRelease(t, errors.New("injected release failure"))
+
+		err := RemoveKeptBackup(root, filepath.Base(kept))
+		if err == nil {
+			t.Fatal("a removal that could not release its lock must not report a clean run")
+		}
+		if !errors.Is(err, errInstalledNotReleased) {
+			t.Fatalf("err = %v, want it to say the removal landed", err)
+		}
+		if _, serr := os.Stat(kept); !os.IsNotExist(serr) {
+			t.Errorf("the removal itself landed, so the backup should be gone: %v", serr)
+		}
+	})
+
+	t.Run("the removal failed", func(t *testing.T) {
+		root := t.TempDir()
+		destDir := filepath.Join(root, "engine-a")
+		kept := plantKeptHolder(t, destDir, 3, "engine copy")
+		injectFault(t, "removeAll", func(args ...string) bool { return args[0] == kept }, errors.New("injected remove failure"))
+		failInstallRelease(t, errors.New("injected release failure"))
+
+		err := RemoveKeptBackup(root, filepath.Base(kept))
+		if err == nil {
+			t.Fatal("a removal that failed must be reported")
+		}
+		if !strings.Contains(err.Error(), "injected remove failure") {
+			t.Errorf("err = %v, want the removal failure kept as the cause", err)
+		}
+		if !strings.Contains(err.Error(), "injected release failure") {
+			t.Errorf("err = %v, want the release failure carried too", err)
+		}
+		if errors.Is(err, errInstalledNotReleased) {
+			t.Errorf("err = %v, but nothing was removed", err)
+		}
+	})
 }
