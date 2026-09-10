@@ -266,9 +266,13 @@ func reconcileInterrupted(dir string) installtxn.Reconciler {
 		}
 		entry, ok := lock[id]
 		if !ok {
-			// Every publish writes the entry, so a missing one proves the publish
-			// never ran and the backup is still the tree the lockfile describes.
-			return installtxn.PhasePrePublish, nil
+			// A missing entry is not proof that the publish never ran. The entry can
+			// also be lost after a publish that did run: a truncated or deleted
+			// lockfile reads as an empty one, and a directory with no entry is a
+			// state this package supports (Load returns it, Remove handles it). The
+			// live tree here may be nothing to do with this transaction at all, so
+			// there is no phase to report and recovery must not pick between them.
+			return installtxn.PhaseUnknown, nil
 		}
 		if entry.Hash == "" {
 			// A hand edited entry records no tree at all, so there is nothing to

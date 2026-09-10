@@ -2,6 +2,7 @@ package installtxn
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -954,33 +955,6 @@ func TestRecoverKeepsAttributionWhenRetirementFailsPartway(t *testing.T) {
 	}
 }
 
-// A target we could not probe is not a target that is absent. Reading a failed
-// Lstat as "nothing there" sends recovery into the restore branch, which is the
-// one branch that moves a tree, on the strength of a question it never got an
-// answer to. The recorded name here is too long for the filesystem to resolve,
-// which is the one probe failure a test can produce without a fault seam.
-func TestRecoverReportsATargetItCannotProbe(t *testing.T) {
-	dir := t.TempDir()
-	name := strings.Repeat("a", 300)
-	workspace := plantInterruptedCommit(t, dir, "demo", name, "old")
-	reconciler := &recordingReconciler{phase: PhaseCommitted}
-
-	err := Recover(dir, reconciler.reconcile)
-
-	if err == nil {
-		t.Fatal("a target that could not be probed must be reported")
-	}
-	if strings.Contains(err.Error(), "restore interrupted install") {
-		t.Fatalf("recovery tried to restore over a target it never resolved: %v", err)
-	}
-	if !strings.Contains(err.Error(), "inspect install") {
-		t.Fatalf("error does not report the probe failure: %v", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(workspace, "previous")); statErr != nil {
-		t.Fatalf("the retained backup must stay put: %v", statErr)
-	}
-}
-
 // The recorded name resolves the path after normalization, so it must be the
 // same name the reconciler is asked about. Handing the reconciler the raw line
 // while resolving the path from the trimmed one splits the decision across two
@@ -1013,5 +987,179 @@ func TestRecoverAsksTheReconcilerAboutTheNormalizedName(t *testing.T) {
 	}
 	if string(data) != "new" {
 		t.Fatalf("the committed install was replaced with %q", data)
+	}
+}
+
+// A marker we could not read is not a marker that is absent. Skipping silently
+// on a read error tells the caller there was nothing to do while the only copy
+// of the install stays stranded in the workspace, which is the fail-open half of
+// the distinction the target probe already draws.
+func TestRecoverReportsAMarkerItCannotRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permissions do not block reads on windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the file permissions this test relies on")
+	}
+	dir := t.TempDir()
+	workspace := plantInterruptedCommit(t, dir, "demo", "demo", "old")
+	marker := filepath.Join(workspace, markerFileName)
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+	if err := os.Chmod(marker, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Recover(dir, nil)
+
+	if err == nil {
+		t.Fatal("a marker that could not be read must be reported, not skipped")
+	}
+	if _, statErr := os.Stat(filepath.Join(workspace, "previous")); statErr != nil {
+		t.Fatalf("the stranded copy must be left alone: %v", statErr)
+	}
+}
+
+// The retained backup is a directory this package created. A symlink or a file
+// standing in its place is not something recovery may publish: renaming a
+// symlink into the install root installs whatever it points at, from anywhere on
+// the filesystem.
+func TestRecoverRefusesABackupThatIsNotADirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on windows")
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "payload"), []byte("elsewhere"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, plant := range []struct {
+		name string
+		make func(t *testing.T, backup string)
+	}{
+		{"symlink to a directory outside the root", func(t *testing.T, backup string) {
+			if err := os.Symlink(outside, backup); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"regular file", func(t *testing.T, backup string) {
+			if err := os.WriteFile(backup, []byte("not a tree"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(plant.name, func(t *testing.T) {
+			dir := t.TempDir()
+			staged, _, err := StageDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workspace := filepath.Dir(staged)
+			writeMarker(t, workspace, markerMagic+"\ntarget demo\n")
+			plant.make(t, filepath.Join(workspace, "previous"))
+
+			if err := Recover(dir, nil); err == nil {
+				t.Fatal("a backup that is not a directory must be reported, not published")
+			}
+			if _, err := os.Lstat(filepath.Join(dir, "demo")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("nothing may be published at the target: %v", err)
+			}
+		})
+	}
+}
+
+// An entry at the target is not the same as an install at the target. A dangling
+// symlink satisfies Lstat, and reading it as a live install retires the backup
+// beside it, which is the only real copy there is.
+func TestRecoverRefusesATargetThatIsNotADirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on windows")
+	}
+	dir := t.TempDir()
+	workspace := plantInterruptedCommit(t, dir, "demo", "demo", "old")
+	if err := os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "demo")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Recover(dir, nil)
+
+	if err == nil {
+		t.Fatal("a target that is not a directory must be reported")
+	}
+	data, readErr := os.ReadFile(filepath.Join(workspace, "previous", "version"))
+	if readErr != nil {
+		t.Fatalf("the retained copy must survive: %v", readErr)
+	}
+	if string(data) != "old" {
+		t.Fatalf("retained copy = %q, want old", data)
+	}
+}
+
+// A workspace of ours can hold a failed tree from an earlier rollback. Renaming
+// the live target onto it fails for as long as it is there, and because every
+// caller aborts on a recovery error, that wedges every install and removal in
+// the root. The workspace is proven ours, so the stale tree is cleared.
+func TestRecoverClearsAStaleFailedTreeBeforeRestoring(t *testing.T) {
+	dir := t.TempDir()
+	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+	failed := filepath.Join(workspace, "failed")
+	if err := os.MkdirAll(failed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(failed, "leftover"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &recordingReconciler{phase: PhasePrePublish}
+
+	if err := Recover(dir, reconciler.reconcile); err != nil {
+		t.Fatalf("a stale failed tree must not wedge recovery: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "demo", "version"))
+	if err != nil {
+		t.Fatalf("read the restored install: %v", err)
+	}
+	if string(data) != "old" {
+		t.Fatalf("restored content = %q, want old", data)
+	}
+}
+
+// A recorded name that cannot be a sane path element is not ours to act on. It
+// used to reach Lstat, which answers with an error that is not not-exist, so the
+// workspace reported an error no caller could ever clear.
+func TestRecoverSkipsAMarkerNamingAnImpossibleTarget(t *testing.T) {
+	for _, name := range []string{"de\x00mo", strings.Repeat("a", 300)} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			dir := t.TempDir()
+			workspace := plantInterruptedCommit(t, dir, "demo", name, "old")
+
+			if err := Recover(dir, nil); err != nil {
+				t.Fatalf("an unusable recorded name must be skipped, not reported forever: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(workspace, "previous")); err != nil {
+				t.Fatalf("the workspace must be left intact: %v", err)
+			}
+		})
+	}
+}
+
+// Two workspaces claiming one install cannot both be right, and acting on them
+// in turn publishes one over the other and deletes the rest. Recovery has no way
+// to rank them, so it reports and touches nothing.
+func TestRecoverRefusesTwoWorkspacesNamingOneTarget(t *testing.T) {
+	dir := t.TempDir()
+	first := plantInterruptedCommit(t, dir, "demo", "demo", "first")
+	second := plantInterruptedCommit(t, dir, "demo", "demo", "second")
+
+	err := Recover(dir, nil)
+
+	if err == nil {
+		t.Fatal("two workspaces naming one target must be reported")
+	}
+	for _, workspace := range []string{first, second} {
+		if _, statErr := os.Stat(filepath.Join(workspace, "previous")); statErr != nil {
+			t.Errorf("every retained copy must survive: %v", statErr)
+		}
+	}
+	if _, statErr := os.Lstat(filepath.Join(dir, "demo")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("nothing may be published while the claim is ambiguous: %v", statErr)
 	}
 }

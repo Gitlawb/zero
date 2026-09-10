@@ -995,3 +995,41 @@ func TestRecoveryLeavesAUserSkillNamedLikeAWorkspaceAlone(t *testing.T) {
 		})
 	}
 }
+
+// A directory at the target that the lockfile does not name is not proof that a
+// publish was interrupted. Anything can have created it, and a hand-written
+// skill is an ordinary thing to find in the skills directory. Recovery used to
+// read a missing entry as proof the publish never ran and replace that tree with
+// the retained backup, which deleted the user's own work.
+func TestAnUnrelatedSkillAtTheTargetIsNeverReplaced(t *testing.T) {
+	dir := t.TempDir()
+	workspace, err := os.MkdirTemp(dir, ".zero-install-txn-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := []byte("zero-install-txn v1\ntarget notes\n")
+	if err := os.WriteFile(filepath.Join(workspace, ".zero-install-txn"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeSourceSkill(t, filepath.Join(workspace, "previous"),
+		"---\nname: notes\ndescription: stale backup.\n---\nstale\n")
+	// The user's own skill, which no lockfile entry names.
+	mine := filepath.Join(dir, "notes")
+	writeSourceSkill(t, mine, "---\nname: notes\ndescription: my own.\n---\nmy careful notes\n")
+	if err := os.WriteFile(filepath.Join(mine, "research.md"), []byte("my research"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = installSkill(t, dir, deltaSkill)
+
+	if err == nil {
+		t.Fatal("recovery must not act on a tree the lockfile does not describe")
+	}
+	if _, statErr := os.Stat(filepath.Join(mine, "research.md")); statErr != nil {
+		t.Fatalf("the user's own skill was destroyed: %v", statErr)
+	}
+	data, readErr := os.ReadFile(filepath.Join(mine, skillFileName))
+	if readErr != nil || !strings.Contains(string(data), "my own") {
+		t.Fatalf("the user's own SKILL.md was replaced: %q %v", data, readErr)
+	}
+}

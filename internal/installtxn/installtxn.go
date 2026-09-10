@@ -178,30 +178,66 @@ func Recover(dir string, reconcile Reconciler) error {
 		return fmt.Errorf("enumerate install workspaces: %w", err)
 	}
 	var unresolved []error
+	// Gather first, act second. A pass that acts as it walks cannot see that two
+	// workspaces claim one install, and acting on both in turn publishes one over
+	// the other and deletes the rest.
+	type claim struct {
+		workspace string
+		name      string
+		target    string
+		backup    string
+	}
+	var claims []claim
+	claimants := map[string]int{}
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), workspacePrefix) {
 			continue
 		}
 		workspace := filepath.Join(dir, entry.Name())
-		name, ok := markerTarget(workspace)
+		recorded, ok, err := markerTarget(workspace)
+		if err != nil {
+			// A marker we could not read is not a marker that is absent. Skipping
+			// silently would tell the caller there was nothing to do while the only
+			// copy of an install stays in the workspace.
+			unresolved = append(unresolved, fmt.Errorf("read the transaction marker in %s: %w", workspace, err))
+			continue
+		}
 		if !ok {
 			continue
 		}
-		name, target, ok := recoverableTarget(dir, name)
+		name, target, ok := recoverableTarget(dir, recorded)
 		if !ok {
 			continue
 		}
 		backup := filepath.Join(workspace, "previous")
-		if _, err := os.Stat(backup); err != nil {
+		info, err := os.Lstat(backup)
+		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				// Mid-transaction: the trees never moved, so there is nothing to
 				// put back and the workspace belongs to whoever made it.
 				continue
 			}
-			unresolved = append(unresolved, fmt.Errorf("inspect retained install %s: %w", name, err))
+			unresolved = append(unresolved, fmt.Errorf("inspect the retained install in %s: %w", workspace, err))
 			continue
 		}
-		if err := recoverWorkspace(workspace, target, backup, name, reconcile); err != nil {
+		if !info.IsDir() {
+			// Only a directory is something this package set aside. Renaming a
+			// symlink into the install root publishes whatever it points at, from
+			// anywhere on the filesystem.
+			unresolved = append(unresolved, fmt.Errorf("the retained install in %s is not a directory, so recovery will not publish it", workspace))
+			continue
+		}
+		claims = append(claims, claim{workspace: workspace, name: name, target: target, backup: backup})
+		claimants[name]++
+	}
+	for _, c := range claims {
+		if claimants[c.name] > 1 {
+			// Nothing ranks two claims on one install, and publishing them in turn
+			// destroys every tree but the last.
+			unresolved = append(unresolved, fmt.Errorf("install %s is claimed by more than one interrupted transaction, including %s: resolve them by hand", c.name, c.workspace))
+			continue
+		}
+		if err := recoverWorkspace(c.workspace, c.target, c.backup, c.name, reconcile); err != nil {
 			unresolved = append(unresolved, err)
 		}
 	}
@@ -210,11 +246,16 @@ func Recover(dir string, reconcile Reconciler) error {
 
 // recoverWorkspace resolves one attributable workspace whose backup is present.
 func recoverWorkspace(workspace string, target string, backup string, name string, reconcile Reconciler) error {
-	if _, err := os.Lstat(target); err != nil {
+	info, err := os.Lstat(target)
+	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			// A target we could not probe is not a target that is absent. Reading
 			// it as absent enters the restore branch, the one branch that moves a
-			// tree, on the strength of a question that never got an answer.
+			// tree, on the strength of a question that never got an answer. No test
+			// injects this on Linux: the names that used to reach here and fail are
+			// now refused by recoverableTarget, and a permission fault on the root
+			// stops at the marker read above. It is kept for the platforms that can
+			// still fail this call, Windows reserved device names among them.
 			return fmt.Errorf("inspect install %s: %w", name, err)
 		}
 		// Nothing at the target, so the swap never finished and the backup is the
@@ -225,6 +266,12 @@ func recoverWorkspace(workspace string, target string, backup string, name strin
 		}
 		cleanupWorkspace(workspace)
 		return nil
+	}
+	if !info.IsDir() {
+		// An entry at the target is not an install at the target. A dangling
+		// symlink satisfies Lstat, and reading it as a live install retires the
+		// backup beside it, which is the only real copy there is.
+		return fmt.Errorf("install %s is not a directory, so recovery cannot tell what it is: resolve %s by hand", name, workspace)
 	}
 	phase := PhaseCommitted
 	if reconcile != nil {
@@ -266,7 +313,7 @@ func recoverWorkspace(workspace string, target string, backup string, name strin
 	default:
 		// Neither tree is the one the metadata records, so recovery cannot tell
 		// which one the user is owed and either guess risks destroying the other.
-		return fmt.Errorf("interrupted install %s matches neither the live target nor the retained backup", name)
+		return fmt.Errorf("interrupted install %s matches neither the live target nor the retained backup: resolve %s by hand", name, workspace)
 	}
 }
 
@@ -281,6 +328,13 @@ func restoreOverTarget(workspace string, target string, backup string, name stri
 	// order every instant has either a whole tree at the target or nothing there
 	// and the backup intact, which is exactly what this pass can tell apart.
 	failed := filepath.Join(workspace, "failed")
+	// An earlier rollback can have left a tree here. The workspace is proven ours
+	// by its marker, so clearing it is safe, and leaving it is not: the rename
+	// below fails for as long as it is there, and because every caller aborts on a
+	// recovery error that wedges every install and removal in this root.
+	if err := os.RemoveAll(failed); err != nil {
+		return fmt.Errorf("clear the superseded install set aside in %s: %w", workspace, err)
+	}
 	if err := os.Rename(target, failed); err != nil {
 		return fmt.Errorf("set aside superseded install %s: %w", name, err)
 	}
@@ -301,29 +355,37 @@ func restoreOverTarget(workspace string, target string, backup string, name stri
 // workspace does. Only the magic and version first line is evidence no ordinary
 // content produces by accident, so anything else is somebody's content and is
 // left alone.
-func markerTarget(workspace string) (string, bool) {
+func markerTarget(workspace string) (string, bool, error) {
 	path := filepath.Join(workspace, markerFileName)
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return "", false
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", false
+		// Present but unreadable is not absent, and the difference decides whether
+		// a retained tree is put back or stranded where nothing reads it.
+		return "", false, err
 	}
 	magic, rest, ok := strings.Cut(string(data), "\n")
 	if !ok || magic != markerMagic {
-		return "", false
+		return "", false, nil
 	}
 	line, _, ok := strings.Cut(rest, "\n")
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
 	name, ok := strings.CutPrefix(line, "target ")
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
-	return name, true
+	return name, true, nil
 }
 
 // recoverableTarget resolves a recorded target name to a path directly inside
@@ -344,6 +406,13 @@ func recoverableTarget(dir string, name string) (string, string, bool) {
 		return "", "", false
 	}
 	if strings.HasPrefix(name, workspacePrefix) {
+		return "", "", false
+	}
+	// A name no filesystem can resolve is not an install to recover. Left to reach
+	// Lstat it answers with an error that is not not-exist, which would be reported
+	// as an unresolved transaction on every pass forever, with no way for a caller
+	// to clear it.
+	if strings.ContainsRune(name, 0) || len(name) > 255 {
 		return "", "", false
 	}
 	return name, filepath.Join(dir, name), true

@@ -203,9 +203,12 @@ func lockReconciler(dir string) installtxn.Reconciler {
 		}
 		entry, locked := lock[name]
 		if !locked {
-			// The publish writes the entry for every install, so no entry at all
-			// proves the publish never ran and the backup is what the user had.
-			return installtxn.PhasePrePublish, nil
+			// A missing entry is not proof that the publish never ran. The entry can
+			// also be lost after a publish that did run: a truncated or deleted
+			// lockfile reads as an empty one. A hand-written skill the lockfile never
+			// named is an ordinary thing to find here too, and replacing it with the
+			// retained backup would delete the user's own work.
+			return installtxn.PhaseUnknown, nil
 		}
 		if entry.Hash == "" {
 			// Nothing to compare against, so neither tree can be shown to be the

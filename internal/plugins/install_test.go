@@ -1027,7 +1027,7 @@ func TestAFailedRestoreAbortsBothCallers(t *testing.T) {
 // A publish always writes the lockfile entry, so an interrupted update with no
 // entry naming it proves the publish never ran and the backup is still the tree
 // the lockfile describes, even though there is no hash left to match it against.
-func TestInterruptedUpdateWithNoLockEntryRestoresTheBackup(t *testing.T) {
+func TestInterruptedUpdateWithNoLockEntryAbortsTheCaller(t *testing.T) {
 	u := seedInterruptedUpdate(t)
 	workspace := u.plantWorkspace(t)
 	u.mustRename(t, u.target(), filepath.Join(workspace, "previous"))
@@ -1040,11 +1040,46 @@ func TestInterruptedUpdateWithNoLockEntryRestoresTheBackup(t *testing.T) {
 	if err := writeLock(u.dir, lock); err != nil {
 		t.Fatal(err)
 	}
+	err = installOther(t, u.dir, "zero.other")
 
-	if err := installOther(t, u.dir, "zero.other"); err != nil {
-		t.Fatalf("install after the interrupted update: %v", err)
+	if err == nil {
+		t.Fatal("a live tree the lockfile does not describe must stop the caller")
 	}
-	assertRecovered(t, u, workspace, recoveryWant{generation: "old", version: "0.1.0"})
+	assertUntouched(t, u, "new", LockEntry{})
+}
+
+// A directory at the target that the lockfile does not name is not proof that a
+// publish was interrupted. Anything can have created it: `zero tools make`, a
+// hand-written plugin, a restored file sync. Recovery used to read a missing
+// entry as proof the publish never ran and replace that tree with the retained
+// backup, which deleted whatever was there.
+func TestAnUnrelatedTreeAtTheTargetIsNeverReplaced(t *testing.T) {
+	dir := t.TempDir()
+	workspace, err := os.MkdirTemp(dir, ".zero-install-txn-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := []byte("zero-install-txn v1\ntarget zero.demo\n")
+	if err := os.WriteFile(filepath.Join(workspace, ".zero-install-txn"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(workspace, "previous")
+	writeSourcePlugin(t, backup, validManifest())
+	// The user's own tree, which no lockfile entry names.
+	mine := filepath.Join(dir, "zero.demo")
+	writeSourcePlugin(t, mine, validManifest())
+	if err := os.WriteFile(filepath.Join(mine, "mycode.txt"), []byte("my work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = installOther(t, dir, "zero.other")
+
+	if err == nil {
+		t.Fatal("recovery must not act on a tree the lockfile does not describe")
+	}
+	if _, statErr := os.Stat(filepath.Join(mine, "mycode.txt")); statErr != nil {
+		t.Fatalf("the user's own tree was destroyed: %v", statErr)
+	}
 }
 
 // An entry that records no hash describes no tree, so neither side can be
