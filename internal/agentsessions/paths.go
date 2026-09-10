@@ -255,8 +255,20 @@ func sameDir(left string, right string) bool {
 }
 
 func sameDirForOS(left string, right string, goos string) bool {
-	normalizedLeft := normalizeDirForOS(left, goos)
-	normalizedRight := normalizeDirForOS(right, goos)
+	return sameDirWithFS(left, right, goos, os.Stat, filepath.EvalSymlinks)
+}
+
+// sameDirWithFS is the comparison with its filesystem access injectable, so a
+// test can prove that a Windows path is compared WITHOUT touching the resolver.
+func sameDirWithFS(
+	left string,
+	right string,
+	goos string,
+	stat func(string) (os.FileInfo, error),
+	evalSymlinks func(string) (string, error),
+) bool {
+	normalizedLeft := normalizeDirWithFS(left, goos, stat, evalSymlinks)
+	normalizedRight := normalizeDirWithFS(right, goos, stat, evalSymlinks)
 	if normalizedLeft == "" || normalizedRight == "" {
 		return false
 	}
@@ -264,4 +276,23 @@ func sameDirForOS(left string, right string, goos string) bool {
 		return strings.EqualFold(normalizedLeft, normalizedRight)
 	}
 	return normalizedLeft == normalizedRight
+}
+
+// SameWorkspace reports whether two workspace paths name the same directory,
+// under the policy discovery already uses for foreign paths.
+//
+// EXPORTED BECAUSE THE TUI WAS COMPARING WITH A DIFFERENT POLICY. Discovery
+// deliberately never resolves a Windows path (normalizeDirWithFS): a transcript
+// controls that value, and EvalSymlinks on "\\server\share\repo" dials the
+// share — SMB authentication and a stalled UI on an unavailable host — merely
+// to decide whether a row belongs in /resume. The TUI's own comparison then
+// reintroduced exactly that call, for the same foreign value, on the Update
+// loop: once while formatting the post-import note, and again for every
+// persisted WorkspaceKey while filtering the picker and choosing the latest
+// session. Checking runtime.GOOS after the resolver had already run could not
+// prevent the effect. One comparison, one policy: lexical and case-insensitive
+// on Windows, stat-then-resolve elsewhere so local aliases such as
+// /tmp -> /private/tmp still match. Reported by @jatmn.
+func SameWorkspace(left string, right string) bool {
+	return sameDir(left, right)
 }

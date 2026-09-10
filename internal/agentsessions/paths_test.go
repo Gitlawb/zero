@@ -337,3 +337,41 @@ func fileSizeOf(t *testing.T, path string) int64 {
 }
 
 func itoa(value int) string { return strconv.Itoa(value) }
+
+// COMPARING A FOREIGN WINDOWS PATH MUST NOT TOUCH THE FILESYSTEM. A transcript
+// controls its cwd, and resolving "\\server\share\repo" on Windows dials the
+// share. Discovery already compares such paths lexically; the TUI's picker,
+// latest-session filter and post-import note now go through the same helper,
+// so this is the one place that policy is proved. The resolver seams here fail
+// the test if they are ever called for a Windows path.
+func TestAForeignWindowsPathIsComparedWithoutResolverIO(t *testing.T) {
+	fatalStat := func(path string) (os.FileInfo, error) {
+		t.Fatalf("stat was called for a foreign Windows path: %q", path)
+		return nil, nil
+	}
+	fatalEval := func(path string) (string, error) {
+		t.Fatalf("EvalSymlinks was called for a foreign Windows path: %q", path)
+		return "", nil
+	}
+	if !sameDirWithFS(`\\server\share\repo`, `\\SERVER\share\REPO`, "windows", fatalStat, fatalEval) {
+		t.Error("case-insensitive UNC match failed")
+	}
+	if sameDirWithFS(`\\server\share\repo`, `\\server\share\other`, "windows", fatalStat, fatalEval) {
+		t.Error("different UNC paths compared equal")
+	}
+	if !sameDirWithFS(`C:\Proj\repo`, `c:\proj\REPO`, "windows", fatalStat, fatalEval) {
+		t.Error("case-insensitive drive path match failed")
+	}
+	// Elsewhere a local alias still resolves — after a stat proves it exists —
+	// so /tmp -> /private/tmp keeps matching for the TUI.
+	if runtime.GOOS != "windows" {
+		target := t.TempDir()
+		link := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Skip(err)
+		}
+		if !SameWorkspace(link, target) {
+			t.Errorf("a symlinked local workspace no longer matches its target")
+		}
+	}
+}

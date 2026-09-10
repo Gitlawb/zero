@@ -11,20 +11,20 @@ import (
 	"github.com/Gitlawb/zero/internal/sessions"
 )
 
-// family1 is the layout three of the agents surveyed independently arrived at:
+// family1 is the layout two of the agents surveyed independently arrived at:
 // one JSONL file per session, in a directory named after the working directory,
 // with records carrying {type, cwd, timestamp, message:{role, content}} and
 // content blocks of text / thinking / tool_use / tool_result.
 //
 //	Claude Code   ~/.claude/projects/<slug>/<uuid>.jsonl
 //	Factory Droid ~/.factory/sessions/<slug>/<uuid>.jsonl
-//	Pi            ~/.pi/agent/sessions/<slug>/<ts>_<uuid>.jsonl
 //
 // They differ only in where the store lives and which record carries the title:
 // Claude Code writes an "ai-title" record, Factory puts a "title" on
-// "session_start", and Pi has none, so the first prompt is used. Everything else
-// — the block vocabulary, the tool_use/tool_result pairing, the role names —
-// is byte-for-byte the same shape, which is why one parser serves all three.
+// "session_start". Everything else — the block vocabulary, the tool_use/
+// tool_result pairing, the role names — is byte-for-byte the same shape, which
+// is why one parser serves both. Pi shares the DIRECTORY layout and reuses
+// discoverFamily1 for it, but its message schema is its own: see pi.go.
 //
 // An adapter is therefore a name and a root.
 type family1 struct {
@@ -45,16 +45,19 @@ func (adapter family1) Discover(cwd string) ([]ForeignSession, error) {
 // a lie about what that session contained.
 func (adapter family1) Read(source ForeignSession, options ReadOptions) ([]sessions.AppendEventInput, error) {
 	if source.Agent != adapter.name || source.ID != transcriptID(source.Path) {
-		return nil, errors.New("agentsessions: selected session does not belong to " + adapter.name)
+		return nil, errNotThisAgent(adapter.name)
 	}
-	if err := validateTranscriptSnapshot(adapter.root, source); err != nil {
-		return nil, err
-	}
-	events, err := translateFamily1(adapter.root, source.Path, options)
+	// One handle from identity check to final check: see openSelectedSource.
+	file, err := openSelectedSource(adapter.root, source)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateTranscriptSnapshot(adapter.root, source); err != nil {
+	defer file.Close()
+	events, err := translateFamily1(file, options)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSourceHandle(file, source); err != nil {
 		return nil, err
 	}
 	return events, nil
@@ -68,11 +71,6 @@ func ClaudeCode(env Env) Adapter {
 // FactoryDroid reads Factory's droid transcripts.
 func FactoryDroid(env Env) Adapter {
 	return family1{name: "factory", root: factoryRoot(env)}
-}
-
-// Pi reads Pi's agent transcripts.
-func Pi(env Env) Adapter {
-	return family1{name: "pi", root: piRoot(env)}
 }
 
 // family1Record is the subset of a family-1 transcript record this package
@@ -344,6 +342,10 @@ func summarizeTitle(prompt string) string {
 		return collapsed
 	}
 	return strings.TrimSpace(string(runes[:limit])) + "…"
+}
+
+func errNotThisAgent(name string) error {
+	return errors.New("agentsessions: selected session does not belong to " + name)
 }
 
 func firstNonBlank(values ...string) string {

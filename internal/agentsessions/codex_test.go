@@ -75,7 +75,7 @@ func TestCodexHarnessChatterIsNotTheConversation(t *testing.T) {
 		t.Errorf("Title = %q, want the first real human turn", found[0].Title)
 	}
 
-	events, err := translateCodex("", path, ReadOptions{})
+	events, err := translateCodexAt("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestCodexToolCallsPairUpAcrossBothCallShapes(t *testing.T) {
 		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_2","input":"ls -la"}}`,
 		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":"[{\"type\":\"input_text\",\"text\":\"a.go\"}]"}}`,
 	)
-	all, err := translateCodex("", path, ReadOptions{})
+	all, err := translateCodexAt("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestCodexUnknownToolOutcomePreservesOutputWithoutClaimingAFileChange(t *tes
 		`{"type":"response_item","payload":{"type":"function_call","name":"write_file","call_id":"call_1","arguments":"{\"path\":\"/w/config.go\"}"}}`,
 		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"permission denied"}}`,
 	)
-	events, err := translateCodex("", path, ReadOptions{Cwd: "/w"})
+	events, err := translateCodexAt("", path, ReadOptions{Cwd: "/w"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestCodexByteTailDropsOrphanResultButKeepsLaterPairAndDisclosure(t *testing
 		`{"type":"response_item","payload":{"type":"function_call","name":"new_call","call_id":"new","arguments":"{}"}}`,
 		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"new","output":"kept output"}}`,
 	)
-	events, err := translateCodex("", path, ReadOptions{})
+	events, err := translateCodexAt("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestCodexCapCannotLetActivitySummaryEvictSourceTail(t *testing.T) {
 		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"package parser"}}`,
 		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"final codex answer"}]}}`,
 	)
-	events, err := translateCodex("", path, ReadOptions{MaxEvents: 2})
+	events, err := translateCodexAt("", path, ReadOptions{MaxEvents: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
