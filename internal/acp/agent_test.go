@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,35 @@ func (f fakeProvider) StreamCompletion(_ context.Context, _ zeroruntime.Completi
 	return ch, nil
 }
 
+type acpDeferredPromptTool struct{ name string }
+
+func (t acpDeferredPromptTool) Name() string           { return t.name }
+func (acpDeferredPromptTool) Description() string      { return "deferred MCP test tool" }
+func (acpDeferredPromptTool) Parameters() tools.Schema { return tools.Schema{Type: "object"} }
+func (acpDeferredPromptTool) Deferred() bool           { return true }
+func (acpDeferredPromptTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK, Output: "ok"}
+}
+func (acpDeferredPromptTool) Safety() tools.Safety {
+	return tools.Safety{
+		SideEffect: tools.SideEffectNetwork, Permission: tools.PermissionPrompt,
+		AdvertiseInAuto: true,
+	}
+}
+
+type captureToolsProvider struct {
+	requests chan zeroruntime.CompletionRequest
+}
+
+func (p captureToolsProvider) StreamCompletion(_ context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	p.requests <- request
+	ch := make(chan zeroruntime.StreamEvent, 2)
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
 func testDeps(t *testing.T) Deps {
 	t.Helper()
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
@@ -53,10 +83,10 @@ func testDeps(t *testing.T) Deps {
 			return fakeProvider{text: "Hello from ZERO"}, nil
 		},
 		RunAgent: agent.Run,
-		BuildWorkspace: func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
+		BuildWorkspace: func(context.Context, string, config.ResolvedConfig, agent.PermissionMode) (*Workspace, error) {
 			r := tools.NewRegistry()
 			r.Register(tools.NewUpdatePlanTool())
-			return r, nil, nil
+			return &Workspace{Registry: r}, nil
 		},
 		ResolveWorkspaceRoot: func(cwd string) (string, error) { return cwd, nil },
 		Store:                store,
@@ -468,8 +498,8 @@ func TestACPRunTurnWiresSandboxAndScopedRegistry(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(tools.NewUpdatePlanTool())
 	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir()})
-	deps.BuildWorkspace = func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
-		return reg, engine, nil
+	deps.BuildWorkspace = func(context.Context, string, config.ResolvedConfig, agent.PermissionMode) (*Workspace, error) {
+		return &Workspace{Registry: reg, Sandbox: engine}, nil
 	}
 	var captured agent.Options
 	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
@@ -494,6 +524,124 @@ func TestACPRunTurnWiresSandboxAndScopedRegistry(t *testing.T) {
 	}
 	if captured.Registry != reg {
 		t.Fatal("scoped registry was not wired into agent.Options")
+	}
+}
+
+func TestACPRunTurnUsesWorkspaceDeferThresholdAtProviderBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		threshold int
+		want      []string
+	}{
+		{name: "explicit zero disables", threshold: 0, want: []string{"mcp_docs_alpha", "mcp_docs_beta"}},
+		{name: "below threshold stays eager", threshold: 3, want: []string{"mcp_docs_alpha", "mcp_docs_beta"}},
+		{name: "at threshold defers", threshold: 2, want: []string{tools.ToolSearchToolName}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := make(chan zeroruntime.CompletionRequest, 4)
+			deps := testDeps(t)
+			deps.NewProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) {
+				return captureToolsProvider{requests: requests}, nil
+			}
+			deps.BuildWorkspace = func(context.Context, string, config.ResolvedConfig, agent.PermissionMode) (*Workspace, error) {
+				registry := tools.NewRegistry()
+				registry.Register(acpDeferredPromptTool{name: "mcp_docs_alpha"})
+				registry.Register(acpDeferredPromptTool{name: "mcp_docs_beta"})
+				registry.Register(tools.NewToolSearchTool(registry))
+				return &Workspace{Registry: registry, DeferThreshold: tc.threshold}, nil
+			}
+
+			h := newHarness(t, deps)
+			defer h.stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var created NewSessionResult
+			if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("hi")}}, &PromptResult{}); err != nil {
+				t.Fatal(err)
+			}
+			request := <-requests
+			got := make([]string, 0, len(request.Tools))
+			for _, definition := range request.Tools {
+				got = append(got, definition.Name)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("provider tools = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestACPRunTurnEmitsWorkspaceSetupNotices(t *testing.T) {
+	deps := testDeps(t)
+	deps.BuildWorkspace = func(context.Context, string, config.ResolvedConfig, agent.PermissionMode) (*Workspace, error) {
+		registry := tools.NewRegistry()
+		registry.Register(tools.NewUpdatePlanTool())
+		return &Workspace{Registry: registry, Notices: []string{"MCP server docs unavailable, skipped: timeout"}}, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var created NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("hi")}}, &PromptResult{}); err != nil {
+		t.Fatal(err)
+	}
+	got := drainText(t, h.updates)
+	if !strings.Contains(got, "[zero warning] MCP server docs unavailable, skipped: timeout") || !strings.Contains(got, "Hello from ZERO") {
+		t.Fatalf("streamed text = %q", got)
+	}
+}
+
+// TestACPRunTurnClosesWorkspace proves a per-turn workspace never outlives the
+// agent run. This is particularly important for MCP: its registry owns live
+// client connections and, for stdio servers, child processes.
+func TestACPRunTurnClosesWorkspaceAfterSuccessAndFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		runErr error
+	}{
+		{name: "success"},
+		{name: "agent failure", runErr: errors.New("provider interrupted")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := testDeps(t)
+			closed := 0
+			deps.BuildWorkspace = func(context.Context, string, config.ResolvedConfig, agent.PermissionMode) (*Workspace, error) {
+				registry := tools.NewRegistry()
+				registry.Register(tools.NewUpdatePlanTool())
+				return &Workspace{Registry: registry, Cleanup: func() error {
+					closed++
+					return nil
+				}}, nil
+			}
+			deps.RunAgent = func(context.Context, string, zeroruntime.Provider, agent.Options) (agent.Result, error) {
+				return agent.Result{FinalAnswer: "ok"}, tc.runErr
+			}
+			h := newHarness(t, deps)
+			defer h.stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var created NewSessionResult
+			if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+				t.Fatalf("session/new: %v", err)
+			}
+			err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("hello")}}, &PromptResult{})
+			if tc.runErr == nil && err != nil {
+				t.Fatalf("session/prompt: %v", err)
+			}
+			if tc.runErr != nil && err == nil {
+				t.Fatal("session/prompt succeeded after agent failure")
+			}
+			if closed != 1 {
+				t.Fatalf("workspace cleanup calls = %d, want 1", closed)
+			}
+		})
 	}
 }
 
