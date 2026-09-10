@@ -17,10 +17,17 @@ const lockFileName = ".zero-install.lock"
 // root. Dot-prefixed so it is never mistaken for an installed plugin or skill.
 const workspacePrefix = ".zero-install-txn-"
 
-// targetFileName records, inside a workspace, which install the backup beside it
+// markerFileName records, inside a workspace, which install the backup beside it
 // belongs to. Without it a workspace left by a killed process holds a tree
 // nothing can attribute, and so nothing can put back.
-const targetFileName = "target"
+const markerFileName = ".zero-install-txn"
+
+// markerMagic is the first line of that marker. Ownership has to be proven
+// rather than inferred from filesystem shape: a user authored skill directory
+// may legitimately be named with the workspace prefix and hold a previous
+// directory, and recovery acting on one would destroy installed content. No
+// ordinary content carries this line by accident.
+const markerMagic = "zero-install-txn v1"
 
 // Lock takes the per-install-root cross-process lock. It blocks until any other
 // installer or remover using dir has completed.
@@ -58,7 +65,7 @@ func CommitDir(target string, staged string, publish func() error) error {
 		// Record the target before moving its tree. The two renames below cannot
 		// be made atomic, so a process killed between them leaves the only copy
 		// in the backup, and without this nothing could tell which install it is.
-		if err := os.WriteFile(filepath.Join(workspace, targetFileName), []byte(filepath.Base(target)), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(workspace, markerFileName), []byte(markerMagic+"\ntarget "+filepath.Base(target)+"\n"), 0o600); err != nil {
 			return fmt.Errorf("record install target: %w", err)
 		}
 		if err := os.Rename(target, backup); err != nil {
@@ -111,71 +118,220 @@ func RemoveDir(target string, publish func() error) error {
 	return nil
 }
 
-// Recover puts back an install that CommitDir set aside but never replaced,
-// which is what a process killed between its two renames leaves: the target
-// absent and its only copy retained in a workspace nothing else reads. The
-// target is what records how far the commit got: absent means the swap never
-// finished and the backup is put back, present means the publish rename
-// committed and the superseded backup beside it is retired. The live target is
-// never replaced or removed either way, and a workspace whose recorded target
-// Recover has no business naming is left alone rather than acted on. Best
-// effort, since the caller can still reinstall from source.
+// Phase names which tree in an interrupted workspace the caller's published
+// metadata records.
+type Phase int
+
+const (
+	// PhaseUnknown means the metadata matches neither tree. Recovery refuses to
+	// act and reports the workspace as unresolved.
+	PhaseUnknown Phase = iota
+	// PhaseCommitted means the live target is what the metadata records: the
+	// publish committed, and the backup beside it is superseded.
+	PhaseCommitted
+	// PhasePrePublish means the metadata still records the retained backup: the
+	// tree swap landed but the publish never did.
+	PhasePrePublish
+)
+
+// Reconciler classifies one interrupted workspace for the install named name.
+// target is the live install path, backup the retained tree beside it. An error
+// means the classification could not be made and recovery must not act.
+type Reconciler func(name string, target string, backup string) (Phase, error)
+
+// Recover resolves the workspaces an earlier run was killed inside, which is
+// what a process killed mid-commit leaves: a tree retained in a workspace
+// nothing else reads. How far that commit got cannot be read off the
+// filesystem. CommitDir swaps the trees and only then publishes, so a kill
+// between the two leaves exactly what a kill after both leaves, and a phase bit
+// written after the publish only inverts which side of the write the ambiguity
+// falls on. Only the caller knows what its published metadata records, so
+// reconcile is asked which of the two trees that is, and its answer decides:
+// the live target stands and the backup beside it is retired, or the backup is
+// the truthful tree and goes back over the target. A nil reconciler means the
+// caller publishes no metadata beside the tree, so a live target is the
+// committed one. With nothing at the target there is no choice to make and the
+// backup, the only copy in existence, is put back.
+//
+// The returned error means an attributable transaction was left unresolved,
+// never that there was nothing to do. Malformed, legacy, and unattributable
+// workspaces are skipped without error, since they may be somebody's content or
+// somebody else's transaction, but a workspace we own and could not resolve is
+// reported. Every workspace is processed before returning, so one unresolved
+// transaction does not strand the rest.
 //
 // The caller must hold the install-root lock returned by Lock, and EVERY caller
-// that takes that lock must call this first. Recovering only on the install
-// path is worse than not recovering at all: a removal would then report success
-// while the backup it never saw stayed on disk, and the next install would
-// publish it again, reinstating something the user deleted. Recovery is
-// deliberately an explicit call rather than a side effect of Lock, matching how
-// the other staged-swap transactions in this repo invoke their repair pass.
-func Recover(dir string) {
+// that takes that lock must call this first and abort on its error before it
+// reads the lockfile, inspects the target, installs over it, or reports a
+// successful removal. Recovering only on the install path is worse than not
+// recovering at all: a removal would then report success while the backup it
+// never saw stayed on disk, and the next install would publish it again,
+// reinstating something the user deleted. Recovery is deliberately an explicit
+// call rather than a side effect of Lock, matching how the other staged-swap
+// transactions in this repo invoke their repair pass.
+func Recover(dir string, reconcile Reconciler) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		// A recovery set that was never enumerated is not an empty one, and the
+		// caller must not go on to install over or report the removal of a tree
+		// that may still be owed a restore.
+		return fmt.Errorf("enumerate install workspaces: %w", err)
 	}
+	var unresolved []error
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), workspacePrefix) {
 			continue
 		}
 		workspace := filepath.Join(dir, entry.Name())
-		backup := filepath.Join(workspace, "previous")
-		if _, err := os.Stat(backup); err != nil {
-			continue
-		}
-		name, err := os.ReadFile(filepath.Join(workspace, targetFileName))
-		if err != nil {
-			continue
-		}
-		target, ok := recoverableTarget(dir, string(name))
+		name, ok := markerTarget(workspace)
 		if !ok {
 			continue
 		}
-		// An install already in place is the newer one by construction: the
-		// backup only ever holds the tree that was live before it. Leaving that
-		// backup for a later pass is what made a removal reversible by accident,
-		// since removing the live target then let the next recovery read the
-		// absent target as an interrupted swap and publish the stale tree again.
-		// Only the workspace goes; the live install is never touched. This is the
-		// one place os.RemoveAll is right over cleanupWorkspace, which refuses a
-		// workspace holding a previous precisely because it cannot tell a
-		// superseded backup from one still owed a restore.
-		if _, err := os.Lstat(target); err == nil {
-			_ = os.RemoveAll(workspace)
+		target, ok := recoverableTarget(dir, name)
+		if !ok {
 			continue
 		}
-		if err := os.Rename(backup, target); err != nil {
+		backup := filepath.Join(workspace, "previous")
+		if _, err := os.Stat(backup); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// Mid-transaction: the trees never moved, so there is nothing to
+				// put back and the workspace belongs to whoever made it.
+				continue
+			}
+			unresolved = append(unresolved, fmt.Errorf("inspect retained install %s: %w", name, err))
 			continue
+		}
+		if err := recoverWorkspace(workspace, target, backup, name, reconcile); err != nil {
+			unresolved = append(unresolved, err)
+		}
+	}
+	return errors.Join(unresolved...)
+}
+
+// recoverWorkspace resolves one attributable workspace whose backup is present.
+func recoverWorkspace(workspace string, target string, backup string, name string, reconcile Reconciler) error {
+	if _, err := os.Lstat(target); err != nil {
+		// Nothing at the target, so the swap never finished and the backup is the
+		// only copy there is. There is no second tree to weigh it against, and
+		// asking could only produce an answer that throws it away.
+		if err := os.Rename(backup, target); err != nil {
+			return fmt.Errorf("restore interrupted install %s: %w", name, err)
 		}
 		cleanupWorkspace(workspace)
+		return nil
 	}
+	phase := PhaseCommitted
+	if reconcile != nil {
+		classified, err := reconcile(name, target, backup)
+		if err != nil {
+			// A caller that could not classify is not permission to fall back on
+			// filesystem shape, which is the inference this protocol exists to
+			// remove.
+			return fmt.Errorf("classify interrupted install %s: %w", name, err)
+		}
+		phase = classified
+	}
+	switch phase {
+	case PhaseCommitted:
+		// The backup holds what the committed publish replaced. Keeping it made a
+		// removal reversible by accident: the removal deleted the live target, and
+		// the next recovery then read the absent target as an interrupted swap and
+		// published the stale tree again. Only the workspace goes, never the live
+		// install. This is the one place os.RemoveAll is right over
+		// cleanupWorkspace, which refuses a workspace holding a previous precisely
+		// because it cannot tell a superseded backup from one still owed a
+		// restore.
+		//
+		// The backup goes before the workspace around it, because os.RemoveAll
+		// walks the workspace in name order and so unlinks the marker first. A
+		// removal that then failed inside the backup left a workspace holding a
+		// tree nothing could attribute, which the next pass reads as somebody
+		// else's content and stays silent about. Clearing the backup first means
+		// whatever survives a failure is still ours and is still reported.
+		if err := os.RemoveAll(backup); err != nil {
+			return fmt.Errorf("retire superseded install %s: %w", name, err)
+		}
+		if err := os.RemoveAll(workspace); err != nil {
+			return fmt.Errorf("retire superseded install %s: %w", name, err)
+		}
+		return nil
+	case PhasePrePublish:
+		return restoreOverTarget(workspace, target, backup, name)
+	default:
+		// Neither tree is the one the metadata records, so recovery cannot tell
+		// which one the user is owed and either guess risks destroying the other.
+		return fmt.Errorf("interrupted install %s matches neither the live target nor the retained backup", name)
+	}
+}
+
+// restoreOverTarget puts the backup back over a target that is still there,
+// which is what the metadata recording the backup means: the tree swap landed
+// but the publish never did, and recovery cannot publish forward because it does
+// not know the source the interrupted install was writing.
+func restoreOverTarget(workspace string, target string, backup string, name string) error {
+	// Same ordering rollback uses. Removing the superseded tree in place would
+	// leave a husk at the target while the backup was still the only complete
+	// copy, and a kill in that window is unrecoverable. With the renames in this
+	// order every instant has either a whole tree at the target or nothing there
+	// and the backup intact, which is exactly what this pass can tell apart.
+	failed := filepath.Join(workspace, "failed")
+	if err := os.Rename(target, failed); err != nil {
+		return fmt.Errorf("set aside superseded install %s: %w", name, err)
+	}
+	if err := os.Rename(backup, target); err != nil {
+		return fmt.Errorf("restore interrupted install %s: %w", name, err)
+	}
+	if err := os.RemoveAll(failed); err != nil {
+		return fmt.Errorf("remove superseded install %s: %w", name, err)
+	}
+	cleanupWorkspace(workspace)
+	return nil
+}
+
+// markerTarget reads the install name a workspace records, and reports whether
+// the workspace is one of ours at all. The prefix alone does not prove that: it
+// is a public dot prefixed name and the skill loader enumerates dot prefixed
+// directories, so a user authored skill can carry it and hold the same entries a
+// workspace does. Only the magic and version first line is evidence no ordinary
+// content produces by accident, so anything else is somebody's content and is
+// left alone.
+func markerTarget(workspace string) (string, bool) {
+	path := filepath.Join(workspace, markerFileName)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	magic, rest, ok := strings.Cut(string(data), "\n")
+	if !ok || magic != markerMagic {
+		return "", false
+	}
+	line, _, ok := strings.Cut(rest, "\n")
+	if !ok {
+		return "", false
+	}
+	name, ok := strings.CutPrefix(line, "target ")
+	if !ok {
+		return "", false
+	}
+	return name, true
 }
 
 // recoverableTarget resolves a recorded target name to a path directly inside
 // dir. A name that is not a single path element could name anything on the
-// filesystem, so it is refused rather than restored over.
+// filesystem, so it is refused rather than restored over. A name carrying the
+// workspace prefix is refused for the same reason: it names another
+// transaction, not an install, and restoring over one that is still in flight
+// would destroy it.
 func recoverableTarget(dir string, name string) (string, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
+		return "", false
+	}
+	if strings.HasPrefix(name, workspacePrefix) {
 		return "", false
 	}
 	return filepath.Join(dir, name), true
@@ -202,11 +358,12 @@ func rollback(target string, backup string, hadPrevious bool, cause error) error
 	if err := os.Rename(target, failed); err != nil {
 		// The move aside can fail too, and then the failed install stays live at
 		// the target while the backup is still the only copy of what it replaced.
-		// Recovery reads a tree at the target as a committed publish, so it would
-		// retire that backup. Dropping the marker leaves the workspace one nothing
-		// can attribute, which recovery already leaves alone, and the copy is still
-		// there to rescue by hand.
-		_ = os.Remove(filepath.Join(filepath.Dir(backup), targetFileName))
+		// A caller with no reconciler reads a tree at the target as a committed
+		// publish, so it would retire that backup, and one that has a reconciler
+		// cannot classify a tree its own publish never recorded. Dropping the
+		// marker leaves a workspace nothing can attribute, which recovery already
+		// leaves alone, and the copy is still there to rescue by hand.
+		_ = os.Remove(filepath.Join(filepath.Dir(backup), markerFileName))
 		return errors.Join(cause, fmt.Errorf("remove failed install: %w", err))
 	}
 	if err := os.Rename(backup, target); err != nil {

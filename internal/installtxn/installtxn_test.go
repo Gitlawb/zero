@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -100,7 +101,7 @@ func TestCommitDirRecordsItsTargetForRecovery(t *testing.T) {
 	var marker string
 	var markerErr error
 	if err := CommitDir(target, staged, func() error {
-		data, err := os.ReadFile(filepath.Join(workspace, targetFileName))
+		data, err := os.ReadFile(filepath.Join(workspace, markerFileName))
 		marker, markerErr = string(data), err
 		return nil
 	}); err != nil {
@@ -110,8 +111,18 @@ func TestCommitDirRecordsItsTargetForRecovery(t *testing.T) {
 	if markerErr != nil {
 		t.Fatalf("CommitDir left no way to attribute its backup: %v", markerErr)
 	}
-	if marker != "demo" {
-		t.Fatalf("recorded target = %q, want %q", marker, "demo")
+	if want := "zero-install-txn v1\ntarget demo\n"; marker != want {
+		t.Fatalf("recorded marker = %q, want %q", marker, want)
+	}
+}
+
+// writeMarker plants a workspace ownership marker verbatim, so the tests pin the
+// exact bytes recovery has to see rather than whatever the writer happens to
+// produce.
+func writeMarker(t *testing.T, workspace string, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(workspace, markerFileName), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -132,9 +143,7 @@ func plantInterruptedCommit(t *testing.T, dir, name, recorded, content string) s
 		t.Fatal(err)
 	}
 	workspace := filepath.Dir(staged)
-	if err := os.WriteFile(filepath.Join(workspace, targetFileName), []byte(recorded), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeMarker(t, workspace, "zero-install-txn v1\ntarget "+recorded+"\n")
 	if err := os.Rename(target, filepath.Join(workspace, "previous")); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +154,9 @@ func TestRecoverPutsBackAnInterruptedCommit(t *testing.T) {
 	dir := t.TempDir()
 	workspace := plantInterruptedCommit(t, dir, "demo", "demo", "old")
 
-	Recover(dir)
+	if err := Recover(dir, nil); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(dir, "demo", "version"))
 	if err != nil || string(data) != "old" {
@@ -156,15 +167,17 @@ func TestRecoverPutsBackAnInterruptedCommit(t *testing.T) {
 	}
 }
 
-// A backup is a leftover, never a replacement for whatever is at the target now,
-// empty or not. Go's os.Rename refuses an existing directory either way on the
-// platforms tested, but POSIX allows replacing an empty one, so this pins the
-// behavior rather than one syscall's take on it.
-// A tree at the target also says the publish rename committed, so the backup
-// beside it holds what that install replaced and is retired rather than kept:
-// keeping it let a later removal of this live tree hand the stale copy to the
-// next recovery.
-func TestRecoverLeavesALiveInstallAlone(t *testing.T) {
+// A caller with no metadata beside its tree passes no reconciler, and then a
+// tree at the target is the committed one: the backup beside it holds what that
+// install replaced and is retired rather than kept, empty target or not.
+// Keeping it let a later removal of the live tree hand the stale copy to the
+// next recovery. Go's os.Rename refuses an existing directory on the platforms
+// tested, but POSIX allows replacing an empty one, so the empty case pins the
+// decision rather than one syscall's take on it. What recovery never does is
+// destroy a tree without a complete copy in hand, or touch a target the
+// metadata records: replacing a live target happens only on the reconciled
+// PhasePrePublish path, which restores through a move aside.
+func TestRecoverTreatsALiveInstallAsCommittedWithoutAReconciler(t *testing.T) {
 	for _, tc := range []struct{ name, live string }{
 		{"empty install", ""},
 		{"populated install", "live"},
@@ -182,7 +195,9 @@ func TestRecoverLeavesALiveInstallAlone(t *testing.T) {
 				}
 			}
 
-			Recover(dir)
+			if err := Recover(dir, nil); err != nil {
+				t.Fatalf("Recover: %v", err)
+			}
 
 			data, err := os.ReadFile(filepath.Join(live, "version"))
 			if tc.live == "" {
@@ -212,7 +227,9 @@ func TestRecoverRefusesATargetOutsideTheInstallRoot(t *testing.T) {
 			outside := filepath.Join(root, "escape")
 			workspace := plantInterruptedCommit(t, dir, "demo", recorded, "old")
 
-			Recover(dir)
+			if err := Recover(dir, nil); err != nil {
+				t.Fatalf("Recover: %v", err)
+			}
 
 			if _, err := os.Stat(outside); !os.IsNotExist(err) {
 				t.Errorf("recovery wrote outside the install root: %v", err)
@@ -237,11 +254,13 @@ func TestRecoverSkipsWorkspacesItCannotActOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	noMarker := plantInterruptedCommit(t, dir, "demo", "demo", "old")
-	if err := os.Remove(filepath.Join(noMarker, targetFileName)); err != nil {
+	if err := os.Remove(filepath.Join(noMarker, markerFileName)); err != nil {
 		t.Fatal(err)
 	}
 
-	Recover(dir)
+	if err := Recover(dir, nil); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
 
 	if _, err := os.Stat(noBackup); err != nil {
 		t.Errorf("a workspace with no backup must be left alone: %v", err)
@@ -254,23 +273,27 @@ func TestRecoverSkipsWorkspacesItCannotActOn(t *testing.T) {
 	}
 }
 
-// Recovery identifies a workspace by the name its own StageDir gives one. An
-// installed tree that happens to contain the same two entries is not a
-// workspace, and consuming it would destroy installed content.
+// The workspace prefix is a public dot prefixed name, and the skill loader
+// enumerates dot prefixed directories, so a user authored skill can legitimately
+// be named with it and hold the same two entries a workspace does. Ownership is
+// proven by the marker's magic line, which ordinary content never carries, so
+// this directory is left untouched and unreported.
 func TestRecoverIgnoresAnInstallThatLooksLikeAWorkspace(t *testing.T) {
 	dir := t.TempDir()
-	lookalike := filepath.Join(dir, "demo")
+	lookalike := filepath.Join(dir, workspacePrefix+"notes")
 	if err := os.MkdirAll(filepath.Join(lookalike, "previous"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(lookalike, "previous", "version"), []byte("mine"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(lookalike, targetFileName), []byte("elsewhere"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(lookalike, "target"), []byte("elsewhere"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	Recover(dir)
+	if err := Recover(dir, nil); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
 
 	if _, err := os.Stat(filepath.Join(lookalike, "previous", "version")); err != nil {
 		t.Fatalf("recovery consumed installed content: %v", err)
@@ -305,7 +328,9 @@ func TestRecoverRetiresABackupASuccessfulPublishSuperseded(t *testing.T) {
 	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
 	target := filepath.Join(dir, "demo")
 
-	Recover(dir)
+	if err := Recover(dir, nil); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(target, "version"))
 	if err != nil || string(data) != "new" {
@@ -318,7 +343,9 @@ func TestRecoverRetiresABackupASuccessfulPublishSuperseded(t *testing.T) {
 	if err := RemoveDir(target, func() error { return nil }); err != nil {
 		t.Fatalf("RemoveDir: %v", err)
 	}
-	Recover(dir)
+	if err := Recover(dir, nil); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
 
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("a removed install was resurrected by recovery: %v", err)
@@ -399,7 +426,9 @@ func TestRecoverPutsBackAnInterruptedRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	Recover(dir)
+	if err := Recover(dir, nil); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(dir, "demo", "version"))
 	if err != nil || string(data) != "old" {
@@ -459,7 +488,9 @@ func TestRollbackKeepsABackupItCouldNotRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	Recover(root)
+	if err := Recover(root, nil); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(workspace, "previous", "version"))
 	if err != nil || string(data) != "old" {
@@ -468,5 +499,457 @@ func TestRollbackKeepsABackupItCouldNotRestore(t *testing.T) {
 	data, err = os.ReadFile(filepath.Join(target, "version"))
 	if err != nil || string(data) != "new" {
 		t.Fatalf("recovery must leave the tree at the target alone: got %q err %v", data, err)
+	}
+}
+
+// Everything short of the exact magic and version line, and a marker that is not
+// a regular file, leaves the workspace alone and unreported: a workspace we
+// cannot prove is ours may be somebody's content.
+func TestRecoverSkipsAWorkspaceWithoutAValidMarker(t *testing.T) {
+	for _, tc := range []struct{ name, marker string }{
+		{"wrong magic", "install-txn v1\ntarget demo\n"},
+		{"wrong version", "zero-install-txn v2\ntarget demo\n"},
+		{"magic not first", "target demo\nzero-install-txn v1\n"},
+		{"no target line", "zero-install-txn v1\n"},
+		{"legacy plain name", "demo"},
+		{"multi element name", "zero-install-txn v1\ntarget nested/demo\n"},
+		{"empty", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workspace := plantInterruptedCommit(t, dir, "demo", "demo", "old")
+			writeMarker(t, workspace, tc.marker)
+
+			if err := Recover(dir, nil); err != nil {
+				t.Fatalf("Recover: %v", err)
+			}
+
+			if _, err := os.Stat(filepath.Join(workspace, "previous", "version")); err != nil {
+				t.Errorf("an unattributable backup must be left intact: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "demo")); !os.IsNotExist(err) {
+				t.Errorf("nothing should have been restored, got %v", err)
+			}
+		})
+	}
+}
+
+// A directory in the marker's place is not a marker. os.ReadFile fails on one
+// anyway, but the check is on the file mode so that stays true of any future
+// reader.
+func TestRecoverSkipsAWorkspaceWhoseMarkerIsNotARegularFile(t *testing.T) {
+	dir := t.TempDir()
+	workspace := plantInterruptedCommit(t, dir, "demo", "demo", "old")
+	marker := filepath.Join(workspace, markerFileName)
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Recover(dir, nil); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workspace, "previous", "version")); err != nil {
+		t.Errorf("an unattributable backup must be left intact: %v", err)
+	}
+}
+
+// A recorded name is a target, never another transaction. A marker naming a
+// second in-flight workspace would have recovery rename a backup over it or
+// publish into it, destroying a transaction that is still running.
+func TestRecoverRefusesATargetThatNamesAnotherWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	inflight, _, err := StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(inflight, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inflight, "version"), []byte("staging"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Dir(inflight)
+	workspace := plantInterruptedCommit(t, dir, "demo", filepath.Base(other), "old")
+
+	if err := Recover(dir, nil); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(inflight, "version"))
+	if err != nil || string(data) != "staging" {
+		t.Fatalf("recovery wrote over an in-flight transaction: got %q err %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "previous", "version")); err != nil {
+		t.Errorf("an unattributable backup must be left intact: %v", err)
+	}
+}
+
+// recordingReconciler answers with a fixed phase and remembers what it was
+// asked, so the tests can pin both the decision and the question.
+type recordingReconciler struct {
+	phase  Phase
+	err    error
+	calls  int
+	name   string
+	target string
+	backup string
+}
+
+func (r *recordingReconciler) reconcile(name string, target string, backup string) (Phase, error) {
+	r.calls++
+	r.name, r.target, r.backup = name, target, backup
+	return r.phase, r.err
+}
+
+// Which tree the publish recorded cannot be read off the filesystem: a kill
+// between the tree swap and the lockfile write leaves exactly what a kill after
+// both leaves. Only the caller knows what its metadata says, so recovery asks,
+// and a metadata record still naming the backup means the backup is the
+// truthful tree and goes back over the live one.
+func TestRecoverRestoresTheBackupTheMetadataStillRecords(t *testing.T) {
+	dir := t.TempDir()
+	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+	target := filepath.Join(dir, "demo")
+	reconciler := &recordingReconciler{phase: PhasePrePublish}
+
+	if err := Recover(dir, reconciler.reconcile); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(target, "version"))
+	if err != nil || string(data) != "old" {
+		t.Fatalf("the recorded tree must be back at the target: got %q err %v", data, err)
+	}
+	if reconciler.calls != 1 {
+		t.Fatalf("reconciler calls = %d, want 1", reconciler.calls)
+	}
+	if reconciler.name != "demo" || reconciler.target != target || reconciler.backup != filepath.Join(workspace, "previous") {
+		t.Fatalf("reconciler asked about (%q, %q, %q)", reconciler.name, reconciler.target, reconciler.backup)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Errorf("the resolved workspace should be cleared, got %v", err)
+	}
+}
+
+// The mirror case: the metadata records the live tree, so the publish committed
+// and the backup beside it is superseded rather than owed a restore.
+func TestRecoverRetiresTheBackupWhenTheMetadataRecordsTheTarget(t *testing.T) {
+	dir := t.TempDir()
+	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+	reconciler := &recordingReconciler{phase: PhaseCommitted}
+
+	if err := Recover(dir, reconciler.reconcile); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "demo", "version"))
+	if err != nil || string(data) != "new" {
+		t.Fatalf("the committed install must be left alone: got %q err %v", data, err)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Errorf("the superseded workspace should be retired, got %v", err)
+	}
+}
+
+// Metadata matching neither tree means recovery has no idea which one the user
+// is owed. Guessing either way risks destroying the other, so it moves nothing
+// and reports the workspace as unresolved.
+func TestRecoverReportsAWorkspaceItCannotClassify(t *testing.T) {
+	dir := t.TempDir()
+	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+	reconciler := &recordingReconciler{phase: PhaseUnknown}
+
+	err := Recover(dir, reconciler.reconcile)
+
+	if err == nil {
+		t.Fatal("an unclassifiable workspace must be reported, not skipped silently")
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, "demo", "version"))
+	if readErr != nil || string(data) != "new" {
+		t.Fatalf("nothing should have moved: got %q err %v", data, readErr)
+	}
+	data, readErr = os.ReadFile(filepath.Join(workspace, "previous", "version"))
+	if readErr != nil || string(data) != "old" {
+		t.Fatalf("the backup must be left intact: got %q err %v", data, readErr)
+	}
+}
+
+// A reconciler that cannot answer (its lockfile is unreadable, a hash fails) is
+// not permission to fall back on filesystem shape.
+func TestRecoverReportsAReconcilerFailure(t *testing.T) {
+	dir := t.TempDir()
+	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+	classifyErr := errors.New("lockfile unreadable")
+	reconciler := &recordingReconciler{err: classifyErr}
+
+	err := Recover(dir, reconciler.reconcile)
+
+	if !errors.Is(err, classifyErr) {
+		t.Fatalf("Recover error = %v, want the reconciler failure", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(workspace, "previous", "version")); statErr != nil {
+		t.Errorf("the backup must be left intact: %v", statErr)
+	}
+}
+
+// With nothing at the target there is no second tree to choose between, and the
+// backup is the only copy in existence. Asking the caller could only produce an
+// answer that throws it away.
+func TestRecoverDoesNotConsultTheReconcilerWithNothingAtTheTarget(t *testing.T) {
+	dir := t.TempDir()
+	plantInterruptedCommit(t, dir, "demo", "demo", "old")
+	reconciler := &recordingReconciler{phase: PhaseCommitted}
+
+	if err := Recover(dir, reconciler.reconcile); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	if reconciler.calls != 0 {
+		t.Errorf("reconciler calls = %d, want 0", reconciler.calls)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "demo", "version"))
+	if err != nil || string(data) != "old" {
+		t.Fatalf("the only copy of the install was not put back: got %q err %v", data, err)
+	}
+}
+
+// A recovery set that was never enumerated is not an empty recovery set. Callers
+// abort on this rather than installing over, or reporting the removal of, a tree
+// that may still be owed a restore.
+func TestRecoverReportsAnInstallRootItCannotRead(t *testing.T) {
+	if err := Recover(filepath.Join(t.TempDir(), "missing"), nil); err == nil {
+		t.Fatal("an unreadable install root must be reported, not read as nothing to do")
+	}
+}
+
+// The restore is the whole point of the transaction, so a rename it cannot
+// complete is the loudest failure recovery has.
+func TestRecoverReportsAFailedRestore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block renames on windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	dir := t.TempDir()
+	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &recordingReconciler{phase: PhasePrePublish}
+
+	err := Recover(dir, reconciler.reconcile)
+
+	if err == nil {
+		t.Fatal("a restore that could not be made must be reported")
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(workspace, "previous", "version"))
+	if readErr != nil || string(data) != "old" {
+		t.Fatalf("a backup that could not be restored must be kept: got %q err %v", data, readErr)
+	}
+}
+
+// Retiring a superseded workspace is bookkeeping, but a failure still leaves a
+// backup on disk that the next pass will read again, so it is reported too.
+func TestRecoverReportsAFailedRetirement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block removal on windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	dir := t.TempDir()
+	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+	t.Cleanup(func() { _ = os.Chmod(workspace, 0o755) })
+	if err := os.Chmod(workspace, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &recordingReconciler{phase: PhaseCommitted}
+
+	err := Recover(dir, reconciler.reconcile)
+
+	if err == nil {
+		t.Fatal("a retirement that could not be made must be reported")
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, "demo", "version"))
+	if readErr != nil || string(data) != "new" {
+		t.Fatalf("the committed install must be left alone: got %q err %v", data, readErr)
+	}
+}
+
+// A backup we cannot even stat is not a missing backup. Reading it as one would
+// have the workspace skipped as mid-transaction while a tree sits in it.
+func TestRecoverReportsABackupItCannotStat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on windows")
+	}
+	dir := t.TempDir()
+	staged, _, err := StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	writeMarker(t, workspace, "zero-install-txn v1\ntarget demo\n")
+	if err := os.Symlink("previous", filepath.Join(workspace, "previous")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Recover(dir, nil); err == nil {
+		t.Fatal("a backup that could not be inspected must be reported")
+	}
+}
+
+// One unresolved workspace must not strand the others: the recovery set is
+// processed to the end and every failure is reported together.
+func TestRecoverProcessesEveryWorkspaceAndReportsThemTogether(t *testing.T) {
+	dir := t.TempDir()
+	unresolved := plantPublishedCommit(t, dir, "unknown", "unknown", "new", "old")
+	plantInterruptedCommit(t, dir, "demo", "demo", "old")
+	reconciler := &recordingReconciler{phase: PhaseUnknown}
+
+	err := Recover(dir, reconciler.reconcile)
+
+	if err == nil {
+		t.Fatal("the unresolved workspace must be reported")
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, "demo", "version"))
+	if readErr != nil || string(data) != "old" {
+		t.Fatalf("the resolvable workspace must still be recovered: got %q err %v", data, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(unresolved, "previous")); statErr != nil {
+		t.Errorf("the unresolved backup must be left intact: %v", statErr)
+	}
+}
+
+// A workspace killed before the first rename holds a staged tree and no backup.
+// There is nothing to put back, the live install never moved, and the workspace
+// is somebody else's to clean up.
+func TestRecoverSkipsAWorkspaceInterruptedBeforeTheFirstRename(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "demo")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "version"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staged, _, err := StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(staged, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	writeMarker(t, workspace, "zero-install-txn v1\ntarget demo\n")
+	reconciler := &recordingReconciler{phase: PhaseUnknown}
+
+	if err := Recover(dir, reconciler.reconcile); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	if reconciler.calls != 0 {
+		t.Errorf("reconciler calls = %d, want 0", reconciler.calls)
+	}
+	data, err := os.ReadFile(filepath.Join(target, "version"))
+	if err != nil || string(data) != "old" {
+		t.Fatalf("the live install must be left alone: got %q err %v", data, err)
+	}
+	if _, err := os.Stat(staged); err != nil {
+		t.Errorf("a workspace with no backup must be left alone: %v", err)
+	}
+}
+
+// Recovery runs on every lock acquisition, so it has to be a no-op on a state it
+// already resolved. Nothing it leaves behind may read as another interrupted
+// transaction.
+func TestRecoverIsANoOpOnAResolvedState(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, dir string)
+		phase Phase
+		want  string
+	}{
+		{"restored backup", func(t *testing.T, dir string) { plantInterruptedCommit(t, dir, "demo", "demo", "old") }, PhaseCommitted, "old"},
+		{"restored over the target", func(t *testing.T, dir string) {
+			plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+		}, PhasePrePublish, "old"},
+		{"retired backup", func(t *testing.T, dir string) {
+			plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+		}, PhaseCommitted, "new"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.plant(t, dir)
+			reconciler := &recordingReconciler{phase: tc.phase}
+			if err := Recover(dir, reconciler.reconcile); err != nil {
+				t.Fatalf("first Recover: %v", err)
+			}
+			before := reconciler.calls
+
+			if err := Recover(dir, reconciler.reconcile); err != nil {
+				t.Fatalf("second Recover: %v", err)
+			}
+
+			if reconciler.calls != before {
+				t.Errorf("the second pass found another transaction to classify: calls %d then %d", before, reconciler.calls)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "demo", "version"))
+			if err != nil || string(data) != tc.want {
+				t.Fatalf("the second pass changed the install: got %q err %v", data, err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), workspacePrefix) {
+					t.Errorf("a resolved workspace was left behind: %s", entry.Name())
+				}
+			}
+		})
+	}
+}
+
+// A retirement that fails partway must not cost the workspace its attribution.
+// os.RemoveAll unlinks the marker before it reaches the backup, so a retirement
+// that dies inside the backup used to leave a workspace holding a tree that
+// nothing could attribute: the next pass read it as somebody else's content,
+// stayed silent, and every later caller went on as though the transaction had
+// resolved. The backup goes first, so anything left behind is still ours and is
+// still reported.
+func TestRecoverKeepsAttributionWhenRetirementFailsPartway(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block removal on windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	dir := t.TempDir()
+	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+	backup := filepath.Join(workspace, "previous")
+	t.Cleanup(func() { _ = os.Chmod(backup, 0o755) })
+	if err := os.Chmod(backup, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &recordingReconciler{phase: PhaseCommitted}
+
+	if err := Recover(dir, reconciler.reconcile); err == nil {
+		t.Fatal("a retirement that could not be made must be reported")
+	}
+
+	if _, err := os.Stat(filepath.Join(workspace, markerFileName)); err != nil {
+		t.Fatalf("a failed retirement dropped the marker that attributes the workspace: %v", err)
+	}
+	if err := Recover(dir, reconciler.reconcile); err == nil {
+		t.Fatal("the second pass went silent on a workspace still holding a backup")
 	}
 }
