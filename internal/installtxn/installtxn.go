@@ -187,7 +187,7 @@ func Recover(dir string, reconcile Reconciler) error {
 		if !ok {
 			continue
 		}
-		target, ok := recoverableTarget(dir, name)
+		name, target, ok := recoverableTarget(dir, name)
 		if !ok {
 			continue
 		}
@@ -327,20 +327,26 @@ func markerTarget(workspace string) (string, bool) {
 }
 
 // recoverableTarget resolves a recorded target name to a path directly inside
-// dir. A name that is not a single path element could name anything on the
+// dir, and returns the normalized name alongside it. Both come back because the
+// caller needs them to agree: the path is resolved from the trimmed name, so
+// asking the reconciler about the raw one would split the decision across two
+// values, and a lookup that missed on the untrimmed name would read as a publish
+// that never ran and replace the committed target with the tree it superseded.
+//
+// A name that is not a single path element could name anything on the
 // filesystem, so it is refused rather than restored over. A name carrying the
 // workspace prefix is refused for the same reason: it names another
 // transaction, not an install, and restoring over one that is still in flight
 // would destroy it.
-func recoverableTarget(dir string, name string) (string, bool) {
+func recoverableTarget(dir string, name string) (string, string, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
-		return "", false
+		return "", "", false
 	}
 	if strings.HasPrefix(name, workspacePrefix) {
-		return "", false
+		return "", "", false
 	}
-	return filepath.Join(dir, name), true
+	return name, filepath.Join(dir, name), true
 }
 
 func rollback(target string, backup string, hadPrevious bool, cause error) error {

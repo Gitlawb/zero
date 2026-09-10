@@ -604,7 +604,7 @@ func plantInterruptedAlphaUpdate(t *testing.T, step string) interruptedUpdate {
 	case "S4":
 		rename(target, previous)
 		rename(staged, target)
-		publishLockEntry(t, dir, "alpha", LockEntry{Source: newSource, Hash: hashContent([]byte(newAlphaSkill))})
+		publishLockEntry(t, dir, "alpha", LockEntry{Source: canonicalSource(newSource), Hash: hashContent([]byte(newAlphaSkill))})
 	case "S5":
 		// An interrupted rollback: the failed tree was set aside and the backup is
 		// still the only complete copy.
@@ -616,7 +616,11 @@ func plantInterruptedAlphaUpdate(t *testing.T, step string) interruptedUpdate {
 	default:
 		t.Fatalf("unknown step %q", step)
 	}
-	return interruptedUpdate{dir: dir, workspace: workspace, oldSource: oldSource, newSource: newSource}
+	// Compare against the source the installer records, not the path the test
+	// handed it. Install stores canonicalSource(source), so on macOS the recorded
+	// value is /private/var where t.TempDir returns /var, and on Windows it is the
+	// long user name where t.TempDir returns the 8.3 short one.
+	return interruptedUpdate{dir: dir, workspace: workspace, oldSource: canonicalSource(oldSource), newSource: canonicalSource(newSource)}
 }
 
 func publishLockEntry(t *testing.T, dir string, name string, entry LockEntry) {

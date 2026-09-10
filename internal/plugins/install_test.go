@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/installtxn"
@@ -973,7 +974,22 @@ func TestInterruptedUpdateWithAnUnreadableLockAbortsBothCallers(t *testing.T) {
 // A restore that cannot be carried out is the case where silence is worst: the
 // plugin is missing from the target and its only copy is in a workspace nothing
 // else reads.
+// skipWithoutPermissionFaults skips a test that injects a failure by making a
+// directory unwritable. Windows does not block renames or deletes that way, and
+// root ignores the permission entirely, so on both the injected failure never
+// fires and the test would assert against a success it never meant to produce.
+func skipWithoutPermissionFaults(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block renames or removals on windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+}
+
 func TestAFailedRestoreAbortsBothCallers(t *testing.T) {
+	skipWithoutPermissionFaults(t)
 	u := seedInterruptedUpdate(t)
 	workspace := u.plantWorkspace(t)
 	u.mustRename(t, u.target(), filepath.Join(workspace, "previous"))
@@ -1075,6 +1091,7 @@ func interruptedCallers() []interruptedCaller {
 // ownership marker with it and leave the next pass a workspace it cannot
 // attribute.
 func TestAFailedRetirementAbortsBothCallers(t *testing.T) {
+	skipWithoutPermissionFaults(t)
 	for _, caller := range interruptedCallers() {
 		t.Run(caller.name, func(t *testing.T) {
 			u := seedInterruptedUpdate(t)

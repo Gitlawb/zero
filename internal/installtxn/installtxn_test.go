@@ -980,3 +980,38 @@ func TestRecoverReportsATargetItCannotProbe(t *testing.T) {
 		t.Fatalf("the retained backup must stay put: %v", statErr)
 	}
 }
+
+// The recorded name resolves the path after normalization, so it must be the
+// same name the reconciler is asked about. Handing the reconciler the raw line
+// while resolving the path from the trimmed one splits the decision across two
+// values: the lookup misses, the miss reads as a publish that never ran, and the
+// committed target is replaced with the tree it superseded. The reconciler here
+// answers the way a lockfile does, by name.
+func TestRecoverAsksTheReconcilerAboutTheNormalizedName(t *testing.T) {
+	dir := t.TempDir()
+	workspace := plantPublishedCommit(t, dir, "demo", "demo", "new", "old")
+	writeMarker(t, workspace, markerMagic+"\ntarget demo \n")
+	var asked string
+	reconcile := func(name string, target string, backup string) (Phase, error) {
+		asked = name
+		if name != "demo" {
+			return PhasePrePublish, nil
+		}
+		return PhaseCommitted, nil
+	}
+
+	if err := Recover(dir, reconcile); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	if asked != "demo" {
+		t.Errorf("reconciler asked about %q, want the normalized %q", asked, "demo")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "demo", "version"))
+	if err != nil {
+		t.Fatalf("read the live install: %v", err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("the committed install was replaced with %q", data)
+	}
+}
