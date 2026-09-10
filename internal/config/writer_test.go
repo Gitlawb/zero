@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -366,6 +368,269 @@ func TestSetThemePersistsUserPreference(t *testing.T) {
 	}
 	if cfg.Preferences.Theme != "" {
 		t.Fatalf("SetTheme(\"\") should clear the theme, got %q", cfg.Preferences.Theme)
+	}
+}
+
+func TestSetNotifyPersistsValidValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	}, 0o600)
+
+	cfg, err := SetNotify(path, NotifyConfig{Mode: "  both  ", FocusMode: "  unfocused  "})
+	if err != nil {
+		t.Fatalf("SetNotify() error = %v", err)
+	}
+	if cfg.Notify.Mode != "both" || cfg.Notify.FocusMode != "unfocused" {
+		t.Fatalf("Notify = %+v, want mode=both focusMode=unfocused (trimmed)", cfg.Notify)
+	}
+	persisted := readConfigFixture(t, path)
+	if persisted.Notify.Mode != "both" || persisted.Notify.FocusMode != "unfocused" {
+		t.Fatalf("persisted Notify = %+v, want mode=both focusMode=unfocused", persisted.Notify)
+	}
+	if persisted.ActiveProvider != "openai" || len(persisted.Providers) != 1 {
+		t.Fatalf("provider config was not preserved by SetNotify: %#v", persisted)
+	}
+}
+
+func TestSetNotifyRejectsInvalidMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
+	if _, err := SetNotify(path, NotifyConfig{Mode: "loud", FocusMode: "unfocused"}); err == nil {
+		t.Fatal("expected error for invalid notify.mode")
+	}
+}
+
+func TestSetNotifyRejectsInvalidFocusMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
+	if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "sideways"}); err == nil {
+		t.Fatal("expected error for invalid notify.focusMode")
+	}
+}
+
+func TestSetNotifyRejectsEmptyConfigPath(t *testing.T) {
+	if _, err := SetNotify("", NotifyConfig{Mode: "off"}); err == nil {
+		t.Fatal("expected error for empty config path")
+	}
+}
+
+func TestSetNotifyBlankValuesPreservedAsDefaults(t *testing.T) {
+	// An empty mode/focusMode stored on disk is a valid "use the built-in
+	// defaults" signal — SetNotify must not reject blanks, and they must round
+	// trip unchanged.
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
+	if _, err := SetNotify(path, NotifyConfig{}); err != nil {
+		t.Fatalf("SetNotify({}) should accept blank values, got error: %v", err)
+	}
+	persisted := readConfigFixture(t, path)
+	if persisted.Notify.Mode != "" || persisted.Notify.FocusMode != "" {
+		t.Fatalf("blank notify values should round-trip, got %+v", persisted.Notify)
+	}
+}
+
+// Maintainer regression (PR #1001): a notification save must preserve unrelated
+// values whose EXPLICIT presence matters. The typed serializer's omitempty
+// cannot round-trip tools.deferThreshold: 0 (explicit "never defer" vs unset
+// "use default 3") or an MCP server's disabled: false (explicitly enabled), so
+// SetNotify/UpdateNotify edit only the notify member's bytes instead. The
+// assertions run against the RAW file, because reading through FileConfig
+// would hide exactly the presence loss being tested.
+func TestSetNotifyPreservesExplicitUnrelatedValues(t *testing.T) {
+	dir := t.TempDir()
+
+	for name, body := range map[string]string{
+		"explicit zero deferThreshold": `{
+	"tools": {"deferThreshold": 0},
+	"mcp": {"servers": {"firecrawl": {"command": "npx", "disabled": false}}}
+}`,
+		"unknown keys stay untouched": `{
+	"activeProvider": "openai",
+	"customTopLevel": {"nested": [1, 2, 3]},
+	"notify": {"mode": "both"}
+}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name+".json")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
+				t.Fatalf("SetNotify: %v", err)
+			}
+
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if strings.Contains(name, "explicit zero") {
+				tools, ok := obj["tools"]
+				if !ok || !strings.Contains(string(tools), `"deferThreshold": 0`) {
+					t.Errorf("tools.deferThreshold: 0 lost through a notify write; tools = %s", string(tools))
+				}
+				mcp, ok := obj["mcp"]
+				if !ok || !strings.Contains(string(mcp), `"disabled": false`) {
+					t.Errorf("mcp disabled: false lost through a notify write; mcp = %s", string(mcp))
+				}
+			}
+			if strings.Contains(name, "unknown keys") {
+				if _, ok := obj["customTopLevel"]; !ok {
+					t.Error("unknown top-level key lost through a notify write")
+				}
+			}
+		})
+	}
+}
+
+// Maintainer regression (PR #1001, CodeRabbit follow-up): a hand-edited config
+// may contain DUPLICATE notify members (JSON decoders tolerate them and the
+// last occurrence wins). A reset must remove EVERY notify member — removing
+// only the last leaves the earlier block as the new effective preference, so
+// `zero config notify --reset` would report success while the old value still
+// applies.
+func TestSetNotifyResetRemovesEveryDuplicateNotifyMember(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	duplicated := `{"notify":{"mode":"off"},"activeProvider":"openai","notify":{"mode":"bell"}}`
+	if err := os.WriteFile(path, []byte(duplicated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetNotify(path, NotifyConfig{}); err != nil {
+		t.Fatalf("SetNotify({}) reset: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, still := obj["notify"]; still {
+		t.Fatalf("reset left a notify member behind: %s", string(raw))
+	}
+	if obj["activeProvider"] == nil || string(obj["activeProvider"]) != `"openai"` {
+		t.Errorf("unrelated member lost through the reset: %s", string(raw))
+	}
+
+	// A reset on a file with NO notify member is a no-op, and a partial update
+	// against duplicates replaces the LAST member (the effective one under
+	// last-occurrence-wins decoding).
+	if err := os.WriteFile(path, []byte(duplicated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
+		t.Fatalf("SetNotify replace: %v", err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := UserNotify(path)
+	if err != nil {
+		t.Fatalf("UserNotify: %v", err)
+	}
+	if stored.Mode != "off" || stored.FocusMode != "always" {
+		t.Fatalf("after replace, effective notify = %+v, want off/always (last member replaced)", stored)
+	}
+	if !strings.Contains(string(raw), `"activeProvider"`) {
+		t.Errorf("unrelated member lost through the replace: %s", string(raw))
+	}
+}
+
+// Maintainer regression (PR #1001): concurrent partial updates must not lose
+// each other's explicit change. Two `zero config notify` calls (--mode off and
+// --focus always) racing from both/unfocused previously interleaved their
+// read-merge-write and one write silently undid the other (reproduced 50/50
+// without the lock). UpdateNotify serializes the whole transaction.
+func TestUpdateNotifyConcurrentPartialUpdatesLoseNoField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	if err := os.WriteFile(path, []byte(`{"notify":{"mode":"both","focusMode":"unfocused"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := UpdateNotify(path, func(current NotifyConfig) NotifyConfig {
+			current.Mode = "off"
+			return current
+		}); err != nil {
+			errs <- fmt.Errorf("mode update: %w", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := UpdateNotify(path, func(current NotifyConfig) NotifyConfig {
+			current.FocusMode = "always"
+			return current
+		}); err != nil {
+			errs <- fmt.Errorf("focus update: %w", err)
+		}
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent update failed: %v", err)
+	}
+
+	stored, err := UserNotify(path)
+	if err != nil {
+		t.Fatalf("read stored: %v", err)
+	}
+	// BOTH explicit changes must survive: mode from writer 1, focus from
+	// writer 2. The old race let the second writer's stale focus
+	// ("unfocused") or stale mode ("both") win.
+	if stored.Mode != "off" {
+		t.Errorf("mode = %q, want off (concurrent focus update must not clobber it)", stored.Mode)
+	}
+	if stored.FocusMode != "always" {
+		t.Errorf("focusMode = %q, want always (concurrent mode update must not clobber it)", stored.FocusMode)
+	}
+}
+
+// UserNotify reads the notify block from the user's own file. Partial updates
+// seed from this value so they preserve what the USER chose (blank included)
+// instead of copying a project config's setting or a pinned default into the
+// global file (maintainer review, PR #1001).
+func TestUserNotify(t *testing.T) {
+	dir := t.TempDir()
+
+	// Missing file: zero value, no error.
+	got, err := UserNotify(filepath.Join(dir, "missing.json"))
+	if err != nil {
+		t.Fatalf("missing file should not error: %v", err)
+	}
+	if got.Mode != "" || got.FocusMode != "" {
+		t.Fatalf("missing file = %+v, want zero value", got)
+	}
+
+	// Present block: trimmed values returned.
+	path := filepath.Join(dir, "zero.json")
+	writeConfigFixture(t, path, FileConfig{Notify: NotifyConfig{Mode: "  bell  ", FocusMode: " always "}}, 0o600)
+	got, err = UserNotify(path)
+	if err != nil {
+		t.Fatalf("UserNotify: %v", err)
+	}
+	if got.Mode != "bell" || got.FocusMode != "always" {
+		t.Fatalf("UserNotify = %+v, want bell/always (trimmed)", got)
+	}
+
+	// Blank path: zero value, no error.
+	if got, err = UserNotify(""); err != nil || got.Mode != "" || got.FocusMode != "" {
+		t.Fatalf("blank path = %+v err=%v, want zero value", got, err)
 	}
 }
 
