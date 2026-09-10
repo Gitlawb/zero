@@ -44,11 +44,12 @@ type Deps struct {
 	// ResolveWorkspaceRoot validates + normalizes a client-supplied cwd (must be an
 	// existing directory; never the bare root). It is the file-tool confinement root.
 	ResolveWorkspaceRoot func(cwd string) (string, error)
-	// PersistEvent is an optional test seam for injecting event-store failures.
-	// Production callers leave it nil and use Store.AppendEvents.
-	PersistEvent func(sessionID string, input sessions.AppendEventInput) error
-	Store        *sessions.Store
-	AgentInfo    Implementation
+	// PersistEvents is an optional test seam for injecting event-store failures.
+	// It receives a COMPLETED TURN as one batch, never one event at a time: the
+	// batch is the unit the shared store keeps contiguous (see persistTurn).
+	PersistEvents func(sessionID string, inputs []sessions.AppendEventInput) error
+	Store         *sessions.Store
+	AgentInfo     Implementation
 }
 
 // Workspace is the per-turn execution environment passed to the agent. ACP does
@@ -507,17 +508,6 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	}
 	queue(messageEvent("user", userText))
 
-	var persistenceErr error
-	persistenceFailed := false
-	persist := func(input sessions.AppendEventInput) {
-		if persistenceFailed {
-			return
-		}
-		if err := a.persistEvent(sess.id, input); err != nil {
-			persistenceErr = errors.Join(persistenceErr, err)
-			persistenceFailed = true
-		}
-	}
 	opts := agent.Options{
 		Cwd:            sess.cwd,
 		SessionID:      sess.id,
@@ -556,9 +546,21 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	if stopErr != nil {
 		return "", RPCError(codeInternalError, stopErr.Error())
 	}
-	for _, event := range pendingEvents {
-		persist(event)
-	}
+	// ONE BATCH, ONE LOCK. The outcome gate above decides WHETHER the turn is
+	// committed; the store batch decides WHICH RECORDS STAY TOGETHER relative to
+	// other writers, and these are different guarantees. Persisting the buffer
+	// one event per call took and released the store's session lock between
+	// events, so a second ACP instance holding the same session — its turnMu is
+	// its own, only the store is shared — could append its whole turn in the
+	// gap: user A, user B, answer B, answer A. Every write was individually
+	// locked and the log was valid, but a fresh load pairs prose by order and
+	// reconstructed three wrong turns from two right ones. Before this branch,
+	// persistTurn handed the user and assistant events to AppendEvents together;
+	// buffering until the outcome is known was correct, splitting the commit
+	// into singleton writes was not. The store writes a batch under one lock and
+	// one file write, which is the contiguity restored here — not a disk
+	// transaction, and not a promise about crashes mid-fsync. Reported by @jatmn.
+	persistenceErr := a.persistTurn(sess.id, pendingEvents)
 	sess.appendHistory(turnRecord{user: userText, assistant: result.FinalAnswer})
 	a.warnPersistence(
 		note,
@@ -825,14 +827,20 @@ func (a *Agent) configOptions(s *acpSession) []SessionConfigOption {
 
 // ---- persistence + continuity ----
 
-func (a *Agent) persistEvent(sessionID string, input sessions.AppendEventInput) error {
-	if a.deps.PersistEvent != nil {
-		return a.deps.PersistEvent(sessionID, input)
+// persistTurn commits a completed turn's buffered events as one store batch, so
+// no other writer's records can land between them. A failure is the failure of
+// the whole batch: nothing after a failed prerequisite is appended on its own.
+func (a *Agent) persistTurn(sessionID string, inputs []sessions.AppendEventInput) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	if a.deps.PersistEvents != nil {
+		return a.deps.PersistEvents(sessionID, inputs)
 	}
 	if a.deps.Store == nil {
 		return nil
 	}
-	_, err := a.deps.Store.AppendEvents(sessionID, []sessions.AppendEventInput{input})
+	_, err := a.deps.Store.AppendEvents(sessionID, inputs)
 	return err
 }
 

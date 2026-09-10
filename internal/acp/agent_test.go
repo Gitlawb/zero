@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -258,7 +259,12 @@ func TestACPListsOnlyResumableSessionMetadata(t *testing.T) {
 	if _, found := byID["child-run"]; found {
 		t.Fatal("agent-owned child session leaked into the desktop session picker")
 	}
-	if got := byID["desktop-a"]; got.Title != "First" || got.Cwd != workspaceA || got.Meta == nil || got.Meta.ModelID != "model-a" || got.Meta.CreatedAt == "" || got.UpdatedAt == "" {
+	// The fixture's spelling is the INPUT; the resolver's is the OUTPUT the
+	// listing promises. Under a TMPDIR carrying a ".." component t.TempDir()
+	// keeps that spelling while the test resolver cleans it, and comparing the
+	// two representations failed a correct result. Expected values describe the
+	// output contract. Reported by @jatmn.
+	if got := byID["desktop-a"]; got.Title != "First" || got.Cwd != filepath.Clean(workspaceA) || got.Meta == nil || got.Meta.ModelID != "model-a" || got.Meta.CreatedAt == "" || got.UpdatedAt == "" {
 		t.Fatalf("desktop-a summary = %+v", got)
 	}
 
@@ -2015,92 +2021,214 @@ func TestACPPromptPersistsToolActivityForFreshLoad(t *testing.T) {
 	}
 }
 
-func TestACPPersistenceStopsAtFirstFailedEventDependency(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		failAt    int
-		wantTypes []sessions.EventType
-	}{
-		{name: "user message", failAt: 1},
-		{name: "tool call", failAt: 2, wantTypes: []sessions.EventType{sessions.EventMessage}},
-		{name: "tool result", failAt: 3, wantTypes: []sessions.EventType{sessions.EventMessage, sessions.EventToolCall}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			deps := testDeps(t)
-			attempts := 0
-			deps.PersistEvent = func(sessionID string, input sessions.AppendEventInput) error {
-				attempts++
-				if attempts == tc.failAt {
-					return errors.New("injected append failure")
-				}
-				_, err := deps.Store.AppendEvents(sessionID, []sessions.AppendEventInput{input})
-				return err
-			}
-			deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
-				call := agent.ToolCall{ID: "call-prefix", Name: "read_file", Arguments: `{"path":"a.go"}`}
-				opts.OnToolCall(call)
-				opts.OnToolResult(agent.ToolResult{
-					ToolCallID: call.ID, Name: call.Name, Status: tools.StatusOK, Output: "content",
-				})
-				return agent.Result{FinalAnswer: "done"}, nil
-			}
+// A COMPLETED TURN IS ONE STORE BATCH; ITS FAILURE IS ONE FAILURE. Persistence
+// used to append the buffered turn one event per call, so a failure part-way
+// left a durable prefix and the rule was "never append a dependent suffix after
+// a failed prerequisite". With the turn committed as a single batch there is
+// no suffix to protect: nothing of the turn is durable, the turn still reports
+// its real outcome, the warning is raised, and a fresh load finds no history.
+func TestACPPersistenceFailureCommitsNothingOfTheTurn(t *testing.T) {
+	deps := testDeps(t)
+	batches := 0
+	deps.PersistEvents = func(sessionID string, inputs []sessions.AppendEventInput) error {
+		batches++
+		return errors.New("injected append failure")
+	}
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		call := agent.ToolCall{ID: "call-prefix", Name: "read_file", Arguments: `{"path":"a.go"}`}
+		opts.OnToolCall(call)
+		opts.OnToolResult(agent.ToolResult{ToolCallID: call.ID, Name: call.Name, Status: tools.StatusOK, Output: "content"})
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			workspace := t.TempDir()
-			writer := newHarness(t, deps)
-			var created NewSessionResult
-			if err := writer.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: workspace}, &created); err != nil {
-				t.Fatal(err)
-			}
-			if err := writer.client.Call(ctx, MethodSessionPrompt, PromptParams{
-				SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("read it")},
-			}, &PromptResult{}); err != nil {
-				t.Fatalf("session/prompt: %v", err)
-			}
-			writer.stop()
-			if attempts != tc.failAt {
-				t.Fatalf("append attempts = %d, want persistence to stop at %d", attempts, tc.failAt)
-			}
-			events, err := deps.Store.ReadEvents(created.SessionID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(events) != len(tc.wantTypes) {
-				t.Fatalf("durable events = %+v, want prefix %v", events, tc.wantTypes)
-			}
-			for i, want := range tc.wantTypes {
-				if events[i].Type != want {
-					t.Fatalf("durable event %d = %s, want %s", i, events[i].Type, want)
-				}
-			}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	workspace := t.TempDir()
+	writer := newHarness(t, deps)
+	var created NewSessionResult
+	if err := writer.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: workspace}, &created); err != nil {
+		t.Fatal(err)
+	}
+	var result PromptResult
+	if err := writer.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("read it")},
+	}, &result); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if result.StopReason != StopEndTurn {
+		t.Fatalf("stopReason = %q, want %q: a persistence failure is not a failed turn", result.StopReason, StopEndTurn)
+	}
+	got := drainTextUntil(t, writer.updates, func(text string) bool {
+		return strings.Contains(text, "Could not save session history")
+	})
+	if !strings.Contains(got, "Could not save session history") {
+		t.Fatalf("streamed text = %q, want persistence warning", got)
+	}
+	writer.stop()
+	if batches != 1 {
+		t.Fatalf("persistence attempts = %d, want the whole turn offered once as one batch", batches)
+	}
+	events, err := deps.Store.ReadEvents(created.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("durable events = %+v, want none: a failed batch must not leave a partial turn", events)
+	}
 
-			// Reopen through a fresh ACP instance: the durable prefix may contain
-			// an in-progress call, but never its orphan result or an assistant
-			// answer whose prerequisite write failed.
-			loader := newHarness(t, deps)
-			defer loader.stop()
-			if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
-				SessionID: created.SessionID, Cwd: workspace,
-			}, &LoadSessionResult{}); err != nil {
-				t.Fatalf("fresh session/load: %v", err)
-			}
-			select {
-			case update := <-loader.tools:
-				if tc.failAt != 3 || update.SessionUpdate != UpdateToolCall || update.ToolCallID != replayToolCallID(events[1].ID) || update.Status != ToolStatusInProgress {
-					t.Fatalf("replayed tool update = %+v", update)
-				}
-			case <-time.After(100 * time.Millisecond):
-				if tc.failAt == 3 {
-					t.Fatal("persisted tool-call prefix was not replayed")
-				}
-			}
-			select {
-			case update := <-loader.tools:
-				t.Fatalf("dependent tool suffix was replayed: %+v", update)
-			case <-time.After(100 * time.Millisecond):
-			}
-		})
+	// A fresh instance loads the session and replays nothing: no orphan call,
+	// no answer whose prerequisite never landed.
+	loader := newHarness(t, deps)
+	defer loader.stop()
+	if err := loader.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+		SessionID: created.SessionID, Cwd: workspace,
+	}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("fresh session/load: %v", err)
+	}
+	select {
+	case update := <-loader.tools:
+		t.Fatalf("a tool update from the failed turn was replayed: %+v", update)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TWO INSTANCES, ONE STORE: EACH TURN'S RECORDS STAY TOGETHER. An ACP
+// instance's turnMu serializes prompts within that instance only; two
+// instances that loaded the same session share nothing but the store, so the
+// store batch is the only thing standing between their turns. When the turn
+// was committed one event per call, another writer could land between two of
+// them and a fresh load paired user A with nothing and answer A with nothing.
+//
+// The seam here does not batch anything itself: it OBSERVES what production
+// hands it — the complete buffered turn — holds both writers at the commit
+// boundary until each has arrived, and then delegates to the real
+// Store.AppendEvents batch under the real session lock. Reverting persistTurn
+// to singleton writes fails this deterministically: the seam then sees
+// one-event batches, before any interleaving has to be provoked at all.
+func TestACPCompletedTurnsFromTwoInstancesStayContiguous(t *testing.T) {
+	deps := testDeps(t)
+	workspace := t.TempDir()
+	created, err := deps.Store.Create(sessions.CreateInput{SessionID: "shared-session", Title: "Shared", Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 2
+	var mu sync.Mutex
+	arrived := 0
+	release := make(chan struct{})
+	deps.PersistEvents = func(sessionID string, inputs []sessions.AppendEventInput) error {
+		// The whole turn, or the contiguity guarantee is already gone.
+		if len(inputs) != 4 {
+			t.Errorf("persist batch carried %d events, want the complete 4-event turn", len(inputs))
+		}
+		mu.Lock()
+		arrived++
+		if arrived == writers {
+			close(release)
+		}
+		mu.Unlock()
+		<-release
+		_, err := deps.Store.AppendEvents(sessionID, inputs)
+		return err
+	}
+	deps.RunAgent = func(_ context.Context, prompt string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		who := "A"
+		if strings.Contains(prompt, "prompt B") {
+			who = "B"
+		}
+		call := agent.ToolCall{ID: "call-" + who, Name: "read_file", Arguments: `{"path":"` + who + `.go"}`}
+		opts.OnToolCall(call)
+		opts.OnToolResult(agent.ToolResult{ToolCallID: call.ID, Name: call.Name, Status: tools.StatusOK, Output: "content " + who})
+		return agent.Result{FinalAnswer: "answer " + who}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	instanceA := newHarness(t, deps)
+	defer instanceA.stop()
+	instanceB := newHarness(t, deps)
+	defer instanceB.stop()
+	for _, h := range []*clientHarness{instanceA, instanceB} {
+		if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+			t.Fatalf("session/load: %v", err)
+		}
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for _, turn := range []struct {
+		h      *clientHarness
+		prompt string
+	}{{instanceA, "prompt A"}, {instanceB, "prompt B"}} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- turn.h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+				SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock(turn.prompt)},
+			}, &PromptResult{})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("session/prompt: %v", err)
+		}
+	}
+
+	events, err := deps.Store.ReadEvents(created.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 8 {
+		t.Fatalf("durable events = %d, want 8", len(events))
+	}
+	// Each turn is a contiguous 4-record group in stored order.
+	for start := 0; start < 8; start += 4 {
+		group := events[start : start+4]
+		user := payloadString(group[0].Payload, "content")
+		who := strings.TrimPrefix(user, "prompt ")
+		if group[0].Type != sessions.EventMessage || group[1].Type != sessions.EventToolCall ||
+			group[2].Type != sessions.EventToolResult || group[3].Type != sessions.EventMessage {
+			t.Fatalf("group at %d has types %s %s %s %s", start, group[0].Type, group[1].Type, group[2].Type, group[3].Type)
+		}
+		if payloadString(group[1].Payload, "toolCallId") != "call-"+who ||
+			payloadString(group[2].Payload, "toolCallId") != "call-"+who ||
+			payloadString(group[3].Payload, "content") != "answer "+who {
+			t.Fatalf("another writer's records landed inside turn %s: %+v", who, group)
+		}
+	}
+
+	// A fresh instance restores two correctly paired turns from that log.
+	deps.PersistEvents = nil
+	fresh := newHarness(t, deps)
+	defer fresh.stop()
+	if err := fresh.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("fresh session/load: %v", err)
+	}
+	prompts := make(chan string, 1)
+	realRun := deps.RunAgent
+	_ = realRun
+	deps.RunAgent = func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		prompts <- prompt
+		return agent.Result{FinalAnswer: "ok"}, nil
+	}
+	seeded := newHarness(t, deps)
+	defer seeded.stop()
+	if err := seeded.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: created.SessionID, Cwd: workspace, McpServers: []McpServer{}}, &ResumeSessionResult{}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	if err := seeded.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("carry on")}}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	prompt := <-prompts
+	for _, who := range []string{"A", "B"} {
+		if !strings.Contains(prompt, "prompt "+who) || !strings.Contains(prompt, "answer "+who) {
+			t.Fatalf("restored prompt lost turn %s:\n%s", who, prompt)
+		}
+	}
+	if strings.Contains(prompt, "content A") || strings.Contains(prompt, "content B") {
+		t.Fatalf("historical tool output entered the model prompt:\n%s", prompt)
 	}
 }
 
@@ -2274,4 +2402,19 @@ func TestACPResumeRejectsMissingPopulatedEventLog(t *testing.T) {
 	}, &ResumeSessionResult{}); err != nil {
 		t.Fatalf("session/resume rejected valid empty history: %v", err)
 	}
+}
+
+// payloadString reads one string field from a stored event's payload, which is
+// raw JSON once it has been read back from disk.
+func payloadString(payload any, key string) string {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	var decoded map[string]any
+	if json.Unmarshal(raw, &decoded) != nil {
+		return ""
+	}
+	value, _ := decoded[key].(string)
+	return value
 }
