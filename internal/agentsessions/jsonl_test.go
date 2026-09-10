@@ -179,7 +179,7 @@ func TestStreamTailLinesBoundsTheReadAndDropsAPartialLeadingRecord(t *testing.T)
 	writeFile(t, path, strings.Repeat("x", 100)+"\nsecond\nthird\n")
 
 	var got []string
-	omitted, err := streamTailLines("", path, 64<<10, 20, func(line []byte, truncated bool) bool {
+	omitted, err := streamTailLinesAt("", path, 64<<10, 20, func(line []byte, truncated bool) bool {
 		if truncated {
 			t.Fatal("short tail record was reported truncated")
 		}
@@ -203,7 +203,7 @@ func TestStreamTailLinesDoesNotReadPastCapturedLiveExtent(t *testing.T) {
 
 	var got []string
 	appended := false
-	_, err := streamTailLines("", path, 64<<10, 32<<20, func(line []byte, truncated bool) bool {
+	_, err := streamTailLinesAt("", path, 64<<10, 32<<20, func(line []byte, truncated bool) bool {
 		if truncated {
 			t.Fatal("short live record was reported truncated")
 		}

@@ -283,3 +283,133 @@ func TestImportRemovesSessionWhenAppendingEventsFails(t *testing.T) {
 		t.Fatalf("failed import left a durable session behind: %+v", metas)
 	}
 }
+
+// THE FILE THAT WAS VERIFIED IS THE FILE THAT IS READ. Read used to check the
+// selected path through one handle, translate through a second open and check
+// through a third; a writer that renamed A aside, placed B under A's name for
+// the middle open and restored A before the last check passed both snapshot
+// checks while B's bytes were imported under A's provenance. The seam schedules
+// exactly that replacement between the verified open and the first byte read.
+func TestImportReadsTheFileItVerifiedNotTheNameItWasGiven(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".claude", "projects", "-w", "swap.jsonl")
+	writeFile(t, path, `{"type":"user","cwd":"/w","sessionId":"swap","message":{"role":"user","content":"genuine A"}}`+"\n")
+	adapter := ClaudeCode(testEnv(home, nil))
+	found, err := adapter.Discover("")
+	if err != nil || len(found) != 1 {
+		t.Fatalf("discover: %v (%d results)", err, len(found))
+	}
+	aside := path + ".aside"
+	afterSourceOpen = func(opened string) {
+		if opened != path {
+			return
+		}
+		if err := os.Rename(path, aside); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, path, `{"type":"user","cwd":"/w","sessionId":"swap","message":{"role":"user","content":"impostor B"}}`+"\n")
+	}
+	t.Cleanup(func() { afterSourceOpen = nil })
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+	result, err := ImportSource(store, adapter, found[0], ReadOptions{})
+	if err != nil {
+		t.Fatalf("import of the verified handle failed: %v", err)
+	}
+	events, err := store.ReadEvents(result.Session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, event := range events {
+		joined += string(event.Payload)
+	}
+	if !strings.Contains(joined, "genuine A") || strings.Contains(joined, "impostor B") {
+		t.Fatalf("imported bytes did not come from the verified file:\n%s", joined)
+	}
+}
+
+// A source written DURING the read is refused on the same handle, as the
+// existing changed-source failure, and nothing is committed.
+func TestImportRefusesASourceWrittenDuringTheRead(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".claude", "projects", "-w", "grow.jsonl")
+	writeFile(t, path, `{"type":"user","cwd":"/w","sessionId":"grow","message":{"role":"user","content":"before"}}`+"\n")
+	adapter := ClaudeCode(testEnv(home, nil))
+	found, err := adapter.Discover("")
+	if err != nil || len(found) != 1 {
+		t.Fatalf("discover: %v (%d results)", err, len(found))
+	}
+	afterSourceOpen = func(opened string) {
+		if opened != path {
+			return
+		}
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteString(`{"type":"assistant","message":{"role":"assistant","content":"after"}}` + "\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		// Keep the timestamp moving even on coarse filesystems.
+		future := time.Now().Add(2 * time.Second)
+		_ = os.Chtimes(path, future, future)
+	}
+	t.Cleanup(func() { afterSourceOpen = nil })
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+	if _, err := ImportSource(store, adapter, found[0], ReadOptions{}); err == nil || !strings.Contains(err.Error(), "changed after discovery") {
+		t.Fatalf("import of a source written during the read = %v, want changed-source refusal", err)
+	}
+	metas, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("a refused import left a session: %+v", metas)
+	}
+}
+
+// The Codex reader shares the handle contract: same verified handle from the
+// identity check to the last byte, same refusal of a source that moves.
+func TestCodexImportReadsTheFileItVerifiedNotTheNameItWasGiven(t *testing.T) {
+	env, path := writeCodexStore(t,
+		`{"type":"session_meta","timestamp":"2026-08-01T10:00:00.000Z","payload":{"session_id":"019f73d7-e215-7ce0-ab38-d9e6db354717","cwd":"/w"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"genuine A"}]}}`,
+	)
+	adapter := Codex(env)
+	found, err := adapter.Discover("")
+	if err != nil || len(found) != 1 {
+		t.Fatalf("discover: %v (%d results)", err, len(found))
+	}
+	afterSourceOpen = func(opened string) {
+		if opened != path {
+			return
+		}
+		if err := os.Rename(path, path+".aside"); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, path, strings.Join([]string{
+			`{"type":"session_meta","timestamp":"2026-08-01T10:00:00.000Z","payload":{"session_id":"019f73d7-e215-7ce0-ab38-d9e6db354717","cwd":"/w"}}`,
+			`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"impostor B"}]}}`,
+		}, "\n")+"\n")
+	}
+	t.Cleanup(func() { afterSourceOpen = nil })
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
+	result, err := ImportSource(store, adapter, found[0], ReadOptions{})
+	if err != nil {
+		t.Fatalf("import of the verified handle failed: %v", err)
+	}
+	events, err := store.ReadEvents(result.Session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, event := range events {
+		joined += string(event.Payload)
+	}
+	if !strings.Contains(joined, "genuine A") || strings.Contains(joined, "impostor B") {
+		t.Fatalf("imported bytes did not come from the verified file:\n%s", joined)
+	}
+}

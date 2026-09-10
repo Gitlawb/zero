@@ -148,3 +148,43 @@ func TestABidiOverrideIsStrippedFromTitlesAndToolNames(t *testing.T) {
 		t.Errorf("stripControl removed a legitimate newline: %q", got)
 	}
 }
+
+// THE OTHER DIRECTION OF THE SAME COMPOSITION. Stripping controls can assemble
+// a split key the patterns could not see (the test above), and it can also
+// ERASE the word boundary an intact key needs: "progress\rsk-ant-…" was a
+// recognizable key after a carriage return and became "progresssk-ant-…", a
+// mid-word run \bsk-ant- refuses to match, so the whole key persisted through
+// messageEvent. Both must hold at once; reversing the two calls would trade one
+// for the other, so redaction runs on both sides of normalization.
+func TestAnIntactKeyAfterARemovedSeparatorIsStillRedacted(t *testing.T) {
+	keys := []struct{ name, value string }{
+		{"anthropic key", "sk-ant-api03-" + strings.Repeat("A", 24)},
+		{"github pat", "ghp_" + strings.Repeat("B", 36)},
+		{"aws access key", "AKIA" + strings.Repeat("C", 16)},
+	}
+	separators := []struct{ name, value string }{{"CR", "\r"}, {"NUL", "\x00"}, {"ESC", "\x1b"}, {"DEL", "\x7f"}, {"C1", "\u0085"}}
+	for _, key := range keys {
+		for _, sep := range separators {
+			input := "progress" + sep.value + key.value + " done"
+			for _, probe := range []struct {
+				name string
+				got  string
+			}{
+				{"redact", redact(input)},
+				{"message", str(t, messageEvent("user", input), "content")},
+				{"tool result", str(t, toolResultEvent(&importCallIdentities{}, "bash", "c1", "ok", input), "output")},
+			} {
+				if strings.Contains(probe.got, key.value) {
+					t.Errorf("%s / %s / %s: intact key survived: %q", key.name, sep.name, probe.name, probe.got)
+				}
+				if !strings.Contains(probe.got, "progress") || !strings.Contains(probe.got, "done") {
+					t.Errorf("%s / %s / %s: surrounding text was eaten: %q", key.name, sep.name, probe.name, probe.got)
+				}
+			}
+		}
+	}
+	// Legitimate layout is still kept in transcript text.
+	if got := redact("line one\nline\ttwo"); got != "line one\nline\ttwo" {
+		t.Errorf("newline/tab were not preserved: %q", got)
+	}
+}

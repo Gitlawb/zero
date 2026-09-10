@@ -104,29 +104,32 @@ type model struct {
 	sessionStore          *sessions.Store
 	agentSessionsEnv      agentsessions.Env
 	sessionImportInFlight bool
-	peerService           *peermsg.Service
-	peerInbox             []peermsg.InboundMessage
-	peerApprovalQueue     []peermsg.InboundMessage
-	peerPendingApproval   *peermsg.InboundMessage
-	sandboxStore          *sandbox.GrantStore
-	mcpConfig             config.MCPConfig
-	mcpPermissionStore    *internalmcp.PermissionStore
-	mcpTokenStore         *internalmcp.TokenStore
-	mcpCommand            func(context.Context, []string) MCPCommandResult
-	sandboxSetupCommand   func(context.Context) SandboxSetupCommandResult
-	mcpViewStateCache     MCPViewState
-	mcpViewStateReady     bool
-	mcpCommandSeq         int
-	mcpCommandCancel      context.CancelFunc
-	sandboxSetupSeq       int
-	sandboxSetupInFlight  bool
-	doctorCommandSeq      int
-	doctorInFlight        bool
-	doctorFrame           int
-	activeSession         sessions.Metadata
-	pendingSessionTitle   string
-	sessionEvents         []sessions.Event
-	btw                   btwState
+	// sessionPickerGeneration counts /resume discovery requests so a result
+	// from a superseded request is recognized and discarded.
+	sessionPickerGeneration uint64
+	peerService             *peermsg.Service
+	peerInbox               []peermsg.InboundMessage
+	peerApprovalQueue       []peermsg.InboundMessage
+	peerPendingApproval     *peermsg.InboundMessage
+	sandboxStore            *sandbox.GrantStore
+	mcpConfig               config.MCPConfig
+	mcpPermissionStore      *internalmcp.PermissionStore
+	mcpTokenStore           *internalmcp.TokenStore
+	mcpCommand              func(context.Context, []string) MCPCommandResult
+	sandboxSetupCommand     func(context.Context) SandboxSetupCommandResult
+	mcpViewStateCache       MCPViewState
+	mcpViewStateReady       bool
+	mcpCommandSeq           int
+	mcpCommandCancel        context.CancelFunc
+	sandboxSetupSeq         int
+	sandboxSetupInFlight    bool
+	doctorCommandSeq        int
+	doctorInFlight          bool
+	doctorFrame             int
+	activeSession           sessions.Metadata
+	pendingSessionTitle     string
+	sessionEvents           []sessions.Event
+	btw                     btwState
 	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
 	// surface. It survives returning to the parent so a late message from an old
 	// side run can never match a run in a later BTW conversation.
@@ -1403,6 +1406,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case sessionPickerLoadedMsg:
+		// A LATE RESULT MUST NOT APPLY A SWITCH WHOSE PRECONDITIONS ARE GONE.
+		// /resume checked m.pending when it dispatched discovery; this message
+		// arrives later. Installing the picker unconditionally let a prompt
+		// submitted in between start a run, and then a selection from the
+		// late picker switch the active session under it — its completion
+		// appended the first run's events into the other conversation. The
+		// result is tied to the request that made it (generation) and the
+		// session it was made for (originSession), and refused outright while
+		// a run is active. The selection route re-checks m.pending on its own
+		// (startResumeCommand), because a run can also begin while this very
+		// request is still current. Reported by @jatmn.
+		if !m.sessionPickerResultIsCurrent(msg) {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendSystem,
+				text: "Sessions\nThe session list is out of date because a run started or the session changed; run /resume again.",
+			})
+			return m, nil
+		}
 		if msg.text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.text})
 		}
@@ -4861,7 +4882,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		// `/resume <id>` and `/resume latest` still resolve directly. The picker falls
 		// back to the text path when there is nothing to resume.
 		if strings.TrimSpace(command.text) == "" {
-			return m, m.sessionPickerCmd()
+			return m.sessionPickerCmd()
 		}
 		text := ""
 		m, text, cmd := m.startResumeCommand(command.text)

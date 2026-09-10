@@ -201,13 +201,15 @@ func streamLines(root string, path string, maxLineBytes int, visit func(line []b
 // prefixOmitted reports that older bytes were deliberately skipped. If the
 // window begins in a record, that partial record is consumed and withheld so a
 // JSON fragment can never masquerade as a complete event.
-func streamTailLines(root string, path string, maxLineBytes int, maxBytes int, visit func(line []byte, truncated bool) bool) (prefixOmitted bool, err error) {
-	file, err := openContained(root, path)
-	if err != nil {
+//
+// It reads from an OPEN HANDLE rather than a path: the handle is the file whose
+// identity was proved against the discovery snapshot (openSelectedSource), and
+// reading by path again would be a second, unverified lookup. See
+// validateSourceHandle for why that mattered.
+func streamTailLines(file readSeekStater, maxLineBytes int, maxBytes int, visit func(line []byte, truncated bool) bool) (prefixOmitted bool, err error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return false, err
 	}
-	defer file.Close()
-
 	info, err := file.Stat()
 	if err != nil {
 		return false, err
@@ -336,33 +338,71 @@ func fileModTime(root string, path string) time.Time {
 	return info.ModTime()
 }
 
-func snapshotTranscript(root string, path string) (sourceSnapshot, error) {
-	file, err := openContained(root, path)
-	if err != nil {
-		return sourceSnapshot{}, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return sourceSnapshot{}, err
-	}
-	if !info.Mode().IsRegular() {
-		return sourceSnapshot{}, errors.New("agentsessions: transcript is not a regular file")
-	}
-	return sourceSnapshot{info: info, size: info.Size(), modTime: info.ModTime()}, nil
+// readSeekStater is what a bounded transcript read needs from its handle. It is
+// satisfied by *os.File; naming it keeps the translators' contract explicit.
+type readSeekStater interface {
+	io.ReadSeeker
+	Stat() (os.FileInfo, error)
 }
 
-func validateTranscriptSnapshot(root string, source ForeignSession) error {
+// afterSourceOpen is a test seam: called with the transcript path once the
+// import handle is open and verified, before any byte is read. A test uses it
+// to replace the directory entry inside that exact interval. nil in production.
+var afterSourceOpen func(path string)
+
+// openSelectedSource opens the transcript discovery selected and proves, ON THE
+// HANDLE THAT WILL BE READ, that it is still that file. The caller closes it.
+//
+// A PATHNAME IS A LOOKUP, NOT AN IDENTITY. Read used to validate the selected
+// path through one handle, translate through a second open, and validate
+// through a third. Each was a fresh lookup of the same name, so a concurrent
+// writer could rename A aside, place a contained file B under A's name for the
+// translation open, and restore A before the final check: both snapshot checks
+// observed A and passed, while the bytes actually consumed came from B and
+// were accepted under A's metadata and provenance. Not an escape from the
+// store — B was inside the root — but the wrong file under the right name.
+//
+// One open, one identity. The discovery snapshot binds metadata to the inode
+// discovery read; this binds the read to that same inode before the first byte
+// and (validateSourceHandle) after the last one. The rooted open, regular-file
+// check and bounded read are unchanged. Reported by @jatmn.
+func openSelectedSource(root string, source ForeignSession) (*os.File, error) {
+	if source.source.info == nil {
+		return nil, errors.New("agentsessions: session source was not produced by discovery")
+	}
+	file, err := openContained(root, source.Path)
+	if err != nil {
+		return nil, fmt.Errorf("agentsessions: reopen selected session source: %w", err)
+	}
+	if err := validateSourceHandle(file, source); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if afterSourceOpen != nil {
+		afterSourceOpen(source.Path)
+	}
+	return file, nil
+}
+
+// validateSourceHandle compares an OPEN handle with the discovery snapshot:
+// same inode, same size, same modification time, still a regular file. Called
+// before reading and again after, on the same handle, so continued writes
+// during the read are refused as the existing changed-source failure rather
+// than committed as a torn import.
+func validateSourceHandle(file *os.File, source ForeignSession) error {
 	if source.source.info == nil {
 		return errors.New("agentsessions: session source was not produced by discovery")
 	}
-	current, err := snapshotTranscript(root, source.Path)
+	current, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("agentsessions: reopen selected session source: %w", err)
+		return fmt.Errorf("agentsessions: stat selected session source: %w", err)
 	}
-	if !os.SameFile(source.source.info, current.info) ||
-		source.source.size != current.size ||
-		!source.source.modTime.Equal(current.modTime) {
+	if !current.Mode().IsRegular() {
+		return errors.New("agentsessions: transcript is not a regular file")
+	}
+	if !os.SameFile(source.source.info, current) ||
+		source.source.size != current.Size() ||
+		!source.source.modTime.Equal(current.ModTime()) {
 		return errors.New("agentsessions: selected session source changed after discovery; discover it again before importing")
 	}
 	return nil

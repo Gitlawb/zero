@@ -63,14 +63,17 @@ func (adapter codex) Read(source ForeignSession, options ReadOptions) ([]session
 	if source.Agent != adapter.Name() || source.ID != codexID(source.Path) {
 		return nil, errors.New("agentsessions: selected session does not belong to codex")
 	}
-	if err := validateTranscriptSnapshot(adapter.root, source); err != nil {
-		return nil, err
-	}
-	events, err := translateCodex(adapter.root, source.Path, options)
+	// One handle from identity check to final check: see openSelectedSource.
+	file, err := openSelectedSource(adapter.root, source)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateTranscriptSnapshot(adapter.root, source); err != nil {
+	defer file.Close()
+	events, err := translateCodex(file, options)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSourceHandle(file, source); err != nil {
 		return nil, err
 	}
 	return events, nil
@@ -195,14 +198,14 @@ func indexCodexTranscript(agent string, root string, path string) (ForeignSessio
 	return session, true
 }
 
-func translateCodex(root string, path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
+func translateCodex(file readSeekStater, options ReadOptions) ([]sessions.AppendEventInput, error) {
 	events := newEventTail(effectiveMaxEvents(options.MaxEvents))
 	toolNames := map[string]string{}
 	identities := &importCallIdentities{}
 	activity := newActivityLog(options.Cwd)
 
 	omitted := 0
-	prefixOmitted, err := streamTailLines(root, path, importLineLimit, importByteLimit, func(line []byte, truncated bool) bool {
+	prefixOmitted, err := streamTailLines(file, importLineLimit, importByteLimit, func(line []byte, truncated bool) bool {
 		// A RECORD TOO LONG EVEN FOR THE IMPORT CAP IS REPORTED, NOT DROPPED.
 		// Skipping it silently produced a transcript that looked complete: a
 		// question, no answer, then the follow-up. The marker is the honest

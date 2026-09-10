@@ -432,7 +432,8 @@ func TestNewSessionPickerStillOffersForeignSessionsWhenLocalHistoryFails(t *test
 		cwd:              workspace,
 		now:              func() time.Time { return time.Unix(0, 0) },
 	}
-	msg, ok := m.sessionPickerCmd()().(sessionPickerLoadedMsg)
+	m, cmd := m.sessionPickerCmd()
+	msg, ok := cmd().(sessionPickerLoadedMsg)
 	if !ok {
 		t.Fatalf("session picker command returned an unexpected message")
 	}

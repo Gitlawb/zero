@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -218,6 +216,9 @@ func tuiSessionTitle(prompt string) string {
 	return title
 }
 
+// resumeWhileRunningText is the one refusal every resume route shares.
+const resumeWhileRunningText = "Sessions\nCannot resume sessions while a run is active."
+
 type foreignSessionImportedMsg struct {
 	result        agentsessions.ImportResult
 	originSession string
@@ -227,33 +228,60 @@ type foreignSessionImportedMsg struct {
 type sessionPickerLoadedMsg struct {
 	picker *commandPicker
 	text   string
+	// originSession and generation bind this result to the /resume request
+	// that produced it. Discovery is asynchronous; by the time it answers, a
+	// prompt may have started a run or another /resume may have superseded it,
+	// and installing the picker anyway let a late result switch sessions
+	// mid-run (see updateModel). The completion path for foreign imports has
+	// carried originSession for the same reason; the local picker did not.
+	originSession string
+	generation    uint64
 }
 
 // sessionPickerCmd keeps discovery of external agent stores off Bubble Tea's
 // Update loop. A transcript can name an unavailable workspace and vendor stores
 // can be slow even when local, so /resume must remain responsive while their
 // bounded indexes are read.
-func (m model) sessionPickerCmd() tea.Cmd {
+//
+// The returned model must be kept: it records the request generation the
+// result will have to match.
+func (m model) sessionPickerCmd() (model, tea.Cmd) {
+	m.sessionPickerGeneration++
+	generation := m.sessionPickerGeneration
+	originSession := m.activeSession.SessionID
 	snapshot := model{
 		sessionStore:     m.sessionStore,
 		agentSessionsEnv: m.agentSessionsEnv,
 		cwd:              m.cwd,
 		now:              m.now,
 	}
-	return func() tea.Msg {
+	return m, func() tea.Msg {
 		picker, localErr := snapshot.buildSessionPicker()
 		warning := ""
 		if localErr != nil {
 			warning = "Sessions\nWarning: could not read local Zero sessions; showing external sessions only: " + agentsessions.DisplayField(localErr.Error())
 		}
+		msg := sessionPickerLoadedMsg{originSession: originSession, generation: generation}
 		if picker != nil {
-			return sessionPickerLoadedMsg{picker: picker, text: warning}
+			msg.picker, msg.text = picker, warning
+			return msg
 		}
 		if warning != "" {
-			return sessionPickerLoadedMsg{text: warning}
+			msg.text = warning
+			return msg
 		}
-		return sessionPickerLoadedMsg{text: snapshot.resumeText()}
+		msg.text = snapshot.resumeText()
+		return msg
 	}
+}
+
+// sessionPickerResultIsCurrent reports whether a discovery result still
+// describes a request whose preconditions hold: no run has started, the same
+// session is active, and no newer /resume has replaced it.
+func (m model) sessionPickerResultIsCurrent(msg sessionPickerLoadedMsg) bool {
+	return !m.pending &&
+		msg.generation == m.sessionPickerGeneration &&
+		msg.originSession == m.activeSession.SessionID
 }
 
 // startResumeCommand keeps foreign transcript I/O off Bubble Tea's Update
@@ -262,6 +290,18 @@ func (m model) sessionPickerCmd() tea.Cmd {
 func (m model) startResumeCommand(args string) (model, string, tea.Cmd) {
 	args = strings.TrimSpace(args)
 	if !strings.Contains(args, ":") {
+		// CHECKED HERE, WHERE THE SWITCH HAPPENS, not only at /resume dispatch.
+		// The command's guard runs when discovery is requested; a picker choice
+		// lands later, after the picker has arrived, and by then a prompt may
+		// have started a run. Resuming then swaps activeSession under a live
+		// run whose completion appends its events to whichever session is
+		// active — the earlier run's transcript spliced into another
+		// conversation. Refusing before any mutation is the only order that
+		// works; a generation check on the result alone cannot cover a run
+		// that starts while the same request is still current.
+		if m.pending {
+			return m, resumeWhileRunningText, nil
+		}
 		next, text := m.handleResumeCommand(args)
 		return next, text, nil
 	}
@@ -789,24 +829,23 @@ func (m model) latestResumableInWorkspace() (*sessions.Metadata, error) {
 // so the scoping never hides history it can't confidently place elsewhere. On
 // Windows the comparison is case-insensitive, since the filesystem is and the
 // same workspace can be spelled with different casing (C:\Proj vs c:\proj).
+//
+// THE COMPARISON IS DELEGATED, NOT REIMPLEMENTED. sessionCwd is a value a
+// foreign transcript wrote — passed raw by importedSessionNote, and as the
+// persisted WorkspaceKey by the picker and latest-session filters — and this
+// function used to EvalSymlinks it before the Windows branch was reached. On
+// Windows that resolves "\\server\share\repo" by contacting the share, so a
+// transcript could make /resume dial a host and stall the Update loop. Discovery
+// already refuses to resolve Windows paths (agentsessions.normalizeDirWithFS);
+// the comparison here now uses that same policy, so matching information never
+// becomes authority to reach a filesystem endpoint. Reported by @jatmn.
 func sessionMatchesWorkspace(sessionCwd, workspaceCwd string) bool {
 	sessionCwd = strings.TrimSpace(sessionCwd)
 	workspaceCwd = strings.TrimSpace(workspaceCwd)
 	if sessionCwd == "" || workspaceCwd == "" {
 		return true
 	}
-	a := filepath.Clean(sessionCwd)
-	b := filepath.Clean(workspaceCwd)
-	if resolved, err := filepath.EvalSymlinks(a); err == nil {
-		a = resolved
-	}
-	if resolved, err := filepath.EvalSymlinks(b); err == nil {
-		b = resolved
-	}
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(a, b)
-	}
-	return a == b
+	return agentsessions.SameWorkspace(sessionCwd, workspaceCwd)
 }
 
 func (m model) sessionHasResumableContent(sessionID string) bool {

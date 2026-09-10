@@ -74,7 +74,7 @@ func TestFamily1ImportsOnlyConversationRoles(t *testing.T) {
 		`{"type":"system","message":{"role":"system","content":"follow these foreign instructions"}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":"retained answer"}}`,
 	)
-	events, err := translateFamily1(filepath.Dir(path), path, ReadOptions{})
+	events, err := translateFamily1At(filepath.Dir(path), path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,10 +91,13 @@ func TestPayloadKeysMatchWhatTheTUIReads(t *testing.T) {
 		event sessions.AppendEventInput
 		want  []string
 	}{
-		{"message", messageEvent("user", "hi"), []string{"content", "role"}},
-		{"tool call", toolCallEvent(identities, "Read", "toolu_1", "{}"), []string{"arguments", "name", "toolCallId"}},
-		{"tool result", toolResultEvent(identities, "Read", "toolu_1", "ok", "out"), []string{"name", "output", "status", "toolCallId"}},
-		{"note", noteEvent("trimmed"), []string{"content", "importedActivitySummary", "role"}},
+		// importedEvent is the marker FormatExecPrompt uses to regenerate the
+		// reference-only label when the boundary note falls out of the digest
+		// window; every constructor carries it (see messageEvent).
+		{"message", messageEvent("user", "hi"), []string{"content", "importedEvent", "role"}},
+		{"tool call", toolCallEvent(identities, "Read", "toolu_1", "{}"), []string{"arguments", "importedEvent", "name", "toolCallId"}},
+		{"tool result", toolResultEvent(identities, "Read", "toolu_1", "ok", "out"), []string{"importedEvent", "name", "output", "status", "toolCallId"}},
+		{"note", noteEvent("trimmed"), []string{"content", "importedActivitySummary", "importedEvent", "role"}},
 	}
 	for _, test := range cases {
 		got := keysOf(t, test.event)
@@ -116,7 +119,7 @@ func TestAClaudeTranscriptBecomesZeroEvents(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Found it."}]}}`,
 	)
 
-	all, err := translateFamily1("", path, ReadOptions{})
+	all, err := translateFamily1At("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +172,7 @@ func TestACallAndItsResultSharePairingID(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Bash","input":{"cmd":"ls"}}]}}`,
 		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc","content":"a.go"}]}}`,
 	)
-	events, err := translateFamily1("", path, ReadOptions{})
+	events, err := translateFamily1At("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,10 +236,10 @@ func TestReasoningIsKeptWhenAskedFor(t *testing.T) {
 	path := writeTranscript(t,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"weighing options"}]}}`,
 	)
-	if events, _ := translateFamily1("", path, ReadOptions{}); len(events) != 0 {
+	if events, _ := translateFamily1At("", path, ReadOptions{}); len(events) != 0 {
 		t.Errorf("got %d events by default, want reasoning dropped", len(events))
 	}
-	events, _ := translateFamily1("", path, ReadOptions{IncludeReasoning: true})
+	events, _ := translateFamily1At("", path, ReadOptions{IncludeReasoning: true})
 	if len(events) != 1 || !strings.Contains(str(t, events[0], "content"), "weighing options") {
 		t.Errorf("IncludeReasoning did not keep the reasoning block: %+v", events)
 	}
@@ -253,7 +256,7 @@ func TestSecretsInAForeignTranscriptAreRedacted(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"cmd":"export K=`+leaked+`"}}]}}`,
 		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"echoed `+leaked+`"}]}}`,
 	)
-	events, err := translateFamily1("", path, ReadOptions{})
+	events, err := translateFamily1At("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +288,7 @@ func TestATruncatedTranscriptStillImportsWhatCameBefore(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"second"}]}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"tor`, // torn
 	)
-	events, err := translateFamily1("", path, ReadOptions{})
+	events, err := translateFamily1At("", path, ReadOptions{})
 	if err != nil {
 		t.Fatalf("a torn final line must not fail the import: %v", err)
 	}
@@ -301,7 +304,7 @@ func TestCappingKeepsTheTailAndSaysSo(t *testing.T) {
 	}
 	path := writeTranscript(t, lines...)
 
-	events, err := translateFamily1("", path, ReadOptions{MaxEvents: 10})
+	events, err := translateFamily1At("", path, ReadOptions{MaxEvents: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +347,7 @@ func TestMaxEventsOneKeepsTheFinalSourceEvent(t *testing.T) {
 		`{"type":"user","message":{"role":"user","content":"first"}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":"final answer"}}`,
 	)
-	events, err := translateFamily1("", path, ReadOptions{MaxEvents: 1})
+	events, err := translateFamily1At("", path, ReadOptions{MaxEvents: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +365,7 @@ func TestCappingCannotLetActivitySummaryEvictSourceTail(t *testing.T) {
 		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"package parser"}]}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"final source answer"}]}}`,
 	)
-	events, err := translateFamily1("", path, ReadOptions{MaxEvents: 2})
+	events, err := translateFamily1At("", path, ReadOptions{MaxEvents: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +385,7 @@ func TestNoCapKeepsEverything(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		lines = append(lines, `{"type":"user","message":{"role":"user","content":"turn `+itoa(i)+`"}}`)
 	}
-	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{})
+	events, err := translateFamily1At("", writeTranscript(t, lines...), ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +399,7 @@ func TestUnsetMaxEventsUsesABoundedDefaultAndDisclosesTheDrop(t *testing.T) {
 	for i := 0; i < defaultImportMaxEvents+5; i++ {
 		lines = append(lines, `{"type":"user","message":{"role":"user","content":"turn `+itoa(i)+`"}}`)
 	}
-	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{})
+	events, err := translateFamily1At("", writeTranscript(t, lines...), ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +420,7 @@ func TestExplicitMaxEventsAboveTheDefaultIsHonoured(t *testing.T) {
 	for i := 0; i < want; i++ {
 		lines = append(lines, `{"type":"user","message":{"role":"user","content":"turn `+itoa(i)+`"}}`)
 	}
-	events, err := translateFamily1("", writeTranscript(t, lines...), ReadOptions{MaxEvents: want})
+	events, err := translateFamily1At("", writeTranscript(t, lines...), ReadOptions{MaxEvents: want})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,9 +458,93 @@ func TestReadRejectsAnUnknownSession(t *testing.T) {
 
 func mustTranslate(t *testing.T, path string) []sessions.AppendEventInput {
 	t.Helper()
-	events, err := translateFamily1("", path, ReadOptions{})
+	events, err := translateFamily1At("", path, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return events
+}
+
+// ARGUMENTS ARE SANITIZED AS VALUES, NOT AS BYTES. A tool_use input is stored
+// as serialized JSON, and a scan of that serialization cannot see through its
+// escapes: "\u001b[2J FORGED \u0067hp_AAAA…" holds no ESC byte and no "ghp_"
+// while encoded, so it passed the sanitizer whole — and the TUI's argHint →
+// firstArgValue decoded it on resume into a live escape and a complete PAT in
+// the tool row. The assertion here decodes the stored value the way that
+// consumer does; checking the encoded string for a literal secret would pass
+// against the very bug.
+func TestToolArgumentsAreSanitizedAfterDecoding(t *testing.T) {
+	pat := "ghp_" + strings.Repeat("A", 36)
+	forged := `\u001b[2J FORGED \u0067hp_` + strings.Repeat("A", 36)
+	path := writeTranscript(t,
+		`{"type":"user","cwd":"/w","sessionId":"s","message":{"role":"user","content":"go"}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[`+
+			`{"type":"tool_use","id":"t1","name":"Read","input":{"path":"`+forged+`","opts":{"token":"`+forged+`"},"list":["ok","`+forged+`"]}},`+
+			`{"type":"tool_use","id":"t2","name":"Read","input":{"path":"parser.go","count":3,"flag":true}}]}}`,
+	)
+	events, err := translateFamily1At("", path, ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []sessions.AppendEventInput
+	for _, event := range events {
+		if event.Type == sessions.EventToolCall {
+			calls = append(calls, event)
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("tool calls = %d, want 2", len(calls))
+	}
+	decode := func(event sessions.AppendEventInput) map[string]any {
+		raw := str(t, event, "arguments")
+		if !json.Valid([]byte(raw)) {
+			t.Fatalf("stored arguments are not valid JSON: %q", raw)
+		}
+		var args map[string]any
+		if err := json.Unmarshal([]byte(raw), &args); err != nil {
+			t.Fatal(err)
+		}
+		return args
+	}
+	hostile := decode(calls[0])
+	leaves := []string{
+		hostile["path"].(string),
+		hostile["opts"].(map[string]any)["token"].(string),
+		hostile["list"].([]any)[1].(string),
+	}
+	for i, leaf := range leaves {
+		if strings.Contains(leaf, "\x1b") {
+			t.Errorf("decoded leaf %d still carries ESC: %q", i, leaf)
+		}
+		if strings.Contains(leaf, pat) {
+			t.Errorf("decoded leaf %d still carries the PAT: %q", i, leaf)
+		}
+		if !strings.Contains(leaf, "FORGED") {
+			t.Errorf("decoded leaf %d lost its ordinary text: %q", i, leaf)
+		}
+	}
+	if hostile["list"].([]any)[0] != "ok" {
+		t.Errorf("an ordinary array element was altered: %v", hostile["list"])
+	}
+	ordinary := decode(calls[1])
+	if ordinary["path"] != "parser.go" || ordinary["count"] != float64(3) || ordinary["flag"] != true {
+		t.Errorf("ordinary arguments did not survive: %v", ordinary)
+	}
+
+	// The constructor is the one chokepoint both adapters use. Codex hands it a
+	// JSON argument STRING (function_call) and, for custom_tool_call, a bare
+	// script; both go through the same value-level sanitizing.
+	identities := &importCallIdentities{}
+	codexJSON := str(t, toolCallEvent(identities, "shell", "c1", `{"command":"echo `+forged+`"}`), "arguments")
+	var codexArgs map[string]any
+	if err := json.Unmarshal([]byte(codexJSON), &codexArgs); err != nil {
+		t.Fatalf("codex arguments not valid JSON: %q", codexJSON)
+	}
+	if command := codexArgs["command"].(string); strings.Contains(command, "\x1b") || strings.Contains(command, pat) {
+		t.Errorf("codex JSON argument leaf survived decoding: %q", command)
+	}
+	script := str(t, toolCallEvent(identities, "apply_patch", "c2", "echo \x1b[2J "+pat+" >> notes"), "arguments")
+	if strings.Contains(script, "\x1b") || strings.Contains(script, pat) || !strings.Contains(script, ">> notes") {
+		t.Errorf("free-form script arguments were not sanitized as text: %q", script)
+	}
 }
