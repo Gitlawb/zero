@@ -49,11 +49,26 @@ type formatOnWriteResult struct {
 	// tell a slow gofmt from a slow prettier.
 	Formatter string
 	TimedOut  bool
+	// RestoreFailed means the file on disk is not known to hold Content.
+	//
+	// These formatters edit in place, so one that is killed or fails partway
+	// can leave the target truncated or half-rewritten: what a dead
+	// `prettier --write` leaves behind is not the input and not the output.
+	// Returning the written bytes while disk holds something else would put the
+	// tracker baseline, the diff preview and the file itself into three
+	// different states, so the failure paths write the bytes back. When even
+	// that fails the user has to hear about it: it is their file.
+	RestoreFailed bool
 }
 
 // notice is the line appended to the tool summary when formatting was expected
 // and did not happen, and empty in every other case.
 func (result formatOnWriteResult) notice(relativePath string) string {
+	if result.RestoreFailed {
+		return "\n\nWARNING: " + relativePath + " may not hold what was written. " +
+			result.Formatter + " was interrupted while rewriting it in place and the " +
+			"content could not be written back. Re-read the file before trusting it."
+	}
 	if !result.TimedOut {
 		return ""
 	}
@@ -128,13 +143,28 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	formatter.Dir = filepath.Dir(absolutePath)
 	formatter.Stdin = strings.NewReader("")
 	if err := formatter.Run(); err != nil {
+		unformatted.Formatter = command[0]
+		// THE FORMATTER EDITS IN PLACE, SO A FAILED RUN CAN LEAVE THE FILE
+		// NEITHER FORMATTED NOR AS WRITTEN. Killed by the deadline or by the
+		// caller, or exiting partway through its own rewrite, the target can hold
+		// a truncation. Returning the written bytes on top of that would leave the
+		// tracker baseline and the diff preview describing a file that is not on
+		// disk, which is a worse failure than the missing formatting: the next
+		// edit compares against content the file does not have.
+		//
+		// Written back unconditionally on this path rather than only when the
+		// bytes differ. Comparing first means reading the file to find out, and a
+		// read that fails leaves the same ambiguity this exists to remove.
+		if restoreErr := os.WriteFile(absolutePath, []byte(writtenContent), 0o644); restoreErr != nil {
+			unformatted.RestoreFailed = true
+		}
 		// OUR deadline, not the caller's cancellation and not the formatter's own
 		// exit status. A cancelled tool call is already being reported as
 		// cancelled, and a formatter that ran and refused the file usually means
 		// content it could not parse, which the write itself does not promise to
-		// fix. Neither is this notice's business.
+		// fix. Neither is this notice's business; the restore above is, for all
+		// three.
 		if errors.Is(formatCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			unformatted.Formatter = command[0]
 			unformatted.TimedOut = true
 		}
 		return unformatted
