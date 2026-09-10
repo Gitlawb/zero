@@ -2647,6 +2647,142 @@ func TestRecoverBundleDirStopsWhenACandidateWorkTreeProbeFails(t *testing.T) {
 	})
 }
 
+// A fault on the staging directory itself, rather than on one file inside it,
+// blocks the work-tree probe and the marker read together, so nothing on disk
+// can name a destination for that entry. Dropping it left the group for that
+// link holding only the older copies and published one of those over the copy
+// nobody could read, which is the exact fault the grouping was added to
+// prevent. A pass that cannot attribute an entry now restores nothing at all.
+func TestRecoverBundleDirSuspendsWhenAnEntryCannotBeAttributed(t *testing.T) {
+	dir := t.TempDir()
+	older := stageBackup(t, dir, "", "proj-1", "v1", 3)
+	newest := stageBackup(t, dir, "", "proj-1", "v2", 5)
+	// A second link, to pin down that the suspension covers the whole pass: the
+	// entry that could not be read says nothing about which destinations the
+	// rest of this directory belongs to.
+	other := stageBackup(t, dir, "", "proj-2", "w1", 7)
+	under := func(staging string) func(args ...string) bool {
+		prefix := staging + string(os.PathSeparator)
+		return func(args ...string) bool { return strings.HasPrefix(args[0], prefix) }
+	}
+	injectFault(t, "stat", under(newest), errors.New("injected staging dir stat failure"))
+	injectFault(t, "readFile", under(newest), errors.New("injected staging dir read failure"))
+
+	logs := recoverAndLog(t, dir)
+
+	for _, id := range []string{"proj-1", "proj-2"} {
+		if _, err := os.Lstat(filepath.Join(dir, id)); !os.IsNotExist(err) {
+			t.Errorf("recovery restored %s while an entry could not be attributed: %v", id, err)
+		}
+	}
+	for _, staging := range []string{newest, older, other} {
+		if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
+			t.Errorf("every copy must stay where it is: %v", err)
+		}
+	}
+	if !logged(logs, newest) {
+		t.Errorf("the entry that could not be attributed should be named, got %v", logs)
+	}
+}
+
+// The work-tree veto sits ahead of the marker because a published tree can sit
+// under a staging-shaped name and carry a file called txn at its own root. The
+// marker read that names a destination for an unreadable entry has to answer
+// that same question, or the tree answers for itself: a foreign directory whose
+// probe fails names any link its hand-written marker likes and stops that link
+// on every pass, forever.
+func TestAttributeStagingDirRefusesAMarkerFromADirectoryThatMayHoldAWorkTree(t *testing.T) {
+	// A directory with a .git at its own root is a work tree, whatever its
+	// marker says, so a second probe that resolves the question vetoes it and
+	// the link it named recovers normally.
+	t.Run("a foreign work tree never names a link", func(t *testing.T) {
+		dir := t.TempDir()
+		staged := stageBackup(t, dir, "", "proj-1", "v1", 3)
+		foreign := filepath.Join(dir, fmt.Sprintf("%s%020d%s", stagingPrefix, 9, stagingSeqSuffix))
+		if err := os.MkdirAll(filepath.Join(foreign, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeMarker(foreign, txnMarker{Kind: txnKindBundleExtract, Dest: "proj-1", Seq: 9}); err != nil {
+			t.Fatal(err)
+		}
+		injectFault(t, "stat", func(args ...string) bool {
+			return args[0] == filepath.Join(foreign, ".git")
+		}, errors.New("injected work-tree probe failure"))
+
+		if id, ok, unreadable := attributeStagingDir(dir, foreign, 9, func(string, ...any) {}); id != "" || ok || unreadable {
+			t.Fatalf("attributeStagingDir = %q, %v, %v; want a veto naming no link", id, ok, unreadable)
+		}
+		// Three passes, because the fault is persistent: the old shape left the
+		// link stopped on every one of them.
+		for pass := 1; pass <= 3; pass++ {
+			recoverAndLog(t, dir)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, "proj-1", "a.txt"))
+		if err != nil || string(got) != "v1" {
+			t.Fatalf("restored a.txt = %q err %v, want the staged copy %q", got, err, "v1")
+		}
+		if _, err := os.Stat(filepath.Join(foreign, ".git")); err != nil {
+			t.Errorf("the foreign tree must be left in place: %v", err)
+		}
+		if _, err := os.Lstat(staged); !os.IsNotExist(err) {
+			t.Errorf("the restored copy's directory should be gone, got %v", err)
+		}
+	})
+
+	// The legitimate shape: a real staged copy with no work tree at its root
+	// whose probe fails anyway. Nothing licenses an action on it, but its marker
+	// still names the destination whose recovery this fault has to stop.
+	t.Run("a real staged copy still names the link it stops", func(t *testing.T) {
+		dir := t.TempDir()
+		staging := stageBackup(t, dir, "", "proj-1", "v1", 3)
+		injectFault(t, "stat", func(args ...string) bool {
+			return args[0] == filepath.Join(staging, ".git")
+		}, errors.New("injected work-tree probe failure"))
+
+		id, ok, unreadable := attributeStagingDir(dir, staging, 3, func(string, ...any) {})
+		if id != "proj-1" || ok || !unreadable {
+			t.Fatalf("attributeStagingDir = %q, %v, %v; want proj-1 named by an unreadable entry", id, ok, unreadable)
+		}
+		recoverAndLog(t, dir)
+		if _, err := os.Lstat(filepath.Join(dir, "proj-1")); !os.IsNotExist(err) {
+			t.Errorf("recovery restored a link whose only copy could not be probed: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(staging, "backup", "a.txt")); err != nil {
+			t.Errorf("the copy must stay where it is: %v", err)
+		}
+	})
+
+	// Neither probe answering leaves the work-tree question open, which is not a
+	// licence to read the marker: the directory may still be a published tree
+	// that wrote the marker itself. It names no link, so the pass suspends on it
+	// rather than stopping whichever link the marker picked.
+	t.Run("a second probe that fails too still names no link", func(t *testing.T) {
+		dir := t.TempDir()
+		staged := stageBackup(t, dir, "", "proj-1", "v1", 3)
+		foreign := filepath.Join(dir, fmt.Sprintf("%s%020d%s", stagingPrefix, 9, stagingSeqSuffix))
+		if err := os.MkdirAll(filepath.Join(foreign, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeMarker(foreign, txnMarker{Kind: txnKindBundleExtract, Dest: "proj-1", Seq: 9}); err != nil {
+			t.Fatal(err)
+		}
+		probe := filepath.Join(foreign, ".git")
+		injectFault(t, "stat", func(args ...string) bool { return args[0] == probe }, errors.New("injected work-tree probe failure"))
+		injectFault(t, "lstat", func(args ...string) bool { return args[0] == probe }, errors.New("injected second probe failure"))
+
+		if id, ok, unreadable := attributeStagingDir(dir, foreign, 9, func(string, ...any) {}); id != "" || ok || !unreadable {
+			t.Fatalf("attributeStagingDir = %q, %v, %v; want an unreadable entry naming no link", id, ok, unreadable)
+		}
+		recoverAndLog(t, dir)
+		if _, err := os.Lstat(filepath.Join(dir, "proj-1")); !os.IsNotExist(err) {
+			t.Errorf("recovery ran a pass holding an entry it could not attribute: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(staged, "backup", "a.txt")); err != nil {
+			t.Errorf("the copy must stay where it is: %v", err)
+		}
+	})
+}
+
 // The reap is licensed by ownership plus the destination's lock, never by a
 // prefix and a clock. A live extract sits between its marker write and its
 // set-aside with exactly this shape, and the lock is the only thing that tells
@@ -3389,9 +3525,14 @@ func TestAttributeStagingDirRetainsWhenTheWorkTreeProbeFails(t *testing.T) {
 
 // A marker that read cleanly during the scan and fails when it is re-read under
 // the lock stops that destination. The scan already named the destination, so
-// the stop can be scoped to it; an entry whose marker never read at all carries
-// no destination and is retained by the scan instead, since blocking every link
-// on this host would cost more than the one wrong version it prevents.
+// the stop can be scoped to it. An entry whose marker never read at all names no
+// destination and cannot be scoped that way; the scan used to retain it and
+// carry on, on the reading that stopping every link cost more than the one wrong
+// version it prevented. It does not prevent one: a fault on the staging
+// directory blocks the probe and the marker together, and the group for that
+// link is then left holding only the older copies, one of which gets published
+// over the newer one nobody could read. The whole pass now declines instead,
+// which is what TestRecoverBundleDirSuspendsWhenAnEntryCannotBeAttributed pins.
 func TestRecoverBundleDirStopsWhenAMarkerGoesUnreadableUnderTheLock(t *testing.T) {
 	dir := t.TempDir()
 	newest := stageBackup(t, dir, "", "proj-1", "v2", 2)

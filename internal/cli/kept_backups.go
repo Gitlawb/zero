@@ -196,13 +196,36 @@ func keptBackupsRemove(args []string, bundleDir string, stdout io.Writer, stderr
 		root = sttRoot
 		remove = func() error { return dictation.RemoveKeptBackup(sttRoot, name) }
 	}
-	if err := remove(); err != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	code, warning := keptRemovalOutcome(remove())
+	if code != exitSuccess {
+		return writeAppError(stderr, warning, code)
 	}
 	if _, err := fmt.Fprintf(stdout, "Removed %s from %s\n", name, root); err != nil {
 		return exitCrash
 	}
+	if warning != "" {
+		if _, err := fmt.Fprintln(stderr, "zero kept-backups: "+warning); err != nil {
+			return exitCrash
+		}
+	}
 	return exitSuccess
+}
+
+// keptRemovalOutcome decides what a removal's error means for the operator. A
+// lock that could not be released after the copy was already gone is a cleanup
+// failure, not a removal that did not happen: reporting it as a crash sends the
+// operator to retry a name that no longer exists, and the retry then says
+// nothing attributes it, which reads as a different fault entirely. The copy is
+// gone either way, so the command succeeds and says what else went wrong.
+func keptRemovalOutcome(err error) (code int, warning string) {
+	switch {
+	case err == nil:
+		return exitSuccess, ""
+	case errors.Is(err, dictation.ErrInstalledNotReleased), errors.Is(err, remote.ErrCommittedNotReleased):
+		return exitSuccess, redaction.ErrorMessage(err, redaction.Options{})
+	default:
+		return exitCrash, redaction.ErrorMessage(err, redaction.Options{})
+	}
 }
 
 func writeKeptBackupsUsage(w io.Writer) {

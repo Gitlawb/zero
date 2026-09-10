@@ -470,6 +470,34 @@ func engineDestName(version, key string) string {
 	return "engine-" + string(sanitized) + "-" + hex.EncodeToString(sum[:])[:engineTagDigestChars] + "-" + key
 }
 
+// longestPlatformKey is the widest GOOS-GOARCH key an engine destination can
+// carry, read off the asset table so adding a platform cannot widen the name
+// past the bound below without widening the bound with it.
+var longestPlatformKey = func() int {
+	n := 0
+	for key := range engineAssetSuffix {
+		n = max(n, len(key))
+	}
+	return n
+}()
+
+// installNameMax is the bytes a single filename gets on the filesystems this
+// runs on (NAME_MAX is 255 on Linux and macOS; a Windows path component is
+// bounded well above anything built here).
+const installNameMax = 255
+
+// maxInstallTagBytes bounds a release tag so BOTH the destination it encodes to
+// and that destination's LOCK FILE are names the filesystem will accept. The
+// lock file is the tighter of the two, and that is why this is a rule rather
+// than arithmetic: a tag can be short enough for a legal install directory and
+// still push "<name>.lock" past the limit, and the error that comes back then
+// names lockutil and a file the user never chose, with nothing in it pointing
+// at the setting to change. The budget subtracts every byte an encoded name
+// adds around the tag: the prefix, the digest and its separator, the separator
+// before the platform key, the widest platform key, and ".lock".
+var maxInstallTagBytes = installNameMax -
+	(len("engine-") + 1 + engineTagDigestChars + 1 + longestPlatformKey + len(".lock"))
+
 // EngineComponents identifies the resolved local-engine paths.
 type EngineComponents struct {
 	BinaryPath string // extracted sherpa-onnx-offline
@@ -538,6 +566,16 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 	if version == "" {
 		version = DefaultSherpaVersion
 	}
+	// Bounded here, where the tag is still the thing being talked about. Past
+	// this point it is a destination name and then a lock filename, and the
+	// filesystem refuses the lock file before it refuses the directory: the
+	// error that surfaces then names lockutil and a path the user never chose.
+	if len(version) > maxInstallTagBytes {
+		return EngineComponents{}, &SetupError{
+			Tool: "sherpa-onnx auto-download",
+			Hint: fmt.Sprintf("the release tag %q is %d bytes, and a tag must be at most %d so the install directory and its lock file are names the filesystem accepts — shorten stt.engineVersion", version, len(version), maxInstallTagBytes),
+		}
+	}
 	progress := opts.Progress
 	if progress == nil {
 		progress = func(string) {}
@@ -557,7 +595,10 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 	// Resolve through the tarball's flattened subdir so an ALREADY-extracted
 	// engine is found and not needlessly re-downloaded (the idempotency check).
 	enginePublished := func(dir string) (bool, error) {
-		bin, _ := resolveEnginePaths(dir, targetWindows)
+		bin, _, err := resolveEnginePathsErr(dir, targetWindows)
+		if err != nil {
+			return false, err
+		}
 		return fileExistsErr(bin)
 	}
 	// Released versions joined the raw tag to DestRoot, so a tag that is not one
@@ -567,14 +608,14 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 	// installed when it is, which is why this runs outside the Install lock: the
 	// lock covers a destination this call then does not touch.
 	installed := false
-	if rawDir := filepath.Join(opts.DestRoot, "engine-"+version+"-"+key); rawDir != engineDir {
-		// A probe that could not run has not ruled the older layout out, and
-		// downloading over an answer nobody has is what orphans it.
-		published, err := usability(enginePublished).check(rawDir)
-		if err != nil {
-			return EngineComponents{}, err
-		}
-		if published {
+	if rawDir, ok := compatEngineDir(opts.DestRoot, "engine-"+version+"-"+key); ok && rawDir != engineDir {
+		// Best-effort on purpose: this lookup only ever REUSES a copy, and its
+		// own comment says nothing is installed when it hits. A probe that
+		// could not run there (a stray file, an unreadable directory, a tag no
+		// stat can even take) is therefore no reason to fail a call whose real
+		// destination may already hold a working engine, and failing on it
+		// leaves a permanent error the user can only clear by editing config.
+		if published, err := usability(enginePublished).check(rawDir); err == nil && published {
 			engineDir = rawDir
 			installed = true
 		}
@@ -615,7 +656,10 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 			return EngineComponents{}, err
 		}
 	}
-	binPath, serverPath := resolveEnginePaths(engineDir, targetWindows)
+	binPath, serverPath, err := resolveEnginePathsErr(engineDir, targetWindows)
+	if err != nil {
+		return EngineComponents{}, err
+	}
 	if !fileExists(binPath) {
 		return EngineComponents{}, fmt.Errorf("dictation download: engine binary not found after extraction in %s", engineDir)
 	}
@@ -688,6 +732,31 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 		return EngineComponents{}, fmt.Errorf("dictation download: model files not found after extraction in %s", modelDir)
 	}
 	return EngineComponents{BinaryPath: binPath, ServerPath: serverPath, ModelPath: resolvedModel}, nil
+}
+
+// compatEngineDir resolves the pre-encoding layout's directory for a raw
+// release tag and reports whether it is one this install may adopt. The tag is
+// any string a release is named and filepath.Join CLEANS, so a tag carrying
+// ".." resolves outside DestRoot entirely: the tree found there would become
+// engineDir, with no install lock and no digest behind it, and its bin/ is what
+// the dictation runner executes. The nested case is the real one this lookup
+// exists for (a tag with a separator extracted to DestRoot/engine-release/
+// v1-<key>), so the rule is containment under DestRoot rather than a single
+// path component. Lstat, not Stat: Stat follows a link, and a symlink planted
+// at the raw path points wherever it likes, adopting content from outside the
+// root through a path that passes the containment check.
+func compatEngineDir(destRoot, rawName string) (string, bool) {
+	root := filepath.Clean(destRoot)
+	dir := filepath.Clean(filepath.Join(root, rawName))
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	info, err := holderFS.lstat(dir)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return dir, true
 }
 
 type resolvedAsset struct {
@@ -881,16 +950,37 @@ func enginePaths(engineDir string, targetWindows bool) (bin, server string) {
 }
 
 // resolveEnginePaths finds the executables, flattening the tarball's single
-// top-level directory when present.
+// top-level directory when present. The boolean form: callers that already know
+// the tree is readable, and tests.
 func resolveEnginePaths(engineDir string, targetWindows bool) (bin, server string) {
-	bin, server = enginePaths(engineDir, targetWindows)
-	if fileExists(bin) {
-		return bin, server
-	}
-	if child, err := flattenSingleChild(engineDir); err == nil && child != engineDir {
-		return enginePaths(child, targetWindows)
+	bin, server, err := resolveEnginePathsErr(engineDir, targetWindows)
+	if err != nil {
+		return enginePaths(engineDir, targetWindows)
 	}
 	return bin, server
+}
+
+// resolveEnginePathsErr is the error-aware form, and it is what the publication
+// probe resolves through. Dropping these errors is how a tree nobody could read
+// gets a DEFINITE answer: a stat that fails with anything but "not there" falls
+// through to the flattened child, the child holds no binary, and the probe
+// reports "not installed" about an install that is sitting right there. The
+// caller then downloads over it and its deferred cleanup reaps it. Only
+// fs.ErrNotExist is an answer here; every other failure is the probe saying
+// nothing at all.
+func resolveEnginePathsErr(engineDir string, targetWindows bool) (bin, server string, err error) {
+	bin, server = enginePaths(engineDir, targetWindows)
+	present, err := fileExistsErr(bin)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", "", err
+	}
+	if present {
+		return bin, server, nil
+	}
+	if child, err := flattenSingleChild(engineDir); err == nil && child != engineDir {
+		bin, server = enginePaths(child, targetWindows)
+	}
+	return bin, server, nil
 }
 
 // holderSuffix is what promoteStagedDir appends to an install's own name for the
@@ -959,7 +1049,13 @@ var acquireInstallLock = func(root, path string) (installFileLock, error) {
 // plain failure would repeat a step that already ran, downloading an engine
 // that is installed or re-running a removal that is done, so the error says
 // both facts and every caller that can act on the difference tests for it.
-var errInstalledNotReleased = errors.New("dictation download: the operation completed but its install lock was not released")
+var ErrInstalledNotReleased = errors.New("dictation download: the operation completed but its install lock was not released")
+
+// errInstalledNotReleased is the name this package uses internally. Exported
+// above because the two callers that decide what a user is told, the kept-backup
+// command and the dictation setup screen, have to tell a completed operation
+// from one that did not happen, and only the sentinel carries that.
+var errInstalledNotReleased = ErrInstalledNotReleased
 
 // errInstallInProgress reports that another process held this destination's
 // Install lock for the whole wait budget and the destination is still not
@@ -1763,8 +1859,12 @@ func restoreInterruptedPromotion(txn *destTxn, destDir string, published usabili
 		return err
 	}
 	if unreadable != "" {
+		// Same rule as a listing that failed: with no ruling on the copy beside
+		// the destination there is no evidence for any decision here. Returning
+		// nil hands the caller a clean run, and the caller answers it by
+		// downloading over the very transaction whose state nobody could read.
 		report(fmt.Sprintf("dictation: leaving every retained copy for %s in place until %s can be read", filepath.Base(destDir), unreadable))
-		return nil
+		return fmt.Errorf("dictation download: stopping recovery of %s: the retained copy in %s could not be read", filepath.Base(destDir), unreadable)
 	}
 	for _, path := range unowned {
 		report(fmt.Sprintf("Keeping %s: nothing in it identifies it as a copy of %s", path, filepath.Base(destDir)))

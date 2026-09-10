@@ -3626,6 +3626,231 @@ func TestEnsureLocalEngineInstallsATagThatIsNotAPathComponent(t *testing.T) {
 	}
 }
 
+// ---- the compatibility lookup for the pre-encoding layout --------------------
+
+// The compat lookup joins the RAW tag, and filepath.Join cleans, so a tag
+// carrying ".." resolves to a sibling of DestRoot entirely outside the install
+// root. Whatever sits there would be adopted as the engine with no lock and no
+// digest behind it, and its bin/ is what the dictation runner then executes.
+func TestEnsureLocalEngineRefusesACompatPathOutsideTheRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "stt")
+	outside := filepath.Join(parent, "outside-linux-amd64")
+	plantEngineTree(t, outside)
+	plantDefaultModel(t, root)
+
+	comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "../../../outside", APIBase: offlineAPIBase(t),
+		platformKey: "linux-amd64", skipPinned: true,
+	})
+	if err == nil {
+		t.Fatalf("a tree outside %s must not be adopted, got BinaryPath %q", root, comp.BinaryPath)
+	}
+	if strings.HasPrefix(comp.BinaryPath, outside) {
+		t.Errorf("BinaryPath = %q, which is outside the install root %s", comp.BinaryPath, root)
+	}
+}
+
+// os.Stat follows a link, so a symlink sitting at the compat path adopts
+// whatever it points at just as the ".." tag does. The path stays inside
+// DestRoot, so containment alone does not cover it: what is found there has to
+// be a real directory.
+func TestEnsureLocalEngineRefusesACompatPathThatIsASymlink(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "stt")
+	outside := filepath.Join(parent, "elsewhere")
+	plantEngineTree(t, outside)
+	plantDefaultModel(t, root)
+	// The pre-encoding layout for "rel/v1": DestRoot/engine-rel/v1-linux-amd64.
+	if err := os.MkdirAll(filepath.Join(root, "engine-rel"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "engine-rel", "v1-linux-amd64")); err != nil {
+		t.Fatal(err)
+	}
+
+	comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "rel/v1", APIBase: offlineAPIBase(t),
+		platformKey: "linux-amd64", skipPinned: true,
+	})
+	if err == nil {
+		t.Fatalf("a symlinked compat path must not be adopted, got BinaryPath %q", comp.BinaryPath)
+	}
+	if strings.HasPrefix(comp.BinaryPath, outside) {
+		t.Errorf("BinaryPath = %q, which is the link's target outside %s", comp.BinaryPath, root)
+	}
+}
+
+// The compat lookup is an optimization, not a gate: nothing is installed when it
+// hits. A probe that cannot run there says nothing about the encoded
+// destination, so failing the whole call on it turns a stray at the old path
+// into an install failure the user can only clear by editing config.
+func TestEnsureLocalEngineInstallsWhenTheCompatProbeCannotRun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tag  string
+		seed func(t *testing.T, root string)
+	}{
+		{
+			// A NUL cannot be in a path at all, so every stat of the raw path
+			// fails with EINVAL, permanently.
+			name: "the tag cannot name a path",
+			tag:  "v1\x00bad",
+		},
+		{
+			name: "the compat path cannot be read",
+			tag:  "rel/v1",
+			seed: func(t *testing.T, root string) {
+				if err := os.MkdirAll(filepath.Join(root, "engine-rel"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				unreadable := filepath.Join(root, "engine-rel", "v1-linux-amd64")
+				if err := os.Mkdir(unreadable, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				// Put the bit back so the temp dir can be torn down.
+				t.Cleanup(func() { _ = os.Chmod(unreadable, 0o755) })
+			},
+		},
+		{
+			name: "a stray file sits at the compat path",
+			tag:  "rel/v1",
+			seed: func(t *testing.T, root string) {
+				if err := os.MkdirAll(filepath.Join(root, "engine-rel"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "engine-rel", "v1-linux-amd64"), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			// The real destination already holds a working engine, so the only
+			// thing that can fail this call is the probe of the old layout.
+			engineDir := filepath.Join(root, engineDestName(tc.tag, "linux-amd64"))
+			plantEngineTree(t, engineDir)
+			plantDefaultModel(t, root)
+			if tc.seed != nil {
+				tc.seed(t, root)
+			}
+
+			comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+				DestRoot: root, EngineVersion: tc.tag, APIBase: offlineAPIBase(t),
+				platformKey: "linux-amd64", skipPinned: true,
+			})
+			if err != nil {
+				t.Fatalf("EnsureLocalEngine = %v, want the engine already at %s", err, engineDir)
+			}
+			wantBin, _ := enginePaths(engineDir, false)
+			if comp.BinaryPath != wantBin {
+				t.Errorf("BinaryPath = %q, want the engine at the encoded destination %q", comp.BinaryPath, wantBin)
+			}
+		})
+	}
+}
+
+// The engine probe resolves paths before it answers, and that resolution drops
+// its own stat error. A stat that fails durably on something other than "not
+// there" then falls through to the flattened child, finds no binary under it,
+// and reports a definite "not installed" about a tree nobody could read, which
+// is what licenses downloading over it and reaping it.
+func TestEnsureLocalEngineStopsWhenTheInstalledEngineCannotBeProbed(t *testing.T) {
+	root := t.TempDir()
+	engineDir := filepath.Join(root, "engine-test-linux-amd64")
+	lib := filepath.Join(engineDir, "lib")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(lib, "libsherpa.so")
+	if err := os.WriteFile(kept, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A self-referential link: every stat through it fails with ELOOP, and the
+	// single child dir beside it is what resolution wrongly falls through to.
+	binLink := filepath.Join(engineDir, "bin")
+	if err := os.Symlink(binLink, binLink); err != nil {
+		t.Fatal(err)
+	}
+	plantDefaultModel(t, root)
+	// A server that WOULD serve a working engine, so nothing but the refusal
+	// itself can stop the download.
+	srv := fakeReleaseServer(t, engineSHA, modelSHA)
+
+	if _, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+		DestRoot: root, EngineVersion: "test", APIBase: srv.URL,
+		platformKey: "linux-amd64", skipPinned: true,
+	}); err == nil {
+		t.Fatal("a probe that could not run must not be answered with an install over the tree it could not read")
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Errorf("the existing tree must survive a probe that could not run: %v", err)
+	}
+}
+
+// A holder marker this pass could not read leaves recovery with no ruling on
+// the copy beside the destination. Reporting it and returning nil hands the
+// caller a clean run, and the caller then downloads over the very transaction
+// whose state nobody established.
+func TestRestoreInterruptedPromotionStopsTheCallerOnAnUnreadableMarker(t *testing.T) {
+	root := t.TempDir()
+	destDir := filepath.Join(root, "engine-a")
+	holder := plantHolder(t, destDir, 1, "v1", false)
+	txn := lockFor(t, destDir)
+
+	injectFault(t, "readFile", func(args ...string) bool {
+		return strings.HasPrefix(args[0], holder)
+	}, errors.New("injected marker read failure"))
+
+	var reported []string
+	if err := restoreInterruptedPromotion(txn, destDir, testPublished, reporterFor(&reported)); err == nil {
+		t.Fatal("a marker that could not be read must stop the caller, not report a clean run")
+	}
+	if _, err := os.Stat(filepath.Join(holder, "install", "engine")); err != nil {
+		t.Errorf("the copy must be left intact: %v", err)
+	}
+}
+
+// A destination name the filesystem accepts can still have a lock file it
+// refuses: the name is under NAME_MAX and "<name>.lock" is not. The failure
+// then names lockutil and a path the user never chose, so the tag has to be
+// bounded where it is set instead.
+func TestEnsureLocalEngineRefusesATagWhoseLockFileWouldNotFit(t *testing.T) {
+	t.Run("at the bound", func(t *testing.T) {
+		root := t.TempDir()
+		tag := strings.Repeat("a", maxInstallTagBytes)
+		plantEngineTree(t, filepath.Join(root, engineDestName(tag, "linux-amd64")))
+		plantDefaultModel(t, root)
+
+		if _, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+			DestRoot: root, EngineVersion: tag, APIBase: offlineAPIBase(t),
+			platformKey: "linux-amd64", skipPinned: true,
+		}); err != nil {
+			t.Fatalf("a tag at the bound must install: %v", err)
+		}
+	})
+	t.Run("one byte over", func(t *testing.T) {
+		root := t.TempDir()
+		tag := strings.Repeat("a", maxInstallTagBytes+1)
+		plantDefaultModel(t, root)
+
+		_, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+			DestRoot: root, EngineVersion: tag, APIBase: offlineAPIBase(t),
+			platformKey: "linux-amd64", skipPinned: true,
+		})
+		if err == nil {
+			t.Fatal("a tag whose lock file cannot be created must be refused")
+		}
+		if strings.Contains(err.Error(), "lockutil") || strings.Contains(err.Error(), "file name too long") {
+			t.Errorf("err = %v, want the tag named rather than the lock file it happened to break", err)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprint(len(tag))) {
+			t.Errorf("err = %v, want the tag length named", err)
+		}
+	})
+}
+
 // ---- the install lock's release ---------------------------------------------
 
 // failInstallRelease makes the Install lock fail its release while the lock

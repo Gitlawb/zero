@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/daemon/remote"
+	"github.com/Gitlawb/zero/internal/dictation"
 )
 
 // plantKeptTxn writes the transaction marker both install sites read: the kind
@@ -402,3 +405,33 @@ func TestKeptBackupsListFailsOnAShortWrite(t *testing.T) {
 type shortWriter struct{}
 
 func (shortWriter) Write([]byte) (int, error) { return 0, errors.New("short write") }
+
+// A removal that completed and then failed to release its lock is not a removal
+// that did not happen. Reporting it as a crash sends the operator to retry a
+// copy that is already gone, and the retry answers with "nothing attributes this
+// name", which describes an entry nobody can find because it no longer exists.
+func TestKeptBackupsRemoveReportsACompletedRemovalThatCouldNotUnlock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"dictation", fmt.Errorf("%w: engine-a: injected", dictation.ErrInstalledNotReleased)},
+		{"bundle", fmt.Errorf("%w: proj-1: injected", remote.ErrCommittedNotReleased)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, warning := keptRemovalOutcome(tc.err)
+			if code != exitSuccess {
+				t.Errorf("exit = %d, want %d: the copy is gone", code, exitSuccess)
+			}
+			if warning == "" {
+				t.Error("a cleanup failure the operator cannot see is one nobody fixes")
+			}
+		})
+	}
+	if code, _ := keptRemovalOutcome(errors.New("nothing attributes this name")); code == exitSuccess {
+		t.Error("a removal that did not happen must not report success")
+	}
+	if code, warning := keptRemovalOutcome(nil); code != exitSuccess || warning != "" {
+		t.Errorf("a clean removal = (%d, %q), want (%d, \"\")", code, warning, exitSuccess)
+	}
+}

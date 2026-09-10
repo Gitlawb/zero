@@ -260,7 +260,12 @@ var stagingFS = fsOps{
 // release failure is all that is left to go wrong. A caller that read it as a
 // plain failure would repeat a destructive step that already ran, so the error
 // says both facts and every caller that can act on the difference tests for it.
-var errCommittedNotReleased = errors.New("remote: the change landed but its extract lock was not released")
+var ErrCommittedNotReleased = errors.New("remote: the change landed but its extract lock was not released")
+
+// errCommittedNotReleased is the name this package uses internally. Exported
+// above because the kept-backup command has to tell a removal that completed
+// from one that did not happen, and only the sentinel carries that.
+var errCommittedNotReleased = ErrCommittedNotReleased
 
 // extractFileLock is the part of lockutil.FileLock this file uses. Release joins
 // the platform unlock and the close, and neither can be made to fail through a
@@ -410,10 +415,12 @@ func tryLockExtractFile(bundleDir, dest string) (release func() error, held bool
 		}
 		return nil, false, err
 	}
-	// Release joins the platform unlock and the close, and a failure in either
-	// can mean the lock file is still held: the next caller for this link waits
-	// it out rather than working over it. The caller merges it into its own
-	// outcome, so nothing reports a clean run over a lock nobody let go of.
+	// Release joins the platform unlock and the close. It closes the handle
+	// whichever of the two fails, and closing the descriptor drops the lock, so
+	// a failure here does not leave the next caller waiting on a lock nobody
+	// holds. What it does say is that a step of this operation did not run to
+	// completion, so the caller merges it into its own outcome rather than
+	// reporting a clean run over it.
 	return lock.Release, false, nil
 }
 
@@ -480,6 +487,9 @@ type bundleCandidate struct {
 // entry whose probe failed is grouped too, when its marker still names a
 // destination, so the fault reaches the reconcile that can stop that
 // destination rather than disappearing with the entry.
+//
+// An entry it cannot attribute at all ends the scan with no groups, so the pass
+// restores nothing and deletes nothing.
 func scanBundleDir(dir string, logf func(string, ...any)) map[string][]bundleCandidate {
 	entries, err := stagingFS.readDir(dir)
 	if err != nil {
@@ -502,10 +512,19 @@ func scanBundleDir(dir string, logf func(string, ...any)) map[string][]bundleCan
 		id, ok, unreadable := attributeStagingDir(dir, staging, seq, logf)
 		if unreadable && id == "" {
 			// Nothing on disk names a destination for this entry, so no group
-			// can carry the fault and stopping every link in the directory
-			// would cost more than the one wrong restore it prevents. The
-			// refusal is already logged, and the copy stays where it is.
-			continue
+			// can carry the fault and the whole pass declines instead. Dropping
+			// the entry read as the cheaper trade until the fault it is most
+			// likely to come from turned up: a fault on the staging directory
+			// itself blocks the work-tree probe and the marker read together,
+			// which is precisely how an entry ends up naming nothing, and the
+			// group for its link is then left holding only the older copies.
+			// Publishing one of those is not a failure to prevent a wrong
+			// version, it is installing one over a newer copy nobody could
+			// read. Declining costs the destinations that already serve
+			// nothing: recovery only ever puts a tree back, so a pass that does
+			// not run leaves every live tree exactly where it is.
+			logf("remote: %s cannot be attributed to a link; recovering nothing in %s until it can be read", staging, dir)
+			return nil
 		}
 		if !ok && !unreadable {
 			continue
@@ -533,12 +552,27 @@ func attributeStagingDir(dir, staging string, seq int64, logf func(string, ...an
 		// Not knowing whether this is a work tree is not the same as knowing it
 		// is not one. The veto sits ahead of the marker because a published tree
 		// can carry a file named txn at its own root, so falling through on an
-		// unreadable probe would let the tree answer for itself.
-		logf("remote: %s could not be checked for a work tree (%v); leaving it in place", staging, err)
-		// The marker is still read, for the destination's name alone. ok stays
-		// false, so nothing the marker says can license an action here; the name
-		// only tells the caller which destination this fault has to stop.
-		return markerDest(dir, staging, seq), false, true
+		// unreadable probe would let the tree answer for itself. Reading the
+		// marker for the destination's name alone is the same fall-through: the
+		// name is what stops a link's recovery, and a foreign tree that supplied
+		// it stops that link on every pass for as long as its own probe fails.
+		// So the question is put a second time, through a different call, before
+		// anything the marker says is used.
+		switch _, lerr := stagingFS.lstat(filepath.Join(staging, ".git")); {
+		case lerr == nil:
+			logf("remote: %s could not be checked for a work tree (%v) and holds one at its root; leaving it in place", staging, err)
+			return "", false, false
+		case errors.Is(lerr, fs.ErrNotExist):
+			// The work-tree question is settled: nothing sits at .git, so the
+			// marker is the staged copy's own and names the destination this
+			// fault has to stop. ok stays false, so nothing the marker says can
+			// license an action here.
+			logf("remote: %s could not be checked for a work tree (%v); leaving it in place", staging, err)
+			return markerDest(dir, staging, seq), false, true
+		default:
+			logf("remote: %s could not be checked for a work tree (%v, then %v); leaving it in place", staging, err, lerr)
+			return "", false, true
+		}
 	}
 	m, err := readMarker(staging)
 	if err != nil {
@@ -581,7 +615,10 @@ func attributeStagingDir(dir, staging string, seq int64, logf func(string, ...an
 // probe failed can still be attributed to the destination whose recovery has to
 // stop. Every check attribution makes is repeated, because a marker that fails
 // one of them names no destination this code would have written, and refusing to
-// answer is what keeps a fault from stopping a link it never belonged to.
+// answer is what keeps a fault from stopping a link it never belonged to. The
+// one check it does not repeat is the work-tree veto, and its only caller
+// settles that question before calling: a tree that may be a published work tree
+// must never reach this at all.
 func markerDest(dir, staging string, seq int64) string {
 	m, err := readMarker(staging)
 	if err != nil || m.Kind != txnKindBundleExtract || m.Seq != seq {
