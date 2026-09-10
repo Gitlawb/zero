@@ -953,3 +953,30 @@ func TestRecoverKeepsAttributionWhenRetirementFailsPartway(t *testing.T) {
 		t.Fatal("the second pass went silent on a workspace still holding a backup")
 	}
 }
+
+// A target we could not probe is not a target that is absent. Reading a failed
+// Lstat as "nothing there" sends recovery into the restore branch, which is the
+// one branch that moves a tree, on the strength of a question it never got an
+// answer to. The recorded name here is too long for the filesystem to resolve,
+// which is the one probe failure a test can produce without a fault seam.
+func TestRecoverReportsATargetItCannotProbe(t *testing.T) {
+	dir := t.TempDir()
+	name := strings.Repeat("a", 300)
+	workspace := plantInterruptedCommit(t, dir, "demo", name, "old")
+	reconciler := &recordingReconciler{phase: PhaseCommitted}
+
+	err := Recover(dir, reconciler.reconcile)
+
+	if err == nil {
+		t.Fatal("a target that could not be probed must be reported")
+	}
+	if strings.Contains(err.Error(), "restore interrupted install") {
+		t.Fatalf("recovery tried to restore over a target it never resolved: %v", err)
+	}
+	if !strings.Contains(err.Error(), "inspect install") {
+		t.Fatalf("error does not report the probe failure: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(workspace, "previous")); statErr != nil {
+		t.Fatalf("the retained backup must stay put: %v", statErr)
+	}
+}

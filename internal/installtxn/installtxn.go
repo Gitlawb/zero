@@ -211,6 +211,12 @@ func Recover(dir string, reconcile Reconciler) error {
 // recoverWorkspace resolves one attributable workspace whose backup is present.
 func recoverWorkspace(workspace string, target string, backup string, name string, reconcile Reconciler) error {
 	if _, err := os.Lstat(target); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			// A target we could not probe is not a target that is absent. Reading
+			// it as absent enters the restore branch, the one branch that moves a
+			// tree, on the strength of a question that never got an answer.
+			return fmt.Errorf("inspect install %s: %w", name, err)
+		}
 		// Nothing at the target, so the swap never finished and the backup is the
 		// only copy there is. There is no second tree to weigh it against, and
 		// asking could only produce an answer that throws it away.
