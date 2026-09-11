@@ -3666,7 +3666,7 @@ func TestEnsureLocalEngineRefusesACompatPathThatIsASymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, filepath.Join(root, "engine-rel", "v1-linux-amd64")); err != nil {
-		t.Fatal(err)
+		t.Skipf("os.Symlink unsupported on this platform: %v", err)
 	}
 
 	comp, err := EnsureLocalEngine(context.Background(), DownloadOptions{
