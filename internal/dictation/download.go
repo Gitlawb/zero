@@ -2212,11 +2212,15 @@ func EngineDownloaded(destRoot, version string) bool {
 	// Both layouts, for the same reason EnsureLocalEngine reads both: a tag that
 	// is not one path component extracted into a nested directory before the
 	// destination name became a lock key, and a badge that missed that copy
-	// would offer a download of an engine already on the disk.
-	for _, dir := range []string{
-		filepath.Join(destRoot, engineDestName(version, key)),
-		filepath.Join(destRoot, "engine-"+version+"-"+key),
-	} {
+	// would offer a download of an engine already on the disk. The raw-tag path
+	// goes through the same containment check the install does — the tag is a
+	// config value, and joining it unvetted would let a badge probe a path
+	// outside the install root.
+	dirs := []string{filepath.Join(destRoot, engineDestName(version, key))}
+	if rawDir, ok := compatEngineDir(destRoot, "engine-"+version+"-"+key); ok && rawDir != dirs[0] {
+		dirs = append(dirs, rawDir)
+	}
+	for _, dir := range dirs {
 		bin, _ := resolveEnginePaths(dir, runtime.GOOS == "windows")
 		// Boolean for the same reason ModelDownloaded is: a badge, not a verdict.
 		if present, _ := fileExistsErr(bin); present {

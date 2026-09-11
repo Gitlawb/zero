@@ -3681,6 +3681,35 @@ func TestEnsureLocalEngineRefusesACompatPathThatIsASymlink(t *testing.T) {
 	}
 }
 
+// The picker's badge probes the legacy raw-tag layout too, and the tag is a
+// config value: joined unvetted, "../../../escape" resolves the probe OUTSIDE the
+// install root, where a matching binary would mark the engine downloaded.
+// compatEngineDir is the same containment the install path applies.
+func TestEngineDownloadedRefusesARawTagPathOutsideTheRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "stt")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// "engine-../../../escape-<key>" cleans to <parent>/escape-<key> — the
+	// "engine-.." element absorbs the first "..", so escaping takes three: a
+	// tree planted there is exactly what an unvetted join would find and
+	// believe.
+	outside := filepath.Join(parent, "escape-"+platformKey())
+	plantEngineTree(t, outside)
+	// A legitimately nested legacy path must still be found — containment is
+	// the gate, not "the tag had a separator".
+	nested := filepath.Join(root, "engine-rel", "v1-"+platformKey())
+	plantEngineTree(t, nested)
+
+	if EngineDownloaded(root, "../../../escape") {
+		t.Errorf("a raw tag that resolves outside %s must not mark the engine downloaded", root)
+	}
+	if !EngineDownloaded(root, "rel/v1") {
+		t.Errorf("a raw tag that resolves inside %s must still mark the engine downloaded", root)
+	}
+}
+
 // The compat lookup is an optimization, not a gate: nothing is installed when it
 // hits. A probe that cannot run there says nothing about the encoded
 // destination, so failing the whole call on it turns a stray at the old path
