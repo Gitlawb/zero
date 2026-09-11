@@ -173,25 +173,62 @@ func writeWindowsSandboxSecret(path string, password string) error {
 	// and the DACL and the bytes are both applied to the leaf handle. Resolving
 	// the name again between any two of those steps is what let a junction or
 	// symlink swap point an elevated write at a file of the caller's choosing.
-	handle, err := createWindowsSecretFileAt(parent, filepath.Base(path))
+	leaf := filepath.Base(path)
+	handle, err := createWindowsSecretFileAt(parent, leaf)
 	if err != nil {
 		return unwindChain(err)
 	}
-	defer func() { _ = windows.CloseHandle(handle) }()
-	if err := lockWindowsSecretHandleToOwner(handle, owner); err != nil {
-		// Do not leave an unprotected file behind. Removal is by name, which is
-		// safe in a way the write was not: worst case a swapped name means the
-		// cleanup misses and leaves a locked-down file, never that it deletes
-		// something it did not create.
-		_ = os.Remove(path)
-		return unwindChain(err)
+	leafClosed := false
+	closeLeaf := func() {
+		if leafClosed {
+			return
+		}
+		leafClosed = true
+		_ = windows.CloseHandle(handle)
+	}
+	defer closeLeaf()
+	// CLEANUP ACTS ON THE OBJECT THE CREATE MADE, NOT ON THE NAME AGAIN.
+	//
+	// This used to call os.Remove(path), which is the one pathname resolution
+	// the rest of this function was written to remove, and it did not even
+	// work: the leaf is created with FILE_SHARE_READ alone, so a delete by
+	// name while this handle is open comes back as a sharing violation. The
+	// error was discarded, unwindChain rolled back only the directories, and a
+	// failed provisioning left an empty secret file it believed it had removed.
+	//
+	// The handle is closed first and the leaf is then deleted relative to the
+	// pinned parent, the same way rollbackWindowsACLMaterialization removes
+	// what it created. Closing first rather than widening the share mask keeps
+	// the secret file unshareable for delete while it exists, which is the
+	// narrower of the two ways to make this work.
+	removeLeaf := func(cause error) error {
+		closeLeaf()
+		if deleteErr := deleteWindowsSecretLeafFn(parent, leaf); deleteErr != nil {
+			// Reported, not discarded: a secret file left behind after a failed
+			// provisioning is state the caller has to know about, and the empty
+			// file is the thing a later run would read as a stale password.
+			cause = errors.Join(cause, fmt.Errorf("remove partially written secret %s: %w", path, deleteErr))
+		}
+		return unwindChain(cause)
+	}
+	if err := lockWindowsSecretHandleToOwnerFn(handle, owner); err != nil {
+		return removeLeaf(err)
 	}
 	if err := writeWindowsSecretHandle(handle, sealed); err != nil {
-		_ = os.Remove(path)
-		return unwindChain(err)
+		return removeLeaf(err)
 	}
 	return nil
 }
+
+// lockWindowsSecretHandleToOwnerFn is a seam for the one step between creating
+// the secret file and writing it, so the cleanup that runs when it fails is
+// reachable without an elevated machine or a way to make SetSecurityInfo fail.
+var lockWindowsSecretHandleToOwnerFn = lockWindowsSecretHandleToOwner
+
+// deleteWindowsSecretLeafFn is the matching seam for the cleanup itself, so the
+// case where cleanup cannot finish is reachable without arranging a Windows
+// sharing conflict, which is not something a test can stage reliably.
+var deleteWindowsSecretLeafFn = deleteWindowsACLChildFile
 
 // windowsSandboxSecretEntropy derives the DPAPI entropy from the secret's own
 // filename, which is the principal name. Deriving it rather than threading the
