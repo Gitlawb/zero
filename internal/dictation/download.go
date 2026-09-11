@@ -487,16 +487,22 @@ var longestPlatformKey = func() int {
 const installNameMax = 255
 
 // maxInstallTagBytes bounds a release tag so BOTH the destination it encodes to
-// and that destination's LOCK FILE are names the filesystem will accept. The
-// lock file is the tighter of the two, and that is why this is a rule rather
+// and that destination's WIDEST SIBLING are names the filesystem will accept.
+// The sibling is the tighter of the two, and that is why this is a rule rather
 // than arithmetic: a tag can be short enough for a legal install directory and
-// still push "<name>.lock" past the limit, and the error that comes back then
-// names lockutil and a file the user never chose, with nothing in it pointing
-// at the setting to change. The budget subtracts every byte an encoded name
-// adds around the tag: the prefix, the digest and its separator, the separator
-// before the platform key, the widest platform key, and ".lock".
+// a legal "<name>.lock" and still push the sequenced holder promotion sets the
+// install aside in past the limit, and the error that comes back then names an
+// internal holder path the user never chose, after the download and extraction
+// already ran, with nothing in it pointing at the setting to change. The
+// budget subtracts every byte an encoded name adds around the tag: the prefix,
+// the digest and its separator, the separator before the platform key, the
+// widest platform key, and the widest suffix a sibling of the destination can
+// take — the lock file, the ".previous-<seq>-seq" holder, and the ".kept-<seq>
+// -seq" copy recovery retains.
 var maxInstallTagBytes = installNameMax -
-	(len("engine-") + 1 + engineTagDigestChars + 1 + longestPlatformKey + len(".lock"))
+	(len("engine-") + 1 + engineTagDigestChars + 1 + longestPlatformKey +
+		max(len(".lock"), len(holderSuffix)+holderSeqDigits+len(holderSeqSuffix),
+			len(keptSuffix)+holderSeqDigits+len(holderSeqSuffix)))
 
 // EngineComponents identifies the resolved local-engine paths.
 type EngineComponents struct {
