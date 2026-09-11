@@ -507,11 +507,7 @@ func TestToolArgumentsAreSanitizedAfterDecoding(t *testing.T) {
 		return args
 	}
 	hostile := decode(calls[0])
-	leaves := []string{
-		hostile["path"].(string),
-		hostile["opts"].(map[string]any)["token"].(string),
-		hostile["list"].([]any)[1].(string),
-	}
+	leaves := []string{hostile["path"].(string), hostile["list"].([]any)[1].(string)}
 	for i, leaf := range leaves {
 		if strings.Contains(leaf, "\x1b") {
 			t.Errorf("decoded leaf %d still carries ESC: %q", i, leaf)
@@ -522,6 +518,9 @@ func TestToolArgumentsAreSanitizedAfterDecoding(t *testing.T) {
 		if !strings.Contains(leaf, "FORGED") {
 			t.Errorf("decoded leaf %d lost its ordinary text: %q", i, leaf)
 		}
+	}
+	if token := hostile["opts"].(map[string]any)["token"]; token != "[REDACTED]" {
+		t.Errorf("sensitive-key value was not redacted as a complete credential: %#v", token)
 	}
 	if hostile["list"].([]any)[0] != "ok" {
 		t.Errorf("an ordinary array element was altered: %v", hostile["list"])
@@ -546,5 +545,60 @@ func TestToolArgumentsAreSanitizedAfterDecoding(t *testing.T) {
 	script := str(t, toolCallEvent(identities, "apply_patch", "c2", "echo \x1b[2J "+pat+" >> notes"), "arguments")
 	if strings.Contains(script, "\x1b") || strings.Contains(script, pat) || !strings.Contains(script, ">> notes") {
 		t.Errorf("free-form script arguments were not sanitized as text: %q", script)
+	}
+}
+
+func TestStructuredToolArgumentsPreserveObjectAwareRedactionThroughStorage(t *testing.T) {
+	opaque := "opaque-secret-review-123"
+	credentialKey := "ghp_" + strings.Repeat("A", 36)
+	escapedCredential := "ghp_" + strings.Repeat("B", 36)
+	arguments, err := json.Marshal(map[string]any{
+		"password": opaque,
+		"nested": []any{map[string]any{
+			credentialKey:       "ordinary value",
+			"escapedCredential": escapedCredential,
+			"path":              "/work/main.go",
+			"command":           "go test ./...",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments = []byte(strings.Replace(
+		string(arguments),
+		`"`+credentialKey+`"`,
+		`"\u0067`+strings.TrimPrefix(credentialKey, "g")+`"`,
+		1,
+	))
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(sessions.CreateInput{SessionID: "structured_arguments"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, toolCallEvent(&importCallIdentities{}, "shell", "foreign-call", string(arguments))); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("read stored event: len=%d err=%v", len(events), err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	storedArguments, _ := payload["arguments"].(string)
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(storedArguments), &decoded); err != nil {
+		t.Fatalf("stored arguments are not valid JSON: %v: %q", err, storedArguments)
+	}
+	encoded, _ := json.Marshal(decoded)
+	for _, secret := range []string{opaque, credentialKey, escapedCredential} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("stored decoded arguments retained secret %q: %s", secret, encoded)
+		}
+	}
+	nested := decoded["nested"].([]any)[0].(map[string]any)
+	if nested["path"] != "/work/main.go" || nested["command"] != "go test ./..." {
+		t.Fatalf("ordinary schema values were not preserved: %#v", nested)
 	}
 }

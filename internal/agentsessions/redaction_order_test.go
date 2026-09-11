@@ -3,6 +3,9 @@ package agentsessions
 import (
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // A NORMALIZER THAT REMOVES BYTES IS ALSO A REASSEMBLER, SO IT CANNOT RUN LAST.
@@ -186,5 +189,61 @@ func TestAnIntactKeyAfterARemovedSeparatorIsStillRedacted(t *testing.T) {
 	// Legitimate layout is still kept in transcript text.
 	if got := redact("line one\nline\ttwo"); got != "line one\nline\ttwo" {
 		t.Errorf("newline/tab were not preserved: %q", got)
+	}
+}
+
+func TestCombinedRemovedSeparatorsCannotHideSplitCredentials(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("A", 36)
+	for _, separator := range []struct {
+		name  string
+		value string
+	}{
+		{name: "NUL", value: "\x00"},
+		{name: "ESC", value: "\x1b"},
+		{name: "DEL", value: "\x7f"},
+		{name: "C1", value: "\u0085"},
+	} {
+		t.Run(separator.name, func(t *testing.T) {
+			input := "progress" + separator.value + secret[:22] + separator.value + secret[22:]
+			for _, probe := range []struct {
+				name string
+				got  string
+			}{
+				{name: "transcript", got: redact(input)},
+				{name: "stored message", got: str(t, messageEvent("user", input), "content")},
+				{name: "stored tool result", got: str(t, toolResultEvent(&importCallIdentities{}, "shell", "call", tools.StatusOK, input), "output")},
+				{name: "display", got: DisplayField(input)},
+			} {
+				if strings.Contains(probe.got, secret) {
+					t.Fatalf("%s reassembled and exposed a split credential: %q", probe.name, probe.got)
+				}
+				if !strings.Contains(probe.got, "progress") || !strings.Contains(probe.got, "[REDACTED]") {
+					t.Fatalf("%s did not preserve readable text and a redaction marker: %q", probe.name, probe.got)
+				}
+			}
+		})
+	}
+
+	input := "progress\x00" + secret[:22] + "\x00" + secret[22:]
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(sessions.CreateInput{SessionID: "combined_redaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvents(session.SessionID, []sessions.AppendEventInput{
+		messageEvent("user", input),
+		toolResultEvent(&importCallIdentities{}, "shell", "call", tools.StatusOK, input),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		payload := string(event.Payload)
+		if strings.Contains(payload, secret) || !strings.Contains(payload, "[REDACTED]") {
+			t.Fatalf("persisted %s payload did not retain the redaction boundary: %s", event.Type, payload)
+		}
 	}
 }

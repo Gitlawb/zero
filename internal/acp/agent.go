@@ -308,7 +308,8 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	}
 	persistedModel := strings.TrimSpace(meta.ModelID)
 	imported := sessions.IsImportedSession(*meta)
-	if persistedModel != "" && !imported && (!restrictModels || modelChoiceExists(models, persistedModel)) {
+	locallySelected := !imported || meta.ModelSelectedLocally
+	if persistedModel != "" && locallySelected && (!restrictModels || modelChoiceExists(models, persistedModel)) {
 		model = persistedModel
 		if !modelChoiceExists(models, persistedModel) {
 			models = append(models, SessionConfigOptionValue{Value: persistedModel, Name: persistedModel})

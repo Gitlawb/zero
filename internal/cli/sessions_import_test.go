@@ -23,6 +23,16 @@ func writeImportFixture(t *testing.T, path string, content string) {
 	}
 }
 
+func isolateAgentSessionRoots(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+}
+
 func importUserRecord(t *testing.T, cwd, sessionID string) string {
 	t.Helper()
 	record, err := json.Marshal(map[string]any{
@@ -73,8 +83,7 @@ func TestImportSummarySanitizesTheTitleAndCwdItPrints(t *testing.T) {
 	// claudeCodeRoot falls back to HOME, and the other three adapters have no
 	// redirect at all, so leaving HOME alone would index the developer's own
 	// transcripts.
-	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	isolateAgentSessionRoots(t, home)
 
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
@@ -141,8 +150,7 @@ func TestRunSessionsDiscoverFiltersAgentAndWritesJSON(t *testing.T) {
 	}
 	writeImportFixture(t, filepath.Join(home, ".claude", "projects", "-workspace", "claude.jsonl"),
 		importUserRecord(t, workspace, "claude"))
-	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	isolateAgentSessionRoots(t, home)
 	previous, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -185,8 +193,7 @@ func TestSessionJSONCommandsNormalizeBidiFormatCharacters(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeImportFixture(t, filepath.Join(home, ".claude", "projects", "-workspace", "bidi.jsonl"), string(record)+"\n")
-	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	isolateAgentSessionRoots(t, home)
 	previous, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -236,8 +243,7 @@ func TestRunSessionsImportRejectsEmptyTranslationsWithoutDurableState(t *testing
 	home := t.TempDir()
 	writeImportFixture(t, filepath.Join(home, ".claude", "projects", "-w", "empty.jsonl"),
 		`{"type":"user","cwd":"/w","sessionId":"empty","message":{"role":"user","content":""}}`+"\n")
-	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	isolateAgentSessionRoots(t, home)
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
 
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -260,8 +266,7 @@ func TestRunSessionsImportRejectsEmptyTranslationsWithoutDurableState(t *testing
 
 func TestRunSessionsImportReportsUsageAndReadFailures(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	isolateAgentSessionRoots(t, home)
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
 
 	for _, test := range []struct {

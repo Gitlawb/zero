@@ -1021,7 +1021,8 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	if _, err := store.AppendEvent(second.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"content": "new"}}); err != nil {
 		t.Fatalf("Append newer returned error: %v", err)
 	}
-	m := newModel(context.Background(), Options{SessionStore: store})
+	env := agentsessions.Env{Home: t.TempDir()}
+	m := newModel(context.Background(), Options{SessionStore: store, AgentSessionsEnv: &env})
 	m.input.SetValue("/resume")
 
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
@@ -1139,7 +1140,8 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 		t.Fatalf("Create other: %v", err)
 	}
 
-	m := newModel(context.Background(), Options{SessionStore: store})
+	env := agentsessions.Env{Home: t.TempDir()}
+	m := newModel(context.Background(), Options{SessionStore: store, AgentSessionsEnv: &env})
 	m.input.SetValue("/resume")
 	updated, pickerCmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)

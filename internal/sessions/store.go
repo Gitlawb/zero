@@ -101,6 +101,10 @@ type Metadata struct {
 	// display-safe, lossy representation. Never render this field directly.
 	WorkspaceKey string `json:"workspaceKey,omitempty"`
 	ModelID      string `json:"modelId,omitempty"`
+	// ModelSelectedLocally distinguishes a successful Zero/ACP selection from a
+	// legacy import that stored the foreign model in ModelID. Imported source
+	// metadata must never gain runtime authority merely by occupying ModelID.
+	ModelSelectedLocally bool `json:"modelSelectedLocally,omitempty"`
 	// SourceModelID records a foreign transcript's model as provenance only.
 	// Runtime/provider selection must use ModelID, never this field.
 	SourceModelID       string     `json:"sourceModelId,omitempty"`
@@ -532,7 +536,7 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	}
 	parentModelID := parent.ModelID
 	sourceModelID := parent.SourceModelID
-	if IsImportedSession(*parent) && sourceModelID == "" {
+	if IsImportedSession(*parent) && sourceModelID == "" && !parent.ModelSelectedLocally {
 		// Older imports stored the foreign model in the operational field. A new
 		// fork must migrate that value to provenance instead of inheriting it as a
 		// local provider choice.
@@ -946,10 +950,15 @@ func (store *Store) UpdateModel(sessionID string, modelID string) (Metadata, err
 	if err != nil {
 		return Metadata{}, err
 	}
-	if session.ModelID == modelID {
+	selectedLocally := session.ModelSelectedLocally
+	if IsImportedSession(session) {
+		selectedLocally = modelID != ""
+	}
+	if session.ModelID == modelID && session.ModelSelectedLocally == selectedLocally {
 		return session, nil
 	}
 	session.ModelID = modelID
+	session.ModelSelectedLocally = selectedLocally
 	if err := store.writeMetadata(session); err != nil {
 		return Metadata{}, err
 	}
