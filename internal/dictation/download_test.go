@@ -3751,41 +3751,69 @@ func TestEnsureLocalEngineInstallsWhenTheCompatProbeCannotRun(t *testing.T) {
 	}
 }
 
-// The engine probe resolves paths before it answers, and that resolution drops
-// its own stat error. A stat that fails durably on something other than "not
-// there" then falls through to the flattened child, finds no binary under it,
-// and reports a definite "not installed" about a tree nobody could read, which
-// is what licenses downloading over it and reaping it.
+// The engine probe resolves paths before it answers, and a probe that could
+// not run is not "not installed": a stat that fails durably on something other
+// than "not there", or the flatten listing that cannot list the tree at all,
+// is the probe saying nothing — and answering anyway is what licenses
+// downloading over a tree nobody could read and reaping it. The faults go
+// through the seam rather than a self-referential link or an unreadable
+// directory, because the platforms this runs on disagree about whether either
+// fixture produces the error the contract needs — a symlink loop stats as
+// absent on Windows, not as a failure.
 func TestEnsureLocalEngineStopsWhenTheInstalledEngineCannotBeProbed(t *testing.T) {
-	root := t.TempDir()
-	engineDir := filepath.Join(root, "engine-test-linux-amd64")
-	lib := filepath.Join(engineDir, "lib")
-	if err := os.MkdirAll(lib, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	kept := filepath.Join(lib, "libsherpa.so")
-	if err := os.WriteFile(kept, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// A self-referential link: every stat through it fails with ELOOP, and the
-	// single child dir beside it is what resolution wrongly falls through to.
-	binLink := filepath.Join(engineDir, "bin")
-	if err := os.Symlink(binLink, binLink); err != nil {
-		t.Fatal(err)
-	}
-	plantDefaultModel(t, root)
-	// A server that WOULD serve a working engine, so nothing but the refusal
-	// itself can stop the download.
-	srv := fakeReleaseServer(t, engineSHA, modelSHA)
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, engineDir string)
+	}{
+		{
+			// The binary's own stat fails on something that is not absence.
+			name: "the binary cannot be probed",
+			seed: func(t *testing.T, engineDir string) {
+				bin, _ := enginePaths(engineDir, false)
+				injectFault(t, "stat", func(args ...string) bool {
+					return args[0] == bin
+				}, errors.New("injected probe failure"))
+			},
+		},
+		{
+			// The binary absent is a real answer; the flatten listing that then
+			// fails is not — it is what the un-flattened paths were silently
+			// standing in for.
+			name: "the tree cannot be listed",
+			seed: func(t *testing.T, engineDir string) {
+				injectFault(t, "readDir", func(args ...string) bool {
+					return args[0] == engineDir
+				}, errors.New("injected listing failure"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			engineDir := filepath.Join(root, "engine-test-linux-amd64")
+			lib := filepath.Join(engineDir, "lib")
+			if err := os.MkdirAll(lib, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			kept := filepath.Join(lib, "libsherpa.so")
+			if err := os.WriteFile(kept, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			tc.seed(t, engineDir)
+			plantDefaultModel(t, root)
+			// A server that WOULD serve a working engine, so nothing but the
+			// refusal itself can stop the download.
+			srv := fakeReleaseServer(t, engineSHA, modelSHA)
 
-	if _, err := EnsureLocalEngine(context.Background(), DownloadOptions{
-		DestRoot: root, EngineVersion: "test", APIBase: srv.URL,
-		platformKey: "linux-amd64", skipPinned: true,
-	}); err == nil {
-		t.Fatal("a probe that could not run must not be answered with an install over the tree it could not read")
-	}
-	if _, err := os.Stat(kept); err != nil {
-		t.Errorf("the existing tree must survive a probe that could not run: %v", err)
+			if _, err := EnsureLocalEngine(context.Background(), DownloadOptions{
+				DestRoot: root, EngineVersion: "test", APIBase: srv.URL,
+				platformKey: "linux-amd64", skipPinned: true,
+			}); err == nil {
+				t.Fatal("a probe that could not run must not be answered with an install over the tree it could not read")
+			}
+			if _, err := os.Stat(kept); err != nil {
+				t.Errorf("the existing tree must survive a probe that could not run: %v", err)
+			}
+		})
 	}
 }
 

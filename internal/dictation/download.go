@@ -977,7 +977,12 @@ func resolveEnginePathsErr(engineDir string, targetWindows bool) (bin, server st
 	if present {
 		return bin, server, nil
 	}
-	if child, err := flattenSingleChild(engineDir); err == nil && child != engineDir {
+	child, err := flattenSingleChild(engineDir)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", "", err
+		}
+	} else if child != engineDir {
 		bin, server = enginePaths(child, targetWindows)
 	}
 	return bin, server, nil
