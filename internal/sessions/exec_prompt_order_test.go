@@ -81,20 +81,32 @@ func TestSummarizePayloadKeepsListOrder(t *testing.T) {
 // THE WHOLE BLOCK IS STABLE, not just one payload. Rendered through the
 // prompt-context path a resume actually uses, so a future renderer that walks a
 // map of its own is caught here too.
+//
+// THE EXPECTED BLOCK IS WRITTEN OUT, NOT TAKEN FROM THE FIRST RENDER. Comparing
+// later renders against the first only asks whether the renderer is stable, and
+// a renderer that is stably wrong passes: any fixed field order satisfies it,
+// including the one this change replaces. It also hid something. The first
+// version of this test used tool events, which promptContextEvents filters out
+// of the resume context on this branch, so the block being compared was a
+// single line and nobody could tell. Naming the expected block makes both
+// failures visible.
 func TestResumeContextBlockIsIdenticalAcrossRenders(t *testing.T) {
 	events := []Event{
 		{Sequence: 1, Type: EventMessage, Payload: mustOrderPayload(t, map[string]any{"role": "user", "content": "rotate the deploy key"})},
-		{Sequence: 2, Type: EventToolCall, Payload: mustOrderPayload(t, map[string]any{"id": "c1", "name": "read_file", "arguments": `{"path":"deploy/prod.env"}`})},
-		{Sequence: 3, Type: EventToolResult, Payload: mustOrderPayload(t, map[string]any{"name": "read_file", "status": "ok", "output": "contents"})},
+		{Sequence: 2, Type: EventMessage, Payload: mustOrderPayload(t, map[string]any{"role": "assistant", "content": "reading the env file"})},
+		{Sequence: 3, Type: EventMessage, Payload: mustOrderPayload(t, map[string]any{"role": "user", "content": "and the hooks"})},
 	}
 
-	first := renderOrderContext(t, events)
-	if strings.TrimSpace(first) == "" {
-		t.Fatal("SETUP INVALID: the context block rendered empty, so identical renders prove nothing")
-	}
-	for attempt := 1; attempt < 50; attempt++ {
-		if got := renderOrderContext(t, events); got != first {
-			t.Fatalf("attempt %d rendered a different context block:\n first: %s\n  then: %s", attempt, first, got)
+	// Keys sorted, so content comes before role in every line.
+	want := strings.Join([]string{
+		"message: rotate the deploy key user",
+		"message: reading the env file assistant",
+		"message: and the hooks user",
+	}, "\n")
+
+	for attempt := range 50 {
+		if got := renderOrderContext(t, events); got != want {
+			t.Fatalf("attempt %d rendered:\n%s\nwant:\n%s", attempt, got, want)
 		}
 	}
 }
