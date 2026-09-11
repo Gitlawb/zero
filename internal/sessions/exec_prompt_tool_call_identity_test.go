@@ -330,9 +330,16 @@ func TestResumePromptKeepsSupportedAliasesAndWindows(t *testing.T) {
 	}
 	out := resumePrompt(t, events)
 
-	for _, kept := range []string{"src/**/*.go", "4096", "512", "40", "80", "41"} {
+	// KEY AND VALUE TOGETHER, NOT THE NUMBER ALONE. Searching for "40" finds
+	// it inside "4096", so the start_line assertion passed whether or not
+	// start_line survived at all, which is the opposite of what it claims.
+	for _, kept := range []string{
+		"src/**/*.go",
+		`"byte_offset":4096`, `"byte_limit":512`,
+		`"start_line":40`, `"end_line":80`, `"max_lines":41`,
+	} {
 		if !strings.Contains(out, kept) {
-			t.Errorf("supported identity or window %q was lost:\n%s", kept, out)
+			t.Errorf("supported identity or window %s was lost:\n%s", kept, out)
 		}
 	}
 }
