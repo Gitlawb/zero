@@ -68,7 +68,8 @@ func redact(value string) string {
 		return ""
 	}
 	value = redaction.RedactString(value, redaction.Options{})
-	return redaction.RedactString(stripControl(value), redaction.Options{})
+	normalized, boundaries := stripControlWithBoundaries(value)
+	return redactAtRemovedBoundaries(normalized, boundaries)
 }
 
 // stripControl removes terminal control bytes from imported text. A foreign
@@ -78,23 +79,60 @@ func redact(value string) string {
 // (a NUL that panicked the TUI). Tab and newline are kept because a transcript
 // legitimately carries them; every other C0 byte, DEL, and C1 byte is dropped.
 func stripControl(value string) string {
-	return strings.Map(func(r rune) rune {
+	stripped, _ := stripControlWithBoundaries(value)
+	return stripped
+}
+
+func stripControlWithBoundaries(value string) (string, []int) {
+	var b strings.Builder
+	b.Grow(len(value))
+	boundaries := []int{}
+	for _, r := range value {
 		switch {
 		case r == '\t' || r == '\n':
-			return r
+			b.WriteRune(r)
 		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
-			return -1
+			boundaries = appendBoundary(boundaries, b.Len())
 		// FORMAT CHARACTERS ARE NOT CONTROL CHARACTERS, and unicode.IsControl
 		// says so — but U+202E RIGHT-TO-LEFT OVERRIDE reorders everything after
 		// it, so a tool name or title can be made to render as something else
 		// entirely while the bytes stay innocent. Category Cf is invisible by
 		// definition; nothing in a transcript needs it.
 		case unicode.Is(unicode.Cf, r):
-			return -1
+			boundaries = appendBoundary(boundaries, b.Len())
 		default:
-			return r
+			b.WriteRune(r)
 		}
-	}, value)
+	}
+	return b.String(), boundaries
+}
+
+func appendBoundary(boundaries []int, position int) []int {
+	if len(boundaries) == 0 || boundaries[len(boundaries)-1] != position {
+		return append(boundaries, position)
+	}
+	return boundaries
+}
+
+// redactAtRemovedBoundaries preserves the fact that a removed control separated
+// two adjacent bytes. The ordinary post-normalization pass catches credentials
+// assembled across an internal control. A synthetic non-word prefix at each
+// former boundary additionally catches the combined case where another removed
+// control also glued preceding prose to the credential and erased its word
+// boundary. Process right-to-left so redactions cannot invalidate earlier byte
+// offsets; the private-use marker is never emitted.
+func redactAtRemovedBoundaries(value string, boundaries []int) string {
+	const boundaryHint = "\ue000"
+	for i := len(boundaries) - 1; i >= 0; i-- {
+		position := boundaries[i]
+		if position < 0 || position > len(value) {
+			continue
+		}
+		suffix := redaction.RedactString(boundaryHint+value[position:], redaction.Options{})
+		suffix = strings.TrimPrefix(suffix, boundaryHint)
+		value = value[:position] + suffix
+	}
+	return redaction.RedactString(value, redaction.Options{})
 }
 
 // Every event a translation produces carries sessions.ImportedEventKey. The
@@ -172,17 +210,22 @@ func redactArguments(arguments string) string {
 	if err := json.Unmarshal([]byte(trimmed), &decoded); err != nil {
 		return redact(arguments)
 	}
-	encoded, err := json.Marshal(redactJSONValue(decoded))
+	// First normalize every decoded key and value using the imported-text policy,
+	// then retain the complete object shape while applying sensitive-key rules.
+	// A leaf-only walk cannot know that an opaque value belongs to "password",
+	// and leaving map keys untouched can persist a credential in a property name.
+	sanitized := redaction.RedactValue(redactJSONValue(decoded), redaction.Options{})
+	encoded, err := json.Marshal(sanitized)
 	if err != nil {
 		return redact(arguments)
 	}
 	return string(encoded)
 }
 
-// redactJSONValue walks a decoded JSON value and sanitizes every string leaf.
-// Numbers, booleans and null carry no text and pass through. Object keys are
-// left alone: a consumer looks values up BY key, and rewriting one would make an
-// ordinary argument unfindable rather than safe.
+// redactJSONValue walks a decoded JSON value and applies imported-text
+// normalization to string leaves and object keys. Ordinary schema keys remain
+// unchanged; credential-bearing keys are intentionally rewritten before the
+// object-aware redactor handles sensitive key/value relationships.
 func redactJSONValue(value any) any {
 	switch typed := value.(type) {
 	case string:
@@ -193,10 +236,11 @@ func redactJSONValue(value any) any {
 		}
 		return typed
 	case map[string]any:
+		redacted := make(map[string]any, len(typed))
 		for key := range typed {
-			typed[key] = redactJSONValue(typed[key])
+			redacted[redact(key)] = redactJSONValue(typed[key])
 		}
-		return typed
+		return redacted
 	default:
 		return value
 	}
@@ -668,6 +712,7 @@ func DisplayField(value string) string {
 	value = redaction.RedactString(value, redaction.Options{})
 	var b strings.Builder
 	b.Grow(len(value))
+	boundaries := []int{}
 	for _, r := range value {
 		if r == '\t' || r == '\n' || r == '\r' {
 			b.WriteRune(' ')
@@ -676,9 +721,10 @@ func DisplayField(value string) string {
 		// Cf as well as control: see stripControl. A bidi override in a picker row
 		// reorders the rows's visible text without changing a byte of it.
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			boundaries = appendBoundary(boundaries, b.Len())
 			continue
 		}
 		b.WriteRune(r)
 	}
-	return redaction.RedactString(strings.TrimSpace(b.String()), redaction.Options{})
+	return strings.TrimSpace(redactAtRemovedBoundaries(b.String(), boundaries))
 }

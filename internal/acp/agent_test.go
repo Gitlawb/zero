@@ -559,6 +559,57 @@ func TestACPLoadImportedSessionDoesNotRestoreUnadvertisedForeignModel(t *testing
 	}
 }
 
+func TestACPLoadImportedSessionRestoresLaterLocalModelSelection(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
+		}}, nil
+	}
+	clientCwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:         "modern imported session",
+		Cwd:           "/foreign/display",
+		WorkspaceKey:  "/foreign/exact",
+		SourceModelID: "foreign-expensive-model",
+		Tag:           sessions.ImportedSessionTag("claude-code", "foreign-id"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := newHarness(t, deps)
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: clientCwd}, &loaded); err != nil {
+		t.Fatalf("initial session/load: %v", err)
+	}
+	if got := loaded.ConfigOptions[0].CurrentValue; got != "workspace-model" {
+		t.Fatalf("initial imported model = %q, want workspace default", got)
+	}
+	var selected SetSessionConfigOptionResult
+	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
+		SessionID: meta.SessionID, ConfigID: configIDModel, Value: "local-choice",
+	}, &selected); err != nil {
+		t.Fatalf("set local model: %v", err)
+	}
+	if got := selected.ConfigOptions[0].CurrentValue; got != "local-choice" {
+		t.Fatalf("selected model = %q", got)
+	}
+	h.stop()
+
+	h = newHarness(t, deps)
+	defer h.stop()
+	loaded = LoadSessionResult{}
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: clientCwd}, &loaded); err != nil {
+		t.Fatalf("fresh session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "local-choice" || !modelChoiceExists(option.Options, "local-choice") {
+		t.Fatalf("fresh load discarded persisted local choice: %+v", option)
+	}
+}
+
 func TestACPLoadNativeImportedPrefixTagRestoresItsModel(t *testing.T) {
 	deps := testDeps(t)
 	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {

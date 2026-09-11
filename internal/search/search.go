@@ -250,6 +250,11 @@ func redactMetadata(session sessions.Metadata, options redaction.Options) sessio
 	session.SessionID = redaction.RedactString(session.SessionID, options)
 	session.Title = redaction.RedactString(session.Title, options)
 	session.Cwd = redaction.RedactString(session.Cwd, options)
+	// WorkspaceKey is exact operational identity, not a presentation field. It
+	// may intentionally retain bytes removed from display-safe Cwd, so omit it
+	// from the copy embedded in CLI/JSON search results rather than corrupting the
+	// persisted value or attempting a lossy field-by-field projection here.
+	session.WorkspaceKey = ""
 	session.ModelID = redaction.RedactString(session.ModelID, options)
 	session.Provider = redaction.RedactString(session.Provider, options)
 	session.ParentSessionID = redaction.RedactString(session.ParentSessionID, options)
