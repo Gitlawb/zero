@@ -3701,6 +3701,16 @@ func TestEngineDownloadedRefusesARawTagPathOutsideTheRoot(t *testing.T) {
 	// the gate, not "the tag had a separator".
 	nested := filepath.Join(root, "engine-rel", "v1-"+platformKey())
 	plantEngineTree(t, nested)
+	// plantEngineTree writes the unix binary names; the badge resolves the
+	// host's, so add the names the probe looks for on this platform.
+	for _, dir := range []string{outside, nested} {
+		bin, server := enginePaths(dir, runtime.GOOS == "windows")
+		for _, path := range []string{bin, server} {
+			if err := os.WriteFile(path, []byte("x"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 
 	if EngineDownloaded(root, "../../../escape") {
 		t.Errorf("a raw tag that resolves outside %s must not mark the engine downloaded", root)
