@@ -199,7 +199,7 @@ func TestSessionManagerKeepsRunningOverCap(t *testing.T) {
 
 	s1, _ := mgr.Start(context.Background(), WorkerSpec{Session: "r1"})
 	s2, _ := mgr.Start(context.Background(), WorkerSpec{Session: "r2"})
-	testutil.WaitFor(t, "", func() bool { return s1.State() == SessionRunning && s2.State() == SessionRunning })
+	testutil.WaitFor(t, "sessions running", func() bool { return s1.State() == SessionRunning && s2.State() == SessionRunning })
 	if _, ok := mgr.Get("r1"); !ok {
 		t.Fatal("a running session must never be evicted, even past the cap")
 	}
