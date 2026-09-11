@@ -301,13 +301,32 @@ var toolCallIdentityKeys = map[string]bool{
 	"dir": true, "directory": true, "cwd": true, "workdir": true,
 	// what a search was for; these are what the interrupted turn was looking at
 	"pattern": true, "glob": true, "query": true, "regex": true, "expression": true,
+	"match": true,
 	// fetches and named resources
 	"url": true, "name": true,
-	// read windows, so a resumed turn knows which part it already had
+	// read windows, so a resumed turn knows which part it already had. Every
+	// form read_file accepts, because a resumed turn that knows the path but not
+	// which slice was asked for has half the identity and will read again.
 	"offset": true, "limit": true,
+	"start_line": true, "end_line": true, "max_lines": true,
+	"byte_offset": true, "byte_limit": true,
 }
 
-// redactedIdentityValue scrubs credentials out of a value the projection keeps.
+// toolCallIdentityKeysByTool holds the argument names whose meaning depends on
+// which tool was called, so they cannot live in the table above.
+//
+// grep accepts `search` for its pattern, and edit_file accepts the same word
+// for the text being replaced. Admitting it globally for the sake of the first
+// would replay file contents through the second, which is the whole thing this
+// projection exists to stop. The rule this encodes: an argument name that any
+// MUTATING tool accepts for body content is scoped to the tools that mean
+// something else by it, never added to the shared table.
+var toolCallIdentityKeysByTool = map[string]map[string]bool{
+	"grep": {"search": true},
+}
+
+// retainedIdentityValue decides whether a value under a permitted key may be
+// kept, and what it looks like if so.
 //
 // AN ALLOW-LISTED KEY IS NOT A SAFE VALUE. A url is a valid place for a
 // credential to appear: web_fetch accepts a query token and redacts the URL it
@@ -316,14 +335,40 @@ var toolCallIdentityKeys = map[string]bool{
 // result and kept verbatim in the call. This projection is what admits call
 // arguments into a later turn's prompt, so the same scrub belongs here or the
 // credential is replayed on resume. Host and path survive it, which is the
-// identity the resumed turn needs; non-string values (an offset, a limit) are
-// nothing to scrub.
-func redactedIdentityValue(value any) any {
-	text, ok := value.(string)
-	if !ok {
-		return value
+// identity the resumed turn needs.
+//
+// AND A KEY IS NOT PERMISSION FOR WHATEVER HANGS UNDER IT. Scrubbing strings
+// and passing everything else through read as "numbers are nothing to scrub",
+// which is true of a number and not of an object: MCP schemas allow object and
+// array properties, so {"query":{"api_key":"...","content":"private body"}}
+// arrives under a permitted key and carries a whole payload with it. Redacting
+// a serialized object would not help either, since ordinary private text has no
+// credential shape to match.
+//
+// So the retained shapes are named: a string, scrubbed, and the scalars a read
+// window is made of. A container is dropped. The call keeps its name and id, so
+// a resumed turn still knows which tool ran and can ask again; what it does not
+// get is arbitrary nested content it was never meant to see.
+func retainedIdentityValue(value any) (any, bool) {
+	switch typed := value.(type) {
+	case string:
+		return redaction.RedactString(typed, redaction.Options{}), true
+	case float64, int, int64, bool, json.Number:
+		return typed, true
+	default:
+		// Objects, arrays, null, and anything a future decoder invents.
+		return nil, false
 	}
-	return redaction.RedactString(text, redaction.Options{})
+}
+
+// toolCallIdentityKeyAllowed reports whether key is an identity field for the
+// tool that was called.
+func toolCallIdentityKeyAllowed(toolName, key string) bool {
+	lowered := strings.ToLower(key)
+	if toolCallIdentityKeys[lowered] {
+		return true
+	}
+	return toolCallIdentityKeysByTool[strings.ToLower(strings.TrimSpace(toolName))][lowered]
 }
 
 // toolCallIdentityFields are the top-level payload fields a projected call
@@ -359,6 +404,12 @@ func toolCallIdentity(event Event) Event {
 			projected[field] = value
 		}
 	}
+	// The tool decides what some argument names mean, so the projection has to
+	// know which tool this was before it can say which keys are identity.
+	toolName := ""
+	if raw, present := decoded["name"]; present {
+		_ = json.Unmarshal(raw, &toolName)
+	}
 	kept := map[string]any{}
 	if raw, present := decoded["arguments"]; present {
 		var argumentsText string
@@ -366,8 +417,11 @@ func toolCallIdentity(event Event) Event {
 			var arguments map[string]any
 			if err := json.Unmarshal([]byte(argumentsText), &arguments); err == nil {
 				for key, value := range arguments {
-					if toolCallIdentityKeys[strings.ToLower(key)] {
-						kept[key] = redactedIdentityValue(value)
+					if !toolCallIdentityKeyAllowed(toolName, key) {
+						continue
+					}
+					if retained, ok := retainedIdentityValue(value); ok {
+						kept[key] = retained
 					}
 				}
 			}
