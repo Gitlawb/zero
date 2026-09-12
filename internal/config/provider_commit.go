@@ -74,6 +74,15 @@ func runProviderProfileOperation(path string, allowMissing bool, allowInvalidInp
 		}
 	}()
 
+	// Preference and MCP writers share this document without touching provider
+	// credentials. Take their config lock after the provider lock, before reading,
+	// so neither kind of writer can overwrite the other's acknowledged update.
+	unlockConfig, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer func() { err = errors.Join(err, unlockConfig()) }()
+
 	cfg := FileConfig{}
 	exists := false
 	if data, readErr := os.ReadFile(path); readErr == nil {
