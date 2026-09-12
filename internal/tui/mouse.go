@@ -513,10 +513,11 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 			return mouseSelectionTarget{}, false
 		}
 	}
-	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
+	maxVisible := pickerMaxVisible(m.picker, width)
 	selected := clampInt(m.picker.selected, 0, len(m.picker.items)-1)
 	start := selectableListStart(len(m.picker.items), maxVisible, selected)
 	visible := m.picker.items[start : start+maxVisible]
+	details := pickerShowsDetails(m.picker, width)
 	// y=0 titled top border, y=1 search line, y=2 separator; rows begin at y=3.
 	line := 3
 	lastGroup := ""
@@ -528,12 +529,18 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 			line++
 			lastGroup = item.Group
 		}
-		if hit.y == line {
+		// A rendered detail line belongs to its item: a click anywhere on the
+		// two-line block selects the same row.
+		rowLines := 1
+		if details && item.Detail != "" {
+			rowLines = 2
+		}
+		if hit.y >= line && hit.y < line+rowLines {
 			index := start + offset
 			m.picker.selected = index
 			return mouseSelectionTarget{Scope: "picker", Kind: int(m.picker.kind), Value: item.Value, Index: index}, true
 		}
-		line++
+		line += rowLines
 	}
 	return mouseSelectionTarget{}, false
 }

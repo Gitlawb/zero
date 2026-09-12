@@ -34,12 +34,15 @@ const (
 // pickerItem is one selectable row: Label is shown, Value is passed to the
 // underlying command handler when chosen. Meta is the optional right-aligned
 // readout (ctx window · capabilities); the dot flags mark provider locality
-// for model rows (accent = remote, blue = local).
+// for model rows (accent = remote, blue = local). Detail is an optional faint
+// second line under the row (project · model · size for sessions), rendered
+// only on medium-and-wider tiers where the extra line reads cleanly.
 type pickerItem struct {
 	Group    string
 	Label    string
 	Value    string
 	Meta     string
+	Detail   string
 	Provider string // display tag (catalog id / locality)
 	// OwnerProvider is the saved provider profile name a model belongs to, so the
 	// /model picker can switch providers when a model from a non-active provider is
@@ -167,7 +170,7 @@ func (p *commandPicker) applyQuery() {
 // the joined haystack, and a fuzzy subsequence is the last-resort match.
 func scorePickerItem(item pickerItem, query string) (int, bool) {
 	label := strings.ToLower(item.Label)
-	hay := strings.ToLower(strings.Join([]string{item.Group, item.Label, item.Value, item.Meta}, " "))
+	hay := strings.ToLower(strings.Join([]string{item.Group, item.Label, item.Value, item.Meta, item.Detail}, " "))
 	switch {
 	case label == query:
 		return 0, true

@@ -773,7 +773,7 @@ func (m model) pickerOverlay(width int) string {
 		overlayWidth = width
 	}
 	innerWidth := maxInt(1, overlayWidth-4)
-	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
+	maxVisible := pickerMaxVisible(m.picker, width)
 	start := 0
 	visible := []pickerItem{}
 	if len(m.picker.items) > 0 {
@@ -781,6 +781,7 @@ func (m model) pickerOverlay(width int) string {
 		start = selectableListStart(len(m.picker.items), maxVisible, m.picker.selected)
 		visible = m.picker.items[start : start+maxVisible]
 	}
+	showDetails := pickerShowsDetails(m.picker, width)
 
 	lines := make([]string, 0, len(visible)+7)
 	title := strings.TrimSpace(m.picker.title)
@@ -821,6 +822,12 @@ func (m model) pickerOverlay(width int) string {
 		gap := innerWidth - lipgloss.Width(left) - lipgloss.Width(right)
 		line := left + surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(1, gap))) + right
 		lines = append(lines, fitStyledLine(line, innerWidth))
+		if showDetails && item.Detail != "" {
+			// The detail line sits under the row on the same selection band,
+			// indented to the label column so it reads as part of the item.
+			detail := surface(zeroTheme.faint).Render("  " + item.Detail)
+			lines = append(lines, fitStyledLine(detail, innerWidth))
+		}
 	}
 	if len(visible) == 0 {
 		if m.picker.loading {
@@ -843,6 +850,36 @@ func (m model) pickerOverlay(width int) string {
 	}
 	lines = append(lines, footer)
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+// pickerShowsDetails reports whether the overlay renders each row's optional
+// Detail line: only when a row actually carries one and the terminal is at
+// least medium width, where the two-line treatment reads cleanly. Narrower
+// tiers keep the single-line list fallback.
+func pickerShowsDetails(p *commandPicker, width int) bool {
+	if p == nil || widthTier(width) < tierMedium {
+		return false
+	}
+	for _, item := range p.items {
+		if item.Detail != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// pickerMaxVisible caps the visible window in items. When detail lines render,
+// each item costs two rows, so the budget halves to keep the overlay the same
+// height as the single-line list.
+func pickerMaxVisible(p *commandPicker, width int) int {
+	if p == nil {
+		return 0
+	}
+	budget := pickerOverlayMaxVisible
+	if pickerShowsDetails(p, width) {
+		budget = pickerOverlayMaxVisible / 2
+	}
+	return minInt(budget, len(p.items))
 }
 
 // themePickerOverlay keeps candidate rendering inside the picker. Moving through
