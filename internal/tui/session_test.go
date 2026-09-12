@@ -1263,6 +1263,7 @@ func TestRelativeAgeFormatsLastActivity(t *testing.T) {
 		{"minutes", now.Add(-42 * time.Minute), "42m ago"},
 		{"hours", now.Add(-3 * time.Hour), "3h ago"},
 		{"days", now.Add(-12 * 24 * time.Hour), "12d ago"},
+		{"exactly one month", now.Add(-30 * 24 * time.Hour), "30d ago"},
 		{"this year", time.Date(2026, 1, 5, 9, 0, 0, 0, time.UTC), "Jan  5"},
 		{"last year", time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC), "2025-06-01"},
 	}
