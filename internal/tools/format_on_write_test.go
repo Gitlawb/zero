@@ -97,9 +97,12 @@ func TestFormatOnWriteFormatsAndKeepsTrackerConsistent(t *testing.T) {
 
 func TestFormatOnWriteSkipsUnknownExtensions(t *testing.T) {
 	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
-	content := maybeFormatWrittenFile(context.Background(), filepath.Join(t.TempDir(), "notes.xyz"), "raw   text")
-	if content != "raw   text" {
-		t.Fatalf("unknown extension must pass through: %q", content)
+	formatting := maybeFormatWrittenFile(context.Background(), filepath.Join(t.TempDir(), "notes.xyz"), "raw   text")
+	if formatting.Content != "raw   text" {
+		t.Fatalf("unknown extension must pass through: %q", formatting.Content)
+	}
+	if notice := formatting.notice("notes.xyz"); notice != "" {
+		t.Fatalf("an extension with no formatter is not a miss worth reporting, got %q", notice)
 	}
 }
 
@@ -111,8 +114,11 @@ func TestFormatOnWriteFormatterLookupFailure(t *testing.T) {
 	if err := os.WriteFile(targetPath, []byte(uglyContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	content := maybeFormatWrittenFile(context.Background(), targetPath, uglyContent)
-	if content != uglyContent {
-		t.Fatalf("missing formatter must return written content, got %q", content)
+	formatting := maybeFormatWrittenFile(context.Background(), targetPath, uglyContent)
+	if formatting.Content != uglyContent {
+		t.Fatalf("missing formatter must return written content, got %q", formatting.Content)
+	}
+	if notice := formatting.notice("a.go"); notice != "" {
+		t.Fatalf("an uninstalled formatter is a standing fact, not a miss worth reporting, got %q", notice)
 	}
 }

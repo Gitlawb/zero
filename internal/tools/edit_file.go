@@ -160,7 +160,8 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker re-baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
+	formatting := maybeFormatWrittenFile(ctx, absolutePath, updated)
+	updated = formatting.Content
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
 	newInfo, _ := os.Stat(absolutePath)
@@ -193,6 +194,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		suffix = "s"
 	}
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
+	summary += formatting.notice(relativePath)
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
