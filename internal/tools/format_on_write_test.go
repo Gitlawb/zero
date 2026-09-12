@@ -224,7 +224,12 @@ printf 'formatted\n'
 func TestFormatOnWriteStdinCommandContracts(t *testing.T) {
 	for _, extension := range []string{".kt", ".dart"} {
 		t.Run(extension, func(t *testing.T) {
-			dir := t.TempDir()
+			// Tools pass the physical destination, including when macOS's temp
+			// directory (or the caller's TMPDIR) contains a symlink prefix.
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			target := filepath.Join(dir, "source file"+extension)
 			command := formatterCommands[extension]
 			fixture := []string{os.Args[0], "-test.run=^TestFormatOnWriteStdinContractHelper$", "--", command[0]}
