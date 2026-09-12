@@ -91,6 +91,20 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	parent.flushQueue = nil
 
 	side := parent
+	// The side surface must own its file-view lifecycle. Because `side` is a
+	// value copy of `parent`, its liveSeq pointer would otherwise alias the
+	// hidden parent's: closing or switching the view in BTW would revoke the
+	// parent's in-flight load. Detach it and give the side a fresh lifetime so
+	// inherited markers cannot masquerade as the parent's snapshot.
+	side.fileView.liveSeq = nil
+	if side.fileView.active {
+		side.fileView.lifetimeToken = nextFileViewLifetimeToken()
+		side.fileView.loadedToken = [16]byte{}
+		side.fileView.loadedSeq = 0
+		side.fileView.loadedRev = 0
+		side.fileView.snapshotReady = false
+		side.fileView.renderedContent = ""
+	}
 	side.activeSession = fork
 	side.sessionEvents = events
 	side.transcript = initialTranscript()
@@ -156,10 +170,16 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 		sideRunIDBase: side.runID,
 	}
 
-	if question == "" {
-		return side, nil
+	var btwFileViewCmd tea.Cmd
+	if side.fileView.active && side.fileView.mode == fileViewFull {
+		side, btwFileViewCmd = side.startFileViewLoadCmd(side.chatColumnWidth())
 	}
-	return side.launchPrompt(question)
+
+	if question == "" {
+		return side, btwFileViewCmd
+	}
+	next, launchCmd := side.launchPrompt(question)
+	return next, batchCommands(btwFileViewCmd, launchCmd)
 }
 
 func (m model) leaveBTW() (model, tea.Cmd) {
@@ -229,9 +249,9 @@ func btwCommandUnavailable(command parsedCommand) bool {
 // messages have no run ID, so normal BTW routing intentionally leaves them on
 // the visible side surface; copying the layout fields prevents stale wrapping
 // after the parent is restored.
-func (m model) resizeBTWParent(msg tea.WindowSizeMsg) model {
+func (m model) resizeBTWParent(msg tea.WindowSizeMsg) (model, tea.Cmd) {
 	if !m.btw.active || m.btw.parent == nil {
-		return m
+		return m, nil
 	}
 	parent := *m.btw.parent
 	parent.width = msg.Width
@@ -240,8 +260,15 @@ func (m model) resizeBTWParent(msg tea.WindowSizeMsg) model {
 	parent.lineAges = nil
 	parent.lastStreamActivity = parent.now()
 	parent.input.SetWidth(maxInt(20, chatWidth(msg.Width)-14))
+	// The parent's full-file view wrapped at the old width; reload it at the new
+	// one. Its completion has no run ID, so routeBTWParentMessage matches it by
+	// lifetime token and delivers it to the hidden parent.
+	var cmd tea.Cmd
+	if parent.fileView.active && parent.fileView.mode == fileViewFull {
+		parent, cmd = parent.startFileViewLoadCmd(parent.chatColumnWidth())
+	}
 	m.btw.parent = &parent
-	return m
+	return m, cmd
 }
 
 func btwTitle(parent string) string {
@@ -264,6 +291,15 @@ func (m model) routeBTWParentMessage(msg tea.Msg) (model, tea.Cmd, bool) {
 			return m, nil, false
 		}
 		return m.routeBTWMessageToParent(msg)
+	}
+	if loaded, ok := msg.(fileViewLoadedMsg); ok {
+		// File-view completions carry no run ID. Deliver the hidden parent's
+		// load (matched by lifetime token) so it does not stay stuck on
+		// "Loading…" while BTW is active; side-owned loads fall through.
+		if m.btw.parent.fileView.active && m.btw.parent.fileView.lifetimeToken == loaded.lifetimeToken {
+			return m.routeBTWMessageToParent(msg)
+		}
+		return m, nil, false
 	}
 	runID, ok := btwMessageRunID(msg)
 	if !ok || runID <= 0 || runID >= m.btw.sideRunIDBase {
