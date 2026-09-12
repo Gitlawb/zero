@@ -151,6 +151,32 @@ func TestSetActiveProviderTightensExistingConfigFilePermissions(t *testing.T) {
 	}
 }
 
+func TestSetActiveProviderModelPersistsSelectionTogether(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+			{Name: "Anthropic", ProviderKind: ProviderKindAnthropic, Model: "old-model"},
+		},
+	}, 0o600)
+
+	cfg, err := SetActiveProviderModel(path, " anthropic ", " claude-sonnet-4.5 ")
+	if err != nil {
+		t.Fatalf("SetActiveProviderModel() error = %v", err)
+	}
+	if cfg.ActiveProvider != "Anthropic" || cfg.Providers[1].Model != "claude-sonnet-4.5" {
+		t.Fatalf("returned selection = active %q model %q", cfg.ActiveProvider, cfg.Providers[1].Model)
+	}
+	persisted := readConfigFixture(t, path)
+	if persisted.ActiveProvider != "Anthropic" || persisted.Providers[1].Model != "claude-sonnet-4.5" {
+		t.Fatalf("persisted selection = active %q model %q", persisted.ActiveProvider, persisted.Providers[1].Model)
+	}
+	if persisted.Providers[0].Model != "gpt-4.1" {
+		t.Fatalf("unrelated provider changed: %#v", persisted.Providers[0])
+	}
+}
+
 func TestSetProviderModelUpdatesConfiguredProvider(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{
