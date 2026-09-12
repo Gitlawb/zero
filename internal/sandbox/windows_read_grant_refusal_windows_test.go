@@ -87,9 +87,12 @@ func TestElevatedSetupRefusesAVolumeRootReadGrant(t *testing.T) {
 	if applied {
 		t.Fatal("the plan was applied before the refusal, so the volume-wide edit already happened")
 	}
+	// Since #1006 the upfront DenyRead gate speaks first, before setup reaches
+	// the volume-root refusal below it, so the message is that gate's. What the
+	// reader needs from either is the same: that DenyRead is the cause and that
+	// removing it is the fix.
 	message := stderr.String()
-	volumeRoot := filepath.VolumeName(config.WorkspaceRoots[0]) + string(filepath.Separator)
-	for _, want := range []string{"denyRead", volumeRoot, "#869"} {
+	for _, want := range []string{"DenyRead", "Remove DenyRead"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("the refusal does not mention %q, so the reader cannot act on it:\n%s", want, message)
 		}

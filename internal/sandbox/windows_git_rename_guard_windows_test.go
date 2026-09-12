@@ -63,9 +63,9 @@ func TestDenyDeleteDoesNotInheritWhileOtherActionsStillDo(t *testing.T) {
 		{Action: WindowsACLAllowWrite, Path: `C:\work\repo`, Capability: "S-1-5-32-9999"},
 	}
 
-	access, err := windowsExplicitAccessEntries(entries, true)
+	_, access, err := prepareWindowsACLPathGroupEntries(entries, true, nil)
 	if err != nil {
-		t.Fatalf("windowsExplicitAccessEntries: %v", err)
+		t.Fatalf("prepareWindowsACLPathGroupEntries: %v", err)
 	}
 	if len(access) != len(entries) {
 		t.Fatalf("got %d access entries, want %d", len(access), len(entries))

@@ -12,6 +12,7 @@ func TestBuildWindowsACLPlanForWorkspaceWriteProfile(t *testing.T) {
 	config := WindowsSandboxCommandConfig{
 		SandboxHome:    home,
 		WorkspaceRoots: []string{`C:\workspace`},
+		SandboxLevel:   WindowsSandboxLevelRestrictedToken,
 		PermissionProfile: PermissionProfile{
 			FileSystem: FileSystemPolicy{
 				Kind: FileSystemRestricted,
@@ -57,20 +58,27 @@ func TestBuildWindowsACLPlanForWorkspaceWriteProfile(t *testing.T) {
 	assertWindowsACLEntry(t, plan, WindowsACLDenyWrite, `C:\workspace\secret-write`, cacheSID, false)
 	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, workspaceSID, true)
 	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, cacheSID, true)
+
+	// SID broadening is disabled, so the plan must not stamp shared system-path
+	// DenyWrite ACEs or revoke legacy capability SIDs. Revocation could weaken
+	// the boundary of a command launched by an earlier build.
+	assertNoSharedSystemDenyWrites(t, plan)
+	assertNoWindowsACLRevokes(t, plan)
 }
 
-func TestBuildWindowsACLPlanUsesReadOnlySIDWithoutWriteRoots(t *testing.T) {
+// TestBuildWindowsACLPlanOmitsSharedDenyPathsWithoutDenyRead pins that
+// profiles without DenyRead never stamp shared system-path DenyWrite ACEs or
+// revoke old capability-SID guards that a running sandbox may still require.
+func TestBuildWindowsACLPlanOmitsSharedDenyPathsWithoutDenyRead(t *testing.T) {
 	home := t.TempDir()
-	caps, err := LoadOrCreateWindowsCapabilitySIDs(home)
-	if err != nil {
-		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
-	}
 	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
-		SandboxHome: home,
+		SandboxHome:    home,
+		WorkspaceRoots: []string{`C:\workspace`},
+		SandboxLevel:   WindowsSandboxLevelRestrictedToken,
 		PermissionProfile: PermissionProfile{
 			FileSystem: FileSystemPolicy{
-				Kind:     FileSystemRestricted,
-				DenyRead: []string{`C:\workspace\secret-read`},
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: `C:\workspace`}},
 			},
 			Network: NetworkPolicy{Mode: NetworkDeny},
 		},
@@ -78,19 +86,77 @@ func TestBuildWindowsACLPlanUsesReadOnlySIDWithoutWriteRoots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWindowsACLPlan: %v", err)
 	}
-	// Two deny entries, one per SID the token can carry here. ReadOnly is the
-	// only capability a profile with no write roots gets, and ReadAllow is the
-	// read grant a DenyRead profile's strict token carries: denying just one of
-	// them leaves the carveout readable through the other.
-	if len(plan.Entries) != 2 {
-		t.Fatalf("ACL entries = %#v, want a deny-read entry per capability SID", plan.Entries)
-	}
-	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, caps.ReadOnly, true)
-	readSID, err := WindowsReadAllowSID(home)
+	assertNoSharedSystemDenyWrites(t, plan)
+	assertNoWindowsACLRevokes(t, plan)
+}
+
+// TestBuildWindowsACLPlanOmitsSharedDenyPathsWhenUnelevated pins that the
+// unelevated tier never stamps shared system-path DenyWrite ACEs (it also
+// never broadens the restricted-SID list).
+func TestBuildWindowsACLPlanOmitsSharedDenyPathsWhenUnelevated(t *testing.T) {
+	home := t.TempDir()
+	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
+		SandboxHome:    home,
+		WorkspaceRoots: []string{`C:\workspace`},
+		SandboxLevel:   WindowsSandboxLevelUnelevated,
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: `C:\workspace`}},
+				DenyRead:   []string{`C:\workspace\secret`},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+	})
 	if err != nil {
-		t.Fatalf("WindowsReadAllowSID: %v", err)
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
 	}
-	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, readSID, true)
+	assertNoSharedSystemDenyWrites(t, plan)
+	assertNoWindowsACLRevokes(t, plan)
+}
+
+// TestBuildWindowsACLPlanDoesNotRevokeLegacyGuards pins that a setup run does
+// not remove persistent guards installed by an older build. A previously
+// launched sandbox can still carry the legacy capability SID, so removing its
+// deny would widen that process's access.
+func TestBuildWindowsACLPlanDoesNotRevokeLegacyGuards(t *testing.T) {
+	home := t.TempDir()
+	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
+		SandboxHome:    home,
+		WorkspaceRoots: []string{`C:\workspace`},
+		SandboxLevel:   WindowsSandboxLevelRestrictedToken,
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: `C:\workspace`}},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
+	}
+	assertNoWindowsACLRevokes(t, plan)
+}
+
+func assertNoSharedSystemDenyWrites(t *testing.T, plan WindowsACLPlan) {
+	t.Helper()
+	for _, path := range []string{`C:\`, `C:\ProgramData`, `C:\Windows\Temp`, `C:\Users\Public`} {
+		for _, entry := range plan.Entries {
+			if entry.Action == WindowsACLDenyWrite && windowsCapabilityPathKey(entry.Path) == windowsCapabilityPathKey(path) {
+				t.Fatalf("plan stamps shared system DenyWrite on %q = %#v; SID broadening is disabled so shared denies must not be planned", path, entry)
+			}
+		}
+	}
+}
+
+func assertNoWindowsACLRevokes(t *testing.T, plan WindowsACLPlan) {
+	t.Helper()
+	for _, entry := range plan.Entries {
+		if entry.Action == WindowsACLRevokeCapability {
+			t.Fatalf("plan = %#v, want no WindowsACLRevokeCapability entries", plan.Entries)
+		}
+	}
 }
 
 func TestBuildWindowsACLPlanRejectsUnrestrictedProfiles(t *testing.T) {
@@ -132,15 +198,21 @@ func TestPlanWindowsDenyReadPathsIncludesCanonicalExistingPath(t *testing.T) {
 
 func assertWindowsACLEntry(t *testing.T, plan WindowsACLPlan, action WindowsACLAction, path string, capability string, materialize bool) {
 	t.Helper()
+	assertWindowsACLEntryInheritance(t, plan, action, path, capability, materialize, false)
+}
+
+func assertWindowsACLEntryInheritance(t *testing.T, plan WindowsACLPlan, action WindowsACLAction, path string, capability string, materialize bool, noInherit bool) {
+	t.Helper()
 	for _, entry := range plan.Entries {
 		if entry.Action == action &&
 			windowsCapabilityPathKey(entry.Path) == windowsCapabilityPathKey(path) &&
 			strings.EqualFold(entry.Capability, capability) &&
-			entry.Materialize == materialize {
+			entry.Materialize == materialize &&
+			entry.NoInherit == noInherit {
 			return
 		}
 	}
-	t.Fatalf("ACL entries = %#v, want %s %q capability %q materialize=%v", plan.Entries, action, path, capability, materialize)
+	t.Fatalf("ACL entries = %#v, want %s %q capability %q materialize=%v noInherit=%v", plan.Entries, action, path, capability, materialize, noInherit)
 }
 
 func windowsPathListContains(paths []string, want string) bool {
@@ -151,4 +223,59 @@ func windowsPathListContains(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestDedupeWindowsACLEntriesKeepsInheritanceVariants pins NoInherit as part
+// of the entry identity: a direct-only deny and an inheritable deny on the
+// same path and SID are different ACL shapes, and collapsing them could
+// silently promote a deliberately non-inherited shared-path deny into an
+// inheritable one that SetNamedSecurityInfo would propagate across a huge
+// existing subtree.
+func TestDedupeWindowsACLEntriesKeepsInheritanceVariants(t *testing.T) {
+	entries := []WindowsACLEntry{
+		{Action: WindowsACLDenyWrite, Path: `C:\shared`, Capability: "S-1-5-21-1", NoInherit: true},
+		{Action: WindowsACLDenyWrite, Path: `C:\shared`, Capability: "S-1-5-21-1"},
+		{Action: WindowsACLDenyWrite, Path: `C:\shared`, Capability: "S-1-5-21-1", NoInherit: true},
+	}
+	out := dedupeWindowsACLEntries(entries)
+	if len(out) != 2 {
+		t.Fatalf("dedupe = %#v, want the NoInherit and inheritable variants kept distinct", out)
+	}
+	if !out[0].NoInherit || out[1].NoInherit {
+		t.Fatalf("dedupe order/shape = %#v, want first NoInherit then inheritable", out)
+	}
+}
+
+func TestBuildWindowsACLPlanUsesReadOnlySIDWithoutWriteRoots(t *testing.T) {
+	home := t.TempDir()
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(home)
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
+		SandboxHome: home,
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:     FileSystemRestricted,
+				DenyRead: []string{`C:\workspace\secret-read`},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
+	}
+	// Two deny entries, one per SID the token can carry here. ReadOnly is the
+	// only capability a profile with no write roots gets, and ReadAllow is the
+	// read grant a DenyRead profile's strict token carries: denying just one of
+	// them leaves the carveout readable through the other.
+	if len(plan.Entries) != 2 {
+		t.Fatalf("ACL entries = %#v, want a deny-read entry per capability SID", plan.Entries)
+	}
+	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, caps.ReadOnly, true)
+	readSID, err := WindowsReadAllowSID(home)
+	if err != nil {
+		t.Fatalf("WindowsReadAllowSID: %v", err)
+	}
+	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, readSID, true)
 }
