@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -160,6 +161,9 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// destination in place after publication would reintroduce partial writes.
 	formatting := maybeFormatWrittenFile(ctx, absolutePath, updated)
 	updated = formatting.Content
+	if current, rerr := os.ReadFile(absolutePath); rerr != nil || !bytes.Equal(current, []byte(content)) {
+		return errorResult(fileConflictMessage(relativePath))
+	}
 	cleanupWarning, err := committedWrite(absolutePath, []byte(updated), 0o644)
 	if err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())

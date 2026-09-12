@@ -16,6 +16,18 @@ import (
 // FIFO, device, socket, directory, or other special file with a regular file.
 var ErrNonRegularDestination = errors.New("fsutil: destination exists and is not a regular file")
 
+// stagingModeObserver, when non-nil, receives the mode of the freshly created
+// staging file before any metadata is copied onto it. Tests use it to assert
+// that a replacement is staged no broader than its destination.
+var stagingModeObserver func(os.FileMode)
+
+// stagingProtectionObserver, when non-nil, receives the path of the staging
+// file after protectStaging has copied the destination's authorization metadata
+// onto it, still before any replacement bytes are written. Tests use it to
+// assert that a replacement is staged no broader than its destination on
+// platforms (Windows) where the mode bits do not carry that answer.
+var stagingProtectionObserver func(stagingPath string)
+
 // WriteFileAtomic writes data to a temporary file in the same directory as filename,
 // flushes and syncs it to disk, and replaces filename atomically via ReplaceWithRetry.
 // For new files, it honors the process umask by creating the temporary file with
@@ -56,9 +68,18 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		return err
 	}
 
-	tmpFile, err := createTempFile(dir, perm)
+	stagePerm := perm
+	if existingMode != nil {
+		stagePerm = *existingMode
+	}
+	tmpFile, err := createTempFile(dir, stagePerm)
 	if err != nil {
 		return err
+	}
+	if stagingModeObserver != nil {
+		if info, statErr := tmpFile.Stat(); statErr == nil {
+			stagingModeObserver(info.Mode())
+		}
 	}
 	tmpName := tmpFile.Name()
 	closed := false
@@ -78,6 +99,15 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		}
 		if err := preserveXattrs(tmpFile, filename); err != nil {
 			return err
+		}
+		if err := preserveNativeACL(tmpFile, filename); err != nil {
+			return err
+		}
+		if err := protectStaging(tmpFile, filename); err != nil {
+			return err
+		}
+		if stagingProtectionObserver != nil {
+			stagingProtectionObserver(tmpName)
 		}
 	}
 	if _, err := tmpFile.Write(data); err != nil {

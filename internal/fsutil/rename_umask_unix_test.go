@@ -32,3 +32,26 @@ func TestWriteFileAtomicRespectsProcessUmask(t *testing.T) {
 		t.Fatalf("created file perm = %04o, want %04o (honoring umask 0o077)", got, 0o600)
 	}
 }
+
+func TestWriteFileAtomicStagesReplacementWithDestinationMode(t *testing.T) {
+	oldMask := syscall.Umask(0)
+	defer syscall.Umask(oldMask)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := stagingModeObserver
+	t.Cleanup(func() { stagingModeObserver = orig })
+	var observed os.FileMode
+	stagingModeObserver = func(mode os.FileMode) { observed = mode }
+
+	if err := WriteFileAtomic(target, []byte("new"), 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+	if got := observed.Perm(); got != 0o600 {
+		t.Fatalf("staging mode = %04o, want the destination mode %04o", got, 0o600)
+	}
+}

@@ -10,6 +10,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const posixACLAccessXattr = "system.posix_acl_access"
+
 func preserveXattrs(f *os.File, srcPath string) error {
 	names, err := listXattrs(srcPath)
 	if err != nil {
@@ -18,7 +20,11 @@ func preserveXattrs(f *os.File, srcPath string) error {
 		}
 		return fmt.Errorf("fsutil: listing xattrs of %s: %w", srcPath, err)
 	}
+	hasAccessACL := false
 	for _, name := range names {
+		if name == posixACLAccessXattr {
+			hasAccessACL = true
+		}
 		data, err := getXattr(srcPath, name)
 		if err != nil {
 			if isXattrUnsupported(err) {
@@ -27,13 +33,27 @@ func preserveXattrs(f *os.File, srcPath string) error {
 			return fmt.Errorf("fsutil: reading xattr %s from %s: %w", name, srcPath, err)
 		}
 		if err := unix.Fsetxattr(int(f.Fd()), name, data, 0); err != nil {
-			if name == "security.selinux" {
+			if name == "security.selinux" && isSELinuxPolicyDenial(err) {
 				continue
 			}
 			return fmt.Errorf("fsutil: preserving xattr %s: %w", name, err)
 		}
 	}
+	if !hasAccessACL {
+		if err := unix.Fremovexattr(int(f.Fd()), posixACLAccessXattr); err != nil {
+			if !isXattrNotFound(err) && !isXattrUnsupported(err) {
+				return fmt.Errorf("fsutil: removing inherited ACL from replacement: %w", err)
+			}
+		}
+	}
 	return nil
+}
+
+func isSELinuxPolicyDenial(err error) bool {
+	return errors.Is(err, unix.EACCES) ||
+		errors.Is(err, unix.EPERM) ||
+		errors.Is(err, unix.ENOTSUP) ||
+		errors.Is(err, unix.EOPNOTSUPP)
 }
 
 func listXattrs(path string) ([]string, error) {
