@@ -627,7 +627,12 @@ Core tool groups include:
   skills, `ask_user`, permission requests.
 - **Write tools**: `write_file`, `edit_file`, `apply_patch`, `update_plan`.
 - **Shell tools**: `exec_command`, `write_stdin`, legacy `bash`.
-- **Network tools**: `web_fetch` and optional web search backend.
+- **Network tools**: `web_fetch` and optional web search backend. `web_fetch`
+  validates the URL before the permission prompt, refuses loopback/private/
+  special-use addresses, and dials the address it resolved. With
+  `HTTP_PROXY`/`HTTPS_PROXY` set, the proxy is dialed instead and resolves the
+  target itself, so destination enforcement ends at the proxy; see the note in
+  the README.
 - **Local-control tools**: config-gated wrappers for browser, terminal, desktop,
   and artifact helpers backed by packages such as `internal/localcontrol` and
   `internal/browser`.

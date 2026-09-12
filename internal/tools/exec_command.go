@@ -75,14 +75,10 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 	if manager == nil {
 		manager = defaultExecSessionManager
 	}
-	description := "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
-	if runtimeGOOS() == "windows" {
-		description += "\n\n" + shellGuidanceForGOOS(runtimeGOOS())
-	}
 	return execCommandTool{
 		baseTool: baseTool{
 			name:        ExecCommandToolName,
-			description: description,
+			description: execCommandDescription(runtimeGOOS()),
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
@@ -673,4 +669,20 @@ func execDisplaySummary(commandText string, sessionID int, exited bool, exitCode
 
 func runtimeGOOS() string {
 	return runtime.GOOS
+}
+
+// execCommandDescription is exec_command's description as a host running goos
+// would see it. The shell guidance is appended on Windows only.
+//
+// Taking goos as an argument rather than reading it is what lets the guidance
+// contract be checked for every platform from any one of them. internal/agent's
+// token ratchet removes exactly this appended text before charging the schemas,
+// so the condition here and hostExecCommandShellGuidance have to agree on all
+// three platforms, not only on whichever one the test happens to run on.
+func execCommandDescription(goos string) string {
+	description := "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
+	if goos == "windows" {
+		description += "\n\n" + shellGuidanceForGOOS(goos)
+	}
+	return description
 }
