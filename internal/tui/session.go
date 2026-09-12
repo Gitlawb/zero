@@ -419,8 +419,9 @@ func (m model) newSessionPicker() *commandPicker {
 			label = sessionPickerLabel(when, label)
 		}
 		items = append(items, pickerItem{
-			Label: label,
-			Value: meta.SessionID,
+			Label:  label,
+			Value:  meta.SessionID,
+			Detail: m.sessionPickerDetail(meta),
 		})
 	}
 	if len(items) == 0 {
@@ -439,6 +440,42 @@ const sessionPickerTimeWidth = len("Jan 02 15:04")
 
 func sessionPickerLabel(when, title string) string {
 	return fmt.Sprintf("%-*s  %s", sessionPickerTimeWidth, when, title)
+}
+
+// sessionPickerDetail composes the faint second line under a /resume row:
+// the session's project directory (~/-contracted), the model it ran on, its
+// size in events, and a short status chip when the session is not a plain
+// mainline run (forks, tagged sessions such as btw side-chats). Missing
+// fields are simply omitted — the picker is workspace-scoped, so the project
+// column is a confirmation, not a disambiguator.
+func (m model) sessionPickerDetail(meta sessions.Metadata) string {
+	parts := make([]string, 0, 4)
+	if project := displayPath(m.cwd, meta.Cwd); project != "" {
+		parts = append(parts, project)
+	}
+	if modelID := strings.TrimSpace(meta.ModelID); modelID != "" {
+		parts = append(parts, modelID)
+	}
+	if meta.EventCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d events", meta.EventCount))
+	}
+	if status := sessionPickerStatus(meta); status != "" {
+		parts = append(parts, status)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// sessionPickerStatus is the concise status chip for a /resume row: an
+// explicit tag when the session carries one, otherwise a marker for forked
+// sessions. Plain mainline sessions get none — their shape is the default.
+func sessionPickerStatus(meta sessions.Metadata) string {
+	if tag := strings.TrimSpace(meta.Tag); tag != "" {
+		return tag
+	}
+	if meta.SessionKind == sessions.SessionKindFork {
+		return "fork"
+	}
+	return ""
 }
 
 // sessionHasResumableContent reports whether a session has anything worth
