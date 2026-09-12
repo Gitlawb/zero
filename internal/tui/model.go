@@ -70,21 +70,24 @@ const dragEdgeScrollInterval = 70 * time.Millisecond
 const dragEdgeScrollStep = 1
 
 type model struct {
-	ctx                         context.Context
-	cwd                         string
-	appVersion                  string
-	userCommands                []usercommands.Command // file-sourced /commands (.zero/commands)
-	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
-	userConfigPath              string
-	doctorUserConfigPath        string
-	projectConfigPath           string
-	gitBranch                   string
-	providerName                string
-	modelName                   string
-	modelCatalog                modelregistry.Registry
-	providerProfile             config.ProviderProfile
-	savedProviders              []config.ProviderProfile
-	provider                    zeroruntime.Provider
+	ctx                  context.Context
+	cwd                  string
+	appVersion           string
+	userCommands         []usercommands.Command // file-sourced /commands (.zero/commands)
+	loadSkills           func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
+	userConfigPath       string
+	doctorUserConfigPath string
+	projectConfigPath    string
+	gitBranch            string
+	providerName         string
+	modelName            string
+	modelCatalog         modelregistry.Registry
+	providerProfile      config.ProviderProfile
+	savedProviders       []config.ProviderProfile
+	provider             zeroruntime.Provider
+	// allowEscalation mirrors Options.AllowEscalation: it gates the per-run model
+	// switchers, and the caller gates the escalate_model tool on the same flag.
+	allowEscalation             bool
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
 	newTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
@@ -658,10 +661,16 @@ type agentUsageMsg struct {
 }
 
 type agentResponseMsg struct {
-	runID         int
-	rows          []transcriptRow
-	usageEvents   []zeroruntime.Usage
+	runID       int
+	rows        []transcriptRow
+	usageEvents []zeroruntime.Usage
+	// usageModelID is the model in force when the run ended. usageModelIDs is
+	// the model in force when each usageEvents entry fired: a mid-run
+	// escalation changes it partway through the run, and billing the events
+	// before the switch to the escalated model would be as wrong as billing
+	// the ones after it to the starting model. Read through usageModelIDAt.
 	usageModelID  string
+	usageModelIDs []string
 	sessionEvents []pendingSessionEvent
 	specReview    *pendingSpecReviewPrompt
 	err           error
@@ -672,6 +681,16 @@ type agentResponseMsg struct {
 	// ttft is time-to-first-token for the turn (0 when nothing streamed — a
 	// tool-only or errored turn). Set only on the success path.
 	ttft time.Duration
+}
+
+// usageModelIDAt is the model in force when usageEvents[index] fired. The
+// per-event record wins; usageModelID is the fallback for a message built
+// without one, which is what every constructor before escalation produced.
+func (msg agentResponseMsg) usageModelIDAt(index int) string {
+	if index < len(msg.usageModelIDs) && msg.usageModelIDs[index] != "" {
+		return msg.usageModelIDs[index]
+	}
+	return msg.usageModelID
 }
 
 type peerMessageMsg struct {
@@ -999,6 +1018,7 @@ func newModel(ctx context.Context, options Options) model {
 		mcpCommand:                  options.MCPCommand,
 		sandboxSetupCommand:         options.SandboxSetupCommand,
 		agentOptions:                options.AgentOptions,
+		allowEscalation:             options.AllowEscalation,
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		permissionMode:              permissionMode,
@@ -2546,7 +2566,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 						continue
 					}
 					var usageRows []transcriptRow
-					m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+					m, usageRows = m.recordUsageEvent(msg.usageModelIDAt(index), event)
 					for _, row := range usageRows {
 						m.transcript = appendTranscriptRow(m.transcript, row)
 					}
@@ -2633,7 +2653,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			var usageRows []transcriptRow
-			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+			m, usageRows = m.recordUsageEvent(msg.usageModelIDAt(index), event)
 			for _, row := range usageRows {
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
@@ -5433,6 +5453,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		usageEvents := []zeroruntime.Usage{}
 		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
+		// usageModelIDs records, per usage event, the model in force when it
+		// fired; the escalation switcher reassigns usageModelID mid-run.
+		usageModelIDs := []string{}
 		var specReview *pendingSpecReviewPrompt
 		if m.awaitToolReadiness != nil {
 			m.awaitToolReadiness(runCtx)
@@ -5501,6 +5524,27 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// switch instead of keeping the original model's window.
 		options.ContextWindowFor = func(modelID string) int {
 			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
+		}
+		// And make that switch reachable, when the operator asked for it. The
+		// consequences of an escalation were already handled here (the window
+		// above, and the summarizer resolved against the active profile) while
+		// nothing on this surface could cause one: escalate_model was registered
+		// only by exec.
+		//
+		// BUILT FROM THE ACTIVE PROFILE, NOT THE STARTUP ONE. A TUI session can
+		// change models with /model, so escalating from the profile captured at
+		// launch would switch from whatever the session began with rather than
+		// from what is in force now, and would carry that stale profile's base URL
+		// and credential with it. m.providerProfile tracks the switches, which is
+		// why this is built per turn rather than once in the caller.
+		if m.allowEscalation {
+			options.ModelSwitcher, options.ModelSessionSwitcher = providers.EscalationSwitchers(
+				m.providerProfile, m.provider, m.newProvider,
+				// Usage attribution follows the switch, as exec reassigns its
+				// currentModel: every usage event after a real escalation is billed
+				// to the escalated model, not the one the run started on.
+				func(modelID string) { usageModelID = modelID },
+			)
 		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
@@ -5867,9 +5911,20 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onUsage := options.OnUsage
 		options.OnUsage = func(event zeroruntime.Usage) {
 			usageEvents = append(usageEvents, event)
+			usageModelIDs = append(usageModelIDs, usageModelID)
+			payload := usage.EventUsagePayload(event)
+			// AND ON THE PERSISTED EVENT TOO, not only the in-memory record: the
+			// report reconstructs cost from the payload, falling back to the
+			// session-wide model, so an escalated run would be priced entirely at
+			// the model it started on. Written only under escalation, which is the
+			// only way the model in force can change mid-run, matching what exec
+			// records under the same flag.
+			if m.allowEscalation {
+				payload["model"] = usageModelID
+			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventUsage,
-				Payload: usage.EventUsagePayload(event),
+				Payload: payload,
 			})
 			m.sendAgentUsage(runID, usageModelID, event)
 			if onUsage != nil {
@@ -5884,7 +5939,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventError,
 				Payload: map[string]any{"message": err.Error()},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		if runOptions.specDraft {
 			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
@@ -5894,10 +5949,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 			}
 			flushReasoning(m.now())
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		flushReasoning(m.now())
 		elapsed := m.activeTurnElapsed(started)
@@ -5918,7 +5973,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
 	}
 }
 
