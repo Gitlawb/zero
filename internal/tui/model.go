@@ -4486,14 +4486,25 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		text := ""
 		var switchPersistErr error
 		owner := strings.TrimSpace(item.OwnerProvider)
-		_, ownerIsSavedProvider := m.savedProviderByName(owner)
-		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
+		ownerProfile, ownerIsSavedProvider := m.savedProviderByName(owner)
+		// Compare the resolved owner ROW to the resolved active ROW, not the two
+		// credential identities. Identity comparison made an item rendered under
+		// project "target" equal to active user "Target", so the branch below was
+		// skipped and the model was applied to — and persisted on — the OTHER
+		// endpoint's profile with nothing shown to say so. savedProviderByName
+		// now also refuses an ambiguous spelling rather than returning the first
+		// row, so an unresolvable owner lands on the active provider instead of a
+		// coin flip.
+		sameRow := ownerIsSavedProvider &&
+			strings.TrimSpace(ownerProfile.Name) == strings.TrimSpace(m.activeProviderRowName())
+		if owner != "" && ownerIsSavedProvider && !sameRow {
 			// A model from another saved provider: switch provider + model together.
-			m, text, _, cmd, switchPersistErr = m.switchProviderModel(owner, item.Value)
+			m, text, _, cmd, switchPersistErr = m.switchProviderModel(ownerProfile.Name, item.Value)
 		} else {
-			// OwnerProvider is blank, matches the active provider, or (registry-fallback
-			// / stale-history rows) doesn't resolve to any saved provider: apply against
-			// the active provider instead of attempting an unresolvable provider switch.
+			// OwnerProvider is blank, resolves to the row this session already runs
+			// on, or (registry-fallback / stale-history / ambiguous rows) resolves
+			// to no single saved provider: apply against the active provider
+			// instead of attempting an unresolvable or self-directed switch.
 			m, text, switchPersistErr = m.handleModelCommand(item.Value)
 		}
 		if m.providerName != previousProvider || m.modelName != previousModel {
