@@ -211,3 +211,55 @@ func TestWorkspaceOwningGitIsNotTreatedAsNested(t *testing.T) {
 		t.Fatal("a workspace that owns .git was reported as governed by its ancestor, so its own protection would be refused instead of applied")
 	}
 }
+
+// CLONE IS CREATION TOO, AND THE NETWORK GRANT DOES NOT ANSWER FOR IT.
+//
+// "git clone <url> ." into a workspace governed by an ancestor repository lands
+// a root .git whose config and hooks setup never planned carveouts for, exactly
+// the state git init produces, but the guard only knew the init spelling. With
+// network explicitly allowed and the shell grant already given, the clone came
+// back as an ordinary allow. The repository-creation refusal is a separate
+// decision from the network prompt and has to stand on its own. Reported by
+// @gnanam1990.
+func TestNestedWorkspaceRefusesGitCloneIntoTheRoot(t *testing.T) {
+	ancestor, workspace := nestedGitWorkspace(t)
+	policy := DefaultPolicy()
+	policy.Network = NetworkAllow
+	engine := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: policy, Backend: nativeWrappingBackend})
+	for _, command := range []string{
+		"git clone https://example.invalid/repo.git .",
+		"git -C . clone https://example.invalid/repo.git .",
+		"git clone --depth 1 https://example.invalid/repo.git vendor/dep",
+	} {
+		request := gitCommandRequest(workspace, command)
+		request.Permission = PermissionAllow
+		request.PermissionGranted = true
+		decision := engine.Evaluate(context.Background(), request)
+		if decision.Action != ActionDeny {
+			t.Fatalf("%q inside the repository at %s was %s, not denied; the repository it creates gets a writable config and hooks under the workspace grant", command, ancestor, decision.Action)
+		}
+		if decision.Block == nil || decision.Block.Code != BlockNestedGitInit {
+			t.Fatalf("%q block = %#v, want code %s", command, decision.Block, BlockNestedGitInit)
+		}
+	}
+	// CONTROLS: ordinary git operations and the submodule init form stay clear
+	// of this guard, and a standalone workspace is not governed by anything.
+	for _, command := range []string{"git status", "git submodule update --init", "git fetch origin"} {
+		request := gitCommandRequest(workspace, command)
+		request.Permission = PermissionAllow
+		request.PermissionGranted = true
+		if decision := engine.Evaluate(context.Background(), request); decision.Action == ActionDeny && decision.Block != nil && decision.Block.Code == BlockNestedGitInit {
+			t.Fatalf("%q was refused as nested repository creation; it creates no repository", command)
+		}
+	}
+	standalone := t.TempDir()
+	if workspaceGovernedByAncestorRepository(standalone) {
+		t.Fatalf("SETUP INVALID: %s is governed by an ancestor repository", standalone)
+	}
+	request := gitCommandRequest(standalone, "git clone https://example.invalid/repo.git .")
+	request.Permission = PermissionAllow
+	request.PermissionGranted = true
+	if decision := gitWorkspaceEngine(t, standalone).Evaluate(context.Background(), request); decision.Block != nil && decision.Block.Code == BlockNestedGitInit {
+		t.Fatalf("clone into a standalone workspace was refused as nested: %#v", decision)
+	}
+}

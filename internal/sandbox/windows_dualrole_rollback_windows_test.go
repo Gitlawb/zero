@@ -4,7 +4,10 @@ package sandbox
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -73,7 +76,7 @@ func TestDualRoleSetupRollbackSparesAdoptedPrincipals(t *testing.T) {
 				return nil, errors.New("ACL apply refused")
 			}
 
-			if _, err := setupWindowsSandboxPrincipal(windowsSandboxTestConfig()); err == nil {
+			if _, err := setupWindowsSandboxPrincipal(windowsSandboxTestConfig(t)); err == nil {
 				t.Fatal("setup reported success despite an injected ACL failure")
 			}
 			assertRolesEqual(t, removed, testCase.wantRemoved)
@@ -90,7 +93,7 @@ func TestDualRoleSetupReturnedRollbackSparesAdoptedPrincipals(t *testing.T) {
 		windowsSandboxRoleOnline:  true,
 	}, &removed)
 
-	rollback, err := setupWindowsSandboxPrincipal(windowsSandboxTestConfig())
+	rollback, err := setupWindowsSandboxPrincipal(windowsSandboxTestConfig(t))
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
@@ -130,17 +133,89 @@ func restoreDualRoleSeams(t *testing.T, createdByRole map[windowsSandboxRole]boo
 	}
 }
 
-func windowsSandboxTestConfig() WindowsSandboxCommandConfig {
+// windowsSandboxTestConfig hands the production setup path test-owned roots and
+// nothing else. The principal and ACL seams intercept the identity work, not the
+// filesystem work: setupWindowsSandboxPrincipal materializes runtime candidates
+// under the user cache and TEMP, and applyWindowsPrincipalACLs writes ledgers
+// below the sandbox home, so the fixed C:\sandboxhome and C:\ws these tests used
+// to name meant an ordinary run wrote to the live cache, failed on drive-root
+// permissions, or collided with host state. Everything setup touches is
+// redirected to t.TempDir, and windowsSandboxTestRootsUntouched proves the
+// redirect took. Reported by @gnanam1990.
+func windowsSandboxTestConfig(t *testing.T) WindowsSandboxCommandConfig {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), "sandboxhome")
+	workspace := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir()
+	prevCache := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cache, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = prevCache })
+	temp := t.TempDir()
+	t.Setenv("TMP", temp)
+	t.Setenv("TEMP", temp)
+	before := windowsFixedTestRootsState()
+	t.Cleanup(func() { windowsSandboxTestRootsUntouched(t, cache, before) })
 	return WindowsSandboxCommandConfig{
-		SandboxHome:    `C:\sandboxhome`,
-		CommandCWD:     `C:\ws`,
-		WorkspaceRoots: []string{`C:\ws`},
+		SandboxHome:    home,
+		CommandCWD:     workspace,
+		WorkspaceRoots: []string{workspace},
 		PermissionProfile: PermissionProfile{
 			FileSystem: FileSystemPolicy{
 				Kind:       FileSystemRestricted,
-				WriteRoots: []WritableRoot{{Root: `C:\ws`}},
+				WriteRoots: []WritableRoot{{Root: workspace}},
 			},
 		},
+	}
+}
+
+// windowsFixedRootState is what a run may not change about a path outside the
+// test-owned roots: whether it exists, and if it does, when its entries last
+// changed. A directory's modification time moves whenever something is created
+// or removed inside it, which is exactly what setup would do to a home it was
+// still writing ledgers into.
+type windowsFixedRootState struct {
+	exists  bool
+	modTime time.Time
+}
+
+var windowsFixedTestRoots = []string{`C:\sandboxhome`, `C:\ws`}
+
+func windowsFixedTestRootsState() map[string]windowsFixedRootState {
+	states := make(map[string]windowsFixedRootState, len(windowsFixedTestRoots))
+	for _, fixed := range windowsFixedTestRoots {
+		info, err := os.Stat(fixed)
+		if err != nil {
+			states[fixed] = windowsFixedRootState{}
+			continue
+		}
+		states[fixed] = windowsFixedRootState{exists: true, modTime: info.ModTime()}
+	}
+	return states
+}
+
+// windowsSandboxTestRootsUntouched asserts the production setup path stayed
+// inside the test-owned roots. Not "the fixed paths are absent": a box that ran
+// the old form of these tests still has C:\sandboxhome from them, which is the
+// host state the finding was about, so the assertion is that THIS run neither
+// created nor changed them. And the cache the run was redirected to must not be
+// the live one, or the redirect proved nothing.
+func windowsSandboxTestRootsUntouched(t *testing.T, cache string, before map[string]windowsFixedRootState) {
+	t.Helper()
+	after := windowsFixedTestRootsState()
+	for _, fixed := range windowsFixedTestRoots {
+		was, now := before[fixed], after[fixed]
+		switch {
+		case !was.exists && now.exists:
+			t.Errorf("setup under test created %s, a path outside the test-owned roots", fixed)
+		case was.exists && now.exists && !now.modTime.Equal(was.modTime):
+			t.Errorf("setup under test wrote into %s, a path outside the test-owned roots", fixed)
+		}
+	}
+	if live, err := os.UserCacheDir(); err == nil && live == cache {
+		t.Fatalf("SETUP INVALID: the redirected cache %s is the live one", cache)
 	}
 }
 

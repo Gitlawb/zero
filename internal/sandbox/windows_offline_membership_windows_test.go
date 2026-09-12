@@ -75,7 +75,7 @@ func TestPrincipalTokenRechecksOfflineGroupMembership(t *testing.T) {
 			}
 			warnWindowsSandboxOfflineMembershipMissing = func(string) {}
 
-			config := windowsSandboxTestConfig()
+			config := windowsSandboxTestConfig(t)
 			config.Env = map[string]string{windowsSandboxIdentityEnv: "1"}
 			config.PermissionProfile.Network.Mode = testCase.mode
 

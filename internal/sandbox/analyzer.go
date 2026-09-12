@@ -328,13 +328,18 @@ func gitSubcommand(words []string) string {
 // global options that already bypassed that gate cannot bypass this one either:
 // "git -C sub init" and "git -c k=v init" both resolve to init.
 //
-// init-db is git's original spelling and still works today.
+// init-db is git's original spelling and still works today. clone creates a
+// repository as surely as init does, with its config and hooks written by the
+// fetch rather than by hand: "git clone <url> ." into a workspace governed by an
+// ancestor repository lands a root .git whose carveouts setup never planned, so
+// it is the same nested-repository decision. The network prompt is a separate
+// gate and granting it does not answer this one. Reported by @gnanam1990.
 func commandCreatesGitRepository(prog string, args []*syntax.Word) bool {
 	if prog != "git" {
 		return false
 	}
 	switch gitSubcommand(literalWordTexts(args)) {
-	case "init", "init-db":
+	case "init", "init-db", "clone":
 		return true
 	default:
 		return false
