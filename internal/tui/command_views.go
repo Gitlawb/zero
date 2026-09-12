@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -269,42 +270,41 @@ func (m model) permissionsText() string {
 
 func (m model) permissionsTextWithStore(store grantLister) string {
 	mode := string(m.permissionMode)
+	modeInfo := agent.PermissionModeInfoFor(m.permissionMode)
+	// PermissionModeInfoFor maps any unrecognized value to Auto. For an unknown
+	// (e.g. rehydrated session) mode, surface the raw string instead of
+	// mislabeling it "Auto", mirroring modeLabel() in view.go.
+	if strings.TrimSpace(mode) != "" && modeInfo.ID != m.permissionMode {
+		modeInfo.Label = mode
+		modeInfo.Summary = mode
+		modeInfo.Description = ""
+	}
+	modeSummary := modeInfo.Summary + " permissions"
+	stateSections := permissionStateSections(m.permissionMode, mode, modeInfo)
 	if store == nil {
+		sections := append([]commandCardSection{}, stateSections...)
+		sections = append(sections, commandCardSection{
+			Title: "Grants",
+			Lines: []string{"persistent grants: unavailable"},
+		})
 		return renderCommandCardTranscript(commandCard{
-			Title:   "Permissions",
-			Summary: []string{mode + " permissions", "grants unavailable"},
-			Sections: []commandCardSection{
-				{
-					Title: "State",
-					Fields: []commandField{
-						{Key: "mode", Value: mode},
-					},
-				},
-				{
-					Title: "Grants",
-					Lines: []string{"persistent grants: unavailable"},
-				},
-			},
+			Title:    "Permissions",
+			Summary:  []string{modeSummary, "grants unavailable"},
+			Sections: sections,
 		})
 	}
 
 	grants, err := store.List()
 	if err != nil {
+		sections := append([]commandCardSection{}, stateSections...)
+		sections = append(sections, commandCardSection{
+			Title: "Grants",
+			Lines: []string{"error: " + err.Error()},
+		})
 		return renderCommandCardTranscript(commandCard{
-			Title:   "Permissions",
-			Summary: []string{mode + " permissions", "grants error"},
-			Sections: []commandCardSection{
-				{
-					Title: "State",
-					Fields: []commandField{
-						{Key: "mode", Value: mode},
-					},
-				},
-				{
-					Title: "Grants",
-					Lines: []string{"error: " + err.Error()},
-				},
-			},
+			Title:    "Permissions",
+			Summary:  []string{modeSummary, "grants error"},
+			Sections: sections,
 		})
 	}
 	prefixes := []sandbox.CommandPrefixGrant{}
@@ -312,21 +312,15 @@ func (m model) permissionsTextWithStore(store grantLister) string {
 		var prefixErr error
 		prefixes, prefixErr = prefixStore.ListCommandPrefixes()
 		if prefixErr != nil {
+			sections := append([]commandCardSection{}, stateSections...)
+			sections = append(sections, commandCardSection{
+				Title: "Grants",
+				Lines: []string{"error: " + prefixErr.Error()},
+			})
 			return renderCommandCardTranscript(commandCard{
-				Title:   "Permissions",
-				Summary: []string{mode + " permissions", "grants error"},
-				Sections: []commandCardSection{
-					{
-						Title: "State",
-						Fields: []commandField{
-							{Key: "mode", Value: mode},
-						},
-					},
-					{
-						Title: "Grants",
-						Lines: []string{"error: " + prefixErr.Error()},
-					},
-				},
+				Title:    "Permissions",
+				Summary:  []string{modeSummary, "grants error"},
+				Sections: sections,
 			})
 		}
 	}
@@ -347,7 +341,11 @@ func (m model) permissionsTextWithStore(store grantLister) string {
 			grantRows = append(grantRows, commandRow{Text: line})
 		}
 		for _, grant := range prefixes {
-			line := fmt.Sprintf("%s `%s` [command-prefix]", grant.ToolName, strings.Join(grant.Prefix, " "))
+			scope := "global"
+			if strings.TrimSpace(grant.Project) != "" {
+				scope = "project"
+			}
+			line := fmt.Sprintf("%s `%s` [command-prefix:%s]", grant.ToolName, strings.Join(grant.Prefix, " "), scope)
 			if grant.ApprovedAt != "" {
 				line += " approved " + grant.ApprovedAt
 			}
@@ -358,22 +356,40 @@ func (m model) permissionsTextWithStore(store grantLister) string {
 		}
 	}
 
+	sections := append([]commandCardSection{}, stateSections...)
+	sections = append(sections, commandCardSection{
+		Title: "Grants",
+		Rows:  grantRows,
+	})
 	return renderCommandCardTranscript(commandCard{
-		Title:   "Permissions",
-		Summary: []string{mode + " permissions", formatGrantCount(len(snapshots) + len(prefixes))},
-		Sections: []commandCardSection{
-			{
-				Title: "State",
-				Fields: []commandField{
-					{Key: "mode", Value: mode},
-				},
-			},
-			{
-				Title: "Grants",
-				Rows:  grantRows,
+		Title:    "Permissions",
+		Summary:  []string{modeSummary, formatGrantCount(len(snapshots) + len(prefixes))},
+		Sections: sections,
+	})
+}
+
+func permissionStateSections(mode agent.PermissionMode, modeID string, modeInfo agent.PermissionModeInfo) []commandCardSection {
+	sections := []commandCardSection{
+		{
+			Title: "State",
+			Fields: []commandField{
+				{Key: "mode", Value: modeID},
+				{Key: "label", Value: modeInfo.Label},
+				{Key: "meaning", Value: modeInfo.Description},
 			},
 		},
-	})
+	}
+	if mode == agent.PermissionModeAutoClassifier {
+		sections = append(sections, commandCardSection{
+			Title: "Auto review",
+			Lines: []string{
+				"engine: LLM classifier (reviews each sandbox-cleared low-risk action)",
+				"auto-allows: only actions the classifier judges low-risk",
+				"still asks: anything the classifier is unsure about, plus destructive commands, network, installs, escalated sandbox access, out-of-workspace access",
+			},
+		})
+	}
+	return sections
 }
 
 // grantLister is the subset of sandbox.GrantStore used by permissionsText().

@@ -6,17 +6,9 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
-func equalStringSlices(left []string, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}
+// equalStringSlices is defined in command_prefix.go for production; tests use the
+// same implementation via the production symbol.
+
 
 // parsePreservedState recovers the plan + skills from a prior summary's preserved
 // block. JSON escaping makes this lossless even when a skill body contains

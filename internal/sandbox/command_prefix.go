@@ -11,17 +11,23 @@ type commandPrefixGrantSet struct {
 }
 
 type CommandPrefixGrant struct {
-	ToolName   string   `json:"toolName"`
-	Prefix     []string `json:"prefix"`
-	ApprovedAt string   `json:"approvedAt,omitempty"`
-	Reason     string   `json:"reason,omitempty"`
-	Session    bool     `json:"session,omitempty"`
+	ToolName string   `json:"toolName"`
+	Prefix   []string `json:"prefix"`
+	// Project scopes a persisted grant to one workspace root (absolute path).
+	// Empty means the grant is global — it matches in every project.
+	Project    string `json:"project,omitempty"`
+	ApprovedAt string `json:"approvedAt,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Session    bool   `json:"session,omitempty"`
 }
 
 type CommandPrefixInput struct {
 	ToolName string
 	Prefix   []string
 	Reason   string
+	// Project, when set, scopes the grant to that workspace root; empty persists
+	// a global grant.
+	Project string
 }
 
 func newCommandPrefixGrantSet() *commandPrefixGrantSet {
@@ -63,11 +69,37 @@ func hasStringPrefix(values []string, prefix []string) bool {
 		return false
 	}
 	for index := range prefix {
+		// The last prefix token may carry a trailing "*" wildcard, matching any
+		// value that starts with the text before it (e.g. "test:*" covers
+		// "test:unit"). Every earlier token is matched exactly.
+		if index == len(prefix)-1 {
+			if stem, ok := trailingWildcardStem(prefix[index]); ok {
+				if !strings.HasPrefix(values[index], stem) {
+					return false
+				}
+				continue
+			}
+		}
 		if values[index] != prefix[index] {
 			return false
 		}
 	}
 	return true
+}
+
+// trailingWildcardStem reports whether token is a trailing-wildcard namespace
+// pattern ("<namespace>:*") and returns the non-empty stem before the "*". A
+// bare "*", plain token wildcard like "test*", or token without a trailing "*"
+// is not a wildcard pattern.
+func trailingWildcardStem(token string) (string, bool) {
+	if !strings.HasSuffix(token, "*") {
+		return "", false
+	}
+	stem := strings.TrimSuffix(token, "*")
+	if stem == "" || !strings.HasSuffix(stem, ":") {
+		return "", false
+	}
+	return stem, true
 }
 
 func NormalizeCommandPrefix(prefix []string) ([]string, bool) {
@@ -83,6 +115,18 @@ func NormalizeCommandPrefix(prefix []string) ([]string, bool) {
 		return nil, false
 	}
 	return cleaned, true
+}
+
+// commandPrefixTokenIsWildcard reports whether the token at index is the
+// last-token trailing wildcard that hasStringPrefix honors. A wildcard is only
+// valid on the LAST token and never on a lone launcher token (index 0 with no
+// exact tokens ahead of it), so it can never widen the command name itself.
+func commandPrefixTokenIsWildcard(prefix []string, index int) bool {
+	if index != len(prefix)-1 || index == 0 {
+		return false
+	}
+	_, ok := trailingWildcardStem(prefix[index])
+	return ok
 }
 
 func ValidCommandPrefix(prefix []string) bool {
@@ -143,7 +187,16 @@ func unsafeCommandPrefix(prefix []string) bool {
 	if len(prefix) == 0 {
 		return true
 	}
-	for _, part := range prefix {
+	for index, part := range prefix {
+		// A valid last-token wildcard ("stem*") is checked on its stem, so the
+		// trailing "*" itself is not treated as an unsafe glob character.
+		if commandPrefixTokenIsWildcard(prefix, index) {
+			stem, _ := trailingWildcardStem(part)
+			if unsafeCommandPrefixPart(stem) {
+				return true
+			}
+			continue
+		}
 		if unsafeCommandPrefixPart(part) {
 			return true
 		}

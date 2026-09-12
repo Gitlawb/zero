@@ -302,10 +302,11 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	permissionText := transcriptText(next.transcript)
 	for _, want := range []string{
 		"Permissions",
-		"ask permissions",
+		"ask every time permissions",
 		"1 persistent grant",
 		"State",
-		"mode  ask",
+		"mode     ask",
+		"label    Ask every time",
 		"Grants",
 		"bash [allow]",
 		"[REDACTED]",
@@ -332,9 +333,10 @@ func TestPermissionsCommandCardHandlesNilStoreAndEmptyGrants(t *testing.T) {
 	nilStore := model{permissionMode: agent.PermissionModeAuto}.permissionsText()
 	for _, want := range []string{
 		"Permissions",
-		"auto permissions",
+		"auto-approve safe actions permissions",
 		"grants unavailable",
-		"mode  auto",
+		"mode     auto",
+		"label    Auto-approve safe actions",
 		"persistent grants: unavailable",
 	} {
 		assertContains(t, nilStore, want)
@@ -348,9 +350,10 @@ func TestPermissionsCommandCardHandlesNilStoreAndEmptyGrants(t *testing.T) {
 	emptyText := model{permissionMode: agent.PermissionModeAsk, sandboxStore: store}.permissionsText()
 	for _, want := range []string{
 		"Permissions",
-		"ask permissions",
+		"ask every time permissions",
 		"no persistent grants",
-		"mode  ask",
+		"mode     ask",
+		"label    Ask every time",
 		"none",
 	} {
 		assertContains(t, emptyText, want)
@@ -361,9 +364,10 @@ func TestPermissionsCommandCardHandlesNilStoreAndEmptyGrants(t *testing.T) {
 	errText := model{permissionMode: agent.PermissionModeAsk}.permissionsTextWithStore(errStore)
 	for _, want := range []string{
 		"Permissions",
-		"ask permissions",
+		"ask every time permissions",
 		"grants error",
-		"mode  ask",
+		"mode     ask",
+		"label    Ask every time",
 		"error: storage failure",
 	} {
 		assertContains(t, errText, want)

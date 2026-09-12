@@ -33,6 +33,14 @@ func TestResolvePermissionModeNeverWidens(t *testing.T) {
 	if got := resolvePermissionMode(Policy{PermissionMode: permissionModeUnsafe}, Definition{PermissionMode: permissionModeAuto}); got != permissionModeAuto {
 		t.Fatalf("unsafe parent + auto def = %q, want auto (stricter honored)", got)
 	}
+	// New canonical modes keep their intended order: auto-classifier can delegate
+	// to workspace-auto, but workspace-auto cannot widen into auto-classifier.
+	if got := resolvePermissionMode(Policy{PermissionMode: permissionModeAutoClassifier}, Definition{PermissionMode: permissionModeWorkspaceAuto}); got != permissionModeWorkspaceAuto {
+		t.Fatalf("auto-classifier parent + workspace-auto def = %q, want workspace-auto", got)
+	}
+	if got := resolvePermissionMode(Policy{PermissionMode: permissionModeWorkspaceAuto}, Definition{PermissionMode: permissionModeAutoClassifier}); got != permissionModeWorkspaceAuto {
+		t.Fatalf("workspace-auto parent + auto-classifier def = %q, want workspace-auto", got)
+	}
 }
 
 func TestTeamAdmitAndQueue(t *testing.T) {

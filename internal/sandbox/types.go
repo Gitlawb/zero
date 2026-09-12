@@ -218,6 +218,11 @@ type Decision struct {
 	// grant-authorized allow so a prompt tool runs without a separately-recorded
 	// PermissionGranted.
 	AutoAllowed bool `json:"autoAllowed,omitempty"`
+	// TouchesProtectedMetadata marks a write whose target is under protected
+	// workspace metadata (.git/**, .zero/**, .agents/**). Such writes deliberately
+	// stay explicit prompts; callers use this so autonomy layers (e.g. the
+	// auto-classifier) never auto-approve a change to that control plane.
+	TouchesProtectedMetadata bool `json:"touchesProtectedMetadata,omitempty"`
 }
 
 type Risk struct {
