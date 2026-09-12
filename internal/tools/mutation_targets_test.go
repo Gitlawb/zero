@@ -116,3 +116,36 @@ func TestStripPatchPrefixStripsOnlyOne(t *testing.T) {
 		t.Fatalf("expected [b/foo.txt], got %v", got)
 	}
 }
+
+func TestApplyPatchRejectsDisagreeingExecutorOperationPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch string
+	}{
+		{
+			name: "delete header disagrees with diff git",
+			patch: "diff --git a/decoy.txt b/decoy.txt\n" +
+				"deleted file mode 100644\n" +
+				"--- a/secret.txt\n" +
+				"+++ /dev/null\n" +
+				"@@ -1 +0,0 @@\n" +
+				"-secret\n",
+		},
+		{
+			name: "unmatched a b prefixes",
+			patch: "diff --git a/secret.txt secret.txt\n" +
+				"--- a/secret.txt\n" +
+				"+++ secret.txt\n" +
+				"@@ -1 +1 @@\n" +
+				"-secret\n" +
+				"+changed\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepared, err := prepareApplyPatchArguments(map[string]any{"patch": tc.patch})
+			if err == nil {
+				t.Fatalf("prepare patch = %#v, want disagreement error", prepared)
+			}
+		})
+	}
+}
