@@ -543,9 +543,9 @@ func DroppedContentSummary(content []Content) string {
 // returns many individually valid images must not retain all of them in
 // Result.Images. Once the next valid image would exceed the remaining
 // budget it is skipped; a later smaller image may still fit. Later image
-// payloads are not decoded once remaining is zero or the count cap is reached.
-// A leftover residue still fully decodes the next candidate before the length
-// check rejects it.
+// payloads are not decoded once remaining is zero, the count cap is reached,
+// or maxInspectedImages candidates have been inspected. Within that inspection
+// limit, a leftover residue still permits later smaller images to fit.
 func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
 	images, _ := forwardImages(content)
 	return images
@@ -572,20 +572,26 @@ var decodeImageBase64 = base64.StdEncoding.DecodeString
 // Bound provider content-block overhead independently of decoded image size.
 const maxForwardedImages = 16
 
+// Bound decode work even when invalid or oversized-for-the-residue candidates
+// do not consume the forwarding budgets.
+const maxInspectedImages = 32
+
 func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
 	disp := make([]itemDisp, len(content))
 	var images []zeroruntime.ImageBlock
 	remaining := imageinput.MaxImageBytes
+	inspected := 0
 	for i, item := range content {
 		if item.Type == "text" {
 			disp[i] = dispText
 			continue
 		}
 		if item.Type == "image" {
-			if remaining == 0 || len(images) >= maxForwardedImages {
+			if remaining == 0 || len(images) >= maxForwardedImages || inspected >= maxInspectedImages {
 				disp[i] = dispUninspected
 				continue
 			}
+			inspected++
 			if image, ok := imageBlockFromContent(item); ok {
 				if len(image.Data) <= remaining {
 					images = append(images, image)

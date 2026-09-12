@@ -3496,7 +3496,7 @@ func toolResultImageMessage(result ToolResult, options Options) (zeroruntime.Mes
 	if !modelAcceptsToolImages(options) {
 		return zeroruntime.Message{
 			Role:    zeroruntime.MessageRoleUser,
-			Content: "Image output from " + label + " was not sent because the current model does not support image input.",
+			Content: "Image output from " + label + " was not sent because the current model does not support image input. Switch to a vision-capable model before retrying image delivery, including any images skipped by the tool's image budget.",
 		}, true
 	}
 	return zeroruntime.Message{
