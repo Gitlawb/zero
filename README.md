@@ -26,7 +26,7 @@ zero exec --output-format stream-json < turns.jsonl
 ## Why Zero
 
 - **Use the model you want.** Bring OpenAI, Anthropic, Gemini, Groq, OpenRouter,
-  DeepSeek, Mistral, xAI, Qwen, Kimi, GitHub Models, Ollama, LM Studio, or any
+  DeepSeek, Mistral, xAI, Qwen, Kimi, GitHub Models, Ollama, LM Studio, Atomic Chat, or any
   OpenAI-/Anthropic-compatible endpoint.
 - **Stay in control.** File writes, shell commands, network access, and
   out-of-workspace writes go through Zero's permission and sandbox policy.
@@ -190,8 +190,12 @@ zero providers add custom-openai-compatible \
   --set-active
 ```
 
-For local models, run Ollama or LM Studio and then use `zero setup` or
-`zero providers detect`.
+For local models, run Ollama, LM Studio, or the [Atomic Chat](https://atomic.chat)
+desktop app, then use `zero setup` or `zero providers detect`. For Atomic Chat,
+load a model and enable its local OpenAI-compatible API (default
+`http://127.0.0.1:1337/v1`). Choose `atomic-chat-local`; detection includes the
+loaded model ID in the add command. If no usable ID is discovered, load a model
+and retry. Model IDs requiring shell-specific quoting use interactive setup.
 
 ## Daily Use
 
@@ -280,6 +284,19 @@ zero sandbox grants list
 
 Zero includes local file/search/edit/shell tools, `web_fetch` for public URLs,
 and MCP support for additional tools.
+
+`web_fetch` refuses loopback, private and other special-use addresses: it checks
+the URL before asking permission, resolves the host, and dials the address it
+validated so a name cannot resolve to something else in between.
+
+If `HTTP_PROXY`/`HTTPS_PROXY` is set, `web_fetch` and the provider connectivity
+probe use it, and that last step changes: the proxy is dialed and the target
+hostname is sent to it, so the proxy decides which address the request actually
+reaches. The URL is still checked and resolved locally first, but a proxy that
+answers differently can reach a private service. A forward proxy already sees
+and can rewrite every request through it, so this is the trust you accept by
+configuring one. Leave the variables unset for the checks to be enforced end to
+end.
 
 For local dev servers, use shell commands such as `curl` through `exec_command`
 so the normal sandbox and permission policy applies. Long-running commands stay
