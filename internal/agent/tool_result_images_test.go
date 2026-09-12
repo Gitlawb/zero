@@ -10,6 +10,24 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
+func TestNonVisionImageNoticeQualifiesBudgetRecovery(t *testing.T) {
+	result := ToolResult{
+		Name:   "mcp_screenshot",
+		Output: "One image exceeded this result's remaining image budget. Retrying with fewer images can recover this payload.",
+		Images: []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("image")}},
+	}
+	notice, ok := toolResultImageMessage(result, Options{
+		SupportsVision: func(string) bool { return false },
+	})
+	if !ok || len(notice.Images) != 0 {
+		t.Fatal("non-vision delivery must produce a text-only notice")
+	}
+	if !strings.Contains(notice.Content, "Switch to a vision-capable model before retrying") ||
+		!strings.Contains(notice.Content, "budget") {
+		t.Fatalf("notice does not qualify budget recovery: %s", notice.Content)
+	}
+}
+
 // imageTool returns a tool result carrying an image, the way a screenshot tool
 // should be able to.
 type imageTool struct {

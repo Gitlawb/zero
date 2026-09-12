@@ -569,6 +569,44 @@ func TestImageCountBudgetPreservesTextAndSkipsFurtherDecoding(t *testing.T) {
 	}
 }
 
+func TestImageInspectionBudgetBoundsRejectedCandidates(t *testing.T) {
+	// Use the decoder seam to exercise accounting without allocating a large
+	// payload for every rejected candidate.
+	previous := decodeImageBase64
+	decodes := 0
+	large, _ := previous(paddedPNGBase64(8 * 1024 * 1024))
+	rejected, _ := previous(paddedPNGBase64(3 * 1024 * 1024))
+	decodeImageBase64 = func(string) ([]byte, error) {
+		decodes++
+		if decodes == 1 {
+			return large, nil
+		}
+		return rejected, nil
+	}
+	t.Cleanup(func() { decodeImageBase64 = previous })
+	content := make([]Content, 40)
+	for i := range content {
+		content[i] = Content{Type: "image", MimeType: "image/png", Data: tinyPNGBase64}
+	}
+	content = append(content, Content{Type: "text", Text: "trailing text"})
+	images, disp := forwardImages(content)
+	if decodes != 32 || len(images) != 1 {
+		t.Fatalf("got %d decodes and %d forwarded images, want 32 and 1", decodes, len(images))
+	}
+	for i := 1; i < 40; i++ {
+		want := dispBudgetExceeded
+		if i >= 32 {
+			want = dispUninspected
+		}
+		if disp[i] != want {
+			t.Errorf("disposition[%d] = %v, want %v", i, disp[i], want)
+		}
+	}
+	if disp[40] != dispText {
+		t.Fatal("inspection limit discarded trailing text")
+	}
+}
+
 func BenchmarkForwardImagesFourHalfBudget(b *testing.B) {
 	payload := paddedPNGBase64(imageinput.MaxImageBytes / 2)
 	content := []Content{
