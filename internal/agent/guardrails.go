@@ -1034,7 +1034,7 @@ func hasUnexemptedSubjectElidedInability(sentence string, after int) bool {
 	return false
 }
 
-var subjectElidedMissedWorkPattern = regexp.MustCompile(`^never\s+(?:applied|built|changed|completed|deployed|edited|finished|implemented|migrated|modified|published|ran|reviewed|tested|validated|verified|wrote)\b`)
+var subjectElidedMissedWorkPattern = regexp.MustCompile(`^(?:never|did\s+not|didn't)\s+[[:alpha:]][[:alnum:]_-]*\b`)
 
 // subjectElidedFailure finds the failure predicate after a coordinating
 // connector. The subject may be inherited from the first clause and ordinary
@@ -1287,7 +1287,7 @@ var strongAbsenceObjects = []string{
 // absenceQualifiers sit between "any" and the object without changing it.
 var absenceQualifiers = []string{
 	"remaining", "other", "further", "more", "additional", "obvious", "such",
-	"outstanding", "new", "existing", "actual", "real", "clear", "direct",
+	"outstanding", "leftover", "new", "existing", "actual", "real", "clear", "direct",
 }
 
 // strongAbsence reports whether tail is an "any"-family absence whose OBJECT
@@ -1435,26 +1435,6 @@ var consequenceBoundaries = []string{
 	" because ", " since ", "; ", ": ", " - ", " -- ", " and ", ", ",
 }
 
-func explicitConsequenceBoundary(boundary string) bool {
-	return strings.HasPrefix(boundary, ";") ||
-		strings.Contains(boundary, " so ") || strings.Contains(boundary, " but ") ||
-		strings.Contains(boundary, "therefore") || strings.Contains(boundary, "leaving") ||
-		strings.Contains(boundary, "because") || strings.Contains(boundary, "since")
-}
-
-func hasExplicitConsequenceBoundary(sentence string, stemEnd int) bool {
-	if stemEnd < 0 || stemEnd >= len(sentence) {
-		return false
-	}
-	tail := sentence[stemEnd:]
-	for _, boundary := range consequenceBoundaries {
-		if explicitConsequenceBoundary(boundary) && strings.Contains(tail, boundary) {
-			return true
-		}
-	}
-	return false
-}
-
 // reportedConsequence returns an asserted outcome after one matched inability.
 // Separators before the stem are irrelevant, and weak separators inside a
 // `that ...` negated proposition remain part of what was not found. Explicit
@@ -1472,7 +1452,10 @@ func reportedConsequence(sentence string, stemEnd int) string {
 		if index < 0 {
 			continue
 		}
-		explicit := explicitConsequenceBoundary(boundary)
+		explicit := strings.HasPrefix(boundary, ";") ||
+			strings.Contains(boundary, " so ") || strings.Contains(boundary, " but ") ||
+			strings.Contains(boundary, "therefore") || strings.Contains(boundary, "leaving") ||
+			strings.Contains(boundary, "because") || strings.Contains(boundary, "since")
 		if thatAt >= 0 && index > thatAt && !explicit {
 			continue
 		}
@@ -1555,6 +1538,7 @@ var topicShiftMarkers = []string{
 }
 
 var affirmativeObservationConsequencePattern = regexp.MustCompile(`\b(?:(?:the\s+)?(?:cause|source|root\s+cause|value|setting|definition|registration|owner|result)\s+(?:is|was)\b|(?:the\s+)?concern\s+(?:does|did)\s+not\s+apply\b|(?:it|the\s+(?:issue|bug|problem|change|fix|guard))\s+(?:is|was|looks|remains)\s+(?:resolved|fixed|complete|completed|done|correct|valid|safe|neutral|unaffected)\b|(?:the\s+)?(?:fix|guard|check)\s+holds\b)`)
+var exhaustiveObservationEvidencePattern = regexp.MustCompile(`^after\s+(?:(?:[[:alpha:]][[:alnum:]_-]*ly)\s+)*(?:auditing|checking|examining|inspecting|reading|reviewing|searching|tracing|validating|verifying)\s+(?:every|all)\b`)
 
 // observationConsequenceIsAffirmative is deliberately an allow-list: an
 // unfamiliar consequence must not turn an admitted inability into success just
@@ -1562,6 +1546,7 @@ var affirmativeObservationConsequencePattern = regexp.MustCompile(`\b(?:(?:the\s
 // an explicit completed action or a bounded positive result of the observation.
 func observationConsequenceIsAffirmative(consequence string) bool {
 	return affirmativeObservationConsequencePattern.MatchString(consequence) ||
+		exhaustiveObservationEvidencePattern.MatchString(consequence) ||
 		fallbackOutcomeIsAffirmative(consequence)
 }
 
@@ -1571,19 +1556,16 @@ func observationConsequenceIsAffirmative(consequence string) bool {
 // This is the inverse of enumerating every synonym for work that did not land.
 func boundedObservationHasUnresolvedConsequence(claim inabilityClaim) bool {
 	consequence := strings.TrimSpace(reportedConsequence(claim.sentence, claim.stemAt+claim.stemLen))
-	if consequence != "" && hasExplicitConsequenceBoundary(claim.sentence, claim.stemAt+claim.stemLen) &&
-		carriesTheConsequence(consequence) &&
-		!observationConsequenceIsAffirmative(consequence) {
-		return true
-	}
-	if containsFailureConsequence(consequence) {
-		return true
+	if consequence != "" {
+		return carriesTheConsequence(consequence) &&
+			!observationConsequenceIsAffirmative(consequence)
 	}
 	if len(claim.blockedContext) <= len(claim.sentence) {
 		return false
 	}
 	next := strings.TrimSpace(claim.blockedContext[len(claim.sentence):])
-	return containsFailureConsequence(next)
+	return carriesTheConsequence(next) &&
+		!observationConsequenceIsAffirmative(next)
 }
 
 // countedLabelContent separates a counted markdown label from any content
