@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -365,16 +366,25 @@ func (defaultModelSwitchCompactionPolicy) BeforeModelSwitch(request modelSwitchC
 
 var modelSwitchCompactionGuard modelSwitchCompactionPolicy = defaultModelSwitchCompactionPolicy{}
 
-// sanitizeCardField strips the card protocol's separator bytes and
-// line-breaking controls from user-controlled values (titles can legally
-// contain anything --session-title was given), so a hostile or accidental
-// \x1f / newline / carriage return cannot shift fields, corrupt row geometry,
-// or leak control characters into the transcript.
+// sanitizeCardField strips the card protocol's separator byte and every
+// control rune from user-controlled values (titles can legally contain
+// anything --session-title was given, and a directory name can legally
+// contain an ESC byte on Unix). Line separators and tabs become spaces so
+// words stay apart; the remaining controls — ESC/CSI/OSC initiators, BEL, BS,
+// VT, NEL, NUL — are dropped outright, since any of them can repaint the
+// terminal or shift cells when the value lands in a rendered row.
 func sanitizeCardField(value string) string {
-	value = strings.ReplaceAll(value, sessionsCardFieldSep, " ")
-	value = strings.ReplaceAll(value, "\n", " ")
-	value = strings.ReplaceAll(value, "\r", " ")
-	return strings.ReplaceAll(value, "\x00", "")
+	var out strings.Builder
+	for _, r := range value {
+		switch {
+		case r == '\x1f' || r == '\n' || r == '\r' || r == '\t':
+			out.WriteRune(' ')
+		case unicode.IsControl(r):
+		default:
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }
 
 // relativeAge renders an RFC3339 timestamp as a short age ("2h ago"), falling

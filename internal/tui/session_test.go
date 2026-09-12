@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -1379,8 +1380,9 @@ func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
 	store := testSessionStore(t)
 	sess, err := store.Create(sessions.CreateInput{
 		Title:   "alpha\nbravo",
-		ModelID: "gpt\r5",
+		ModelID: "gpt\x1b[31m5",
 		Cwd:     "/repo",
+		Tag:     "side\x1b]0;x\achat",
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -1399,8 +1401,10 @@ func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
 		t.Fatalf("expected one picker item, got %#v", next.picker)
 	}
 	item := next.picker.items[0]
-	if strings.ContainsAny(item.Label+item.Detail, "\n\r") {
-		t.Fatalf("picker row must be single-line, got label=%q detail=%q", item.Label, item.Detail)
+	for _, r := range item.Label + item.Detail {
+		if unicode.IsControl(r) {
+			t.Fatalf("picker row leaked control rune %q: label=%q detail=%q", r, item.Label, item.Detail)
+		}
 	}
 }
 
