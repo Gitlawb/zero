@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -95,9 +96,12 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// Capture the prior content (before we replace it) so an overwrite can show a
 	// real diff; a fresh create stays "" and previews as all-additions.
 	priorContent := ""
+	priorReadOK := true
 	if existed {
 		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
 			priorContent = string(prev)
+		} else {
+			priorReadOK = false
 		}
 	}
 
@@ -114,6 +118,16 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// destination in place after publication would reintroduce partial writes.
 	formatting := maybeFormatWrittenFile(ctx, absolutePath, content)
 	content = formatting.Content
+	if existed {
+		current, rerr := os.ReadFile(absolutePath)
+		if rerr != nil || !priorReadOK || !bytes.Equal(current, []byte(priorContent)) {
+			return errorResult(fileConflictMessage(relativePath))
+		}
+	} else if _, serr := os.Stat(absolutePath); serr == nil {
+		return errorResult(fileConflictMessage(relativePath))
+	} else if !os.IsNotExist(serr) {
+		return errorResult("Error writing file " + relativePath + ": " + serr.Error())
+	}
 	cleanupWarning, err := committedWrite(absolutePath, []byte(content), 0o644)
 	if err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())

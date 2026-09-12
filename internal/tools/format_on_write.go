@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -139,6 +140,9 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 		return unformatted
 	}
 	dir := filepath.Dir(absolutePath)
+	if command[0] == "prettier" {
+		return formatWithPrettier(ctx, command[0], binaryPath, command[1:], absolutePath, writtenContent)
+	}
 	staging, err := os.CreateTemp(dir, ".zero-fmt-*"+ext)
 	if err != nil {
 		return unformatted
@@ -170,4 +174,46 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 		return unformatted
 	}
 	return formatOnWriteResult{Content: string(formatted), Formatter: command[0]}
+}
+
+// formatWithPrettier runs Prettier in stdin mode. Prettier is the one formatter
+// here whose behaviour depends on the file name rather than the file's
+// extension: it resolves .prettierrc from the file's directory and applies its
+// .prettierignore rules. Staging the bytes under ".zero-fmt-*.js" would hide
+// the real destination name from both, so the content travels on stdin while
+// --stdin-filepath carries the real path. The formatted bytes are read back
+// from stdout; Prettier is not asked to --write the staging file. Config
+// resolution still needs the working directory set to the destination's
+// directory. Any formatter failure (including an ignored path that yields no
+// usable stdout) falls back to writtenContent.
+func formatWithPrettier(ctx context.Context, formatterName, binaryPath string, formatterArgs []string, absolutePath, writtenContent string) formatOnWriteResult {
+	unformatted := formatOnWriteResult{Content: writtenContent}
+	arguments := make([]string, 0, len(formatterArgs)+2)
+	for _, arg := range formatterArgs {
+		if arg == "--write" {
+			continue
+		}
+		arguments = append(arguments, arg)
+	}
+	arguments = append(arguments, "--stdin-filepath", absolutePath)
+	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
+	defer cancel()
+	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
+	formatter.Dir = filepath.Dir(absolutePath)
+	formatter.Stdin = strings.NewReader(writtenContent)
+	var stdout bytes.Buffer
+	formatter.Stdout = &stdout
+	if err := formatter.Run(); err != nil {
+		unformatted.Formatter = formatterName
+		if errors.Is(formatCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			unformatted.TimedOut = true
+		}
+		return unformatted
+	}
+	if stdout.Len() == 0 && writtenContent != "" {
+		// A formatter that produced nothing for non-empty input (an ignored
+		// path on some CLI versions) must not publish an empty file.
+		return unformatted
+	}
+	return formatOnWriteResult{Content: stdout.String(), Formatter: formatterName}
 }
