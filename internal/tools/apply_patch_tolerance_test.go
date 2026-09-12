@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -751,6 +752,70 @@ func TestApplyPatchOperationsReportsWorkspaceRelativeCommittedPrefixUnderCwd(t *
 	}
 	if got := result.ChangedFiles; len(got) != 1 || got[0] != "sub/dir/first.txt" {
 		t.Fatalf("nested partial ChangedFiles = %#v", got)
+	}
+}
+
+func TestApplyPatchSeparatesVerifiedAndUnverifiedPartialPublications(t *testing.T) {
+	root := t.TempDir()
+	priorPublish := structuredPatchPublishNoReplace
+	structuredPatchPublishNoReplace = func(workspace *os.Root, source, target string, mode os.FileMode) (bool, error) {
+		if target != "uncertain.txt" {
+			return priorPublish(workspace, source, target, mode)
+		}
+		file, err := workspace.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode.Perm())
+		if err != nil {
+			return false, err
+		}
+		if _, err := file.WriteString("partial"); err != nil {
+			_ = file.Close()
+			return true, err
+		}
+		if err := file.Close(); err != nil {
+			return true, err
+		}
+		return true, errors.New("injected failure after partial publication")
+	}
+	t.Cleanup(func() { structuredPatchPublishNoReplace = priorPublish })
+
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Add File: verified.txt", "+verified",
+		"*** Add File: uncertain.txt", "+intended complete content",
+		"*** Add File: untouched.txt", "+untouched",
+		"*** End Patch", "",
+	}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+
+	if result.Status != StatusError {
+		t.Fatalf("partial publication status = %s, want error", result.Status)
+	}
+	for _, want := range []string{"already committed: verified.txt", "published but unverified: uncertain.txt"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("partial publication error must contain %q: %s", want, result.Output)
+		}
+	}
+	committedFragment := strings.SplitN(result.Output, "; published but unverified:", 2)[0]
+	if strings.Contains(committedFragment, "uncertain.txt") {
+		t.Fatalf("unverified path appears in committed fragment: %s", result.Output)
+	}
+	if got, want := result.ChangedFiles, []string{"verified.txt"}; !slices.Equal(got, want) {
+		t.Fatalf("ChangedFiles = %#v, want verified publications only %#v", got, want)
+	}
+	resolvedVerified, err := filepath.EvalSymlinks(filepath.Join(root, "verified.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.FileDiffs; len(got) != 1 || got[0].Path != resolvedVerified {
+		t.Fatalf("FileDiffs = %#v, want verified.txt only", got)
+	}
+	if got := mustReadTestFile(t, filepath.Join(root, "verified.txt")); got != "verified\n" {
+		t.Fatalf("verified publication = %q", got)
+	}
+	if got := mustReadTestFile(t, filepath.Join(root, "uncertain.txt")); got != "partial" {
+		t.Fatalf("unverified publication = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "untouched.txt")); !os.IsNotExist(err) {
+		t.Fatalf("later publication must remain untouched: %v", err)
 	}
 }
 

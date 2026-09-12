@@ -161,7 +161,6 @@ func applyPatchOperations(applyRoot, relativeRoot string, operations []structure
 	if err != nil {
 		result := errorResult("Error applying patch: " + err.Error())
 		result.ChangedFiles = changedFilesFromStructuredPatch(relativeRoot, applyOutcome.committed)
-		result.ChangedFiles = appendUniqueStructuredPatchPaths(result.ChangedFiles, relativeRoot, applyOutcome.incompletePaths)
 		result.FileDiffs = fileDiffsFromStructuredPatch(relativeRoot, applyOutcome.committed)
 		result.Redacted = structuredPatchContainsObfuscatedSecret(applyOutcome.committed)
 		result.Display = Display{Summary: result.Output, Kind: "diff", Preview: structuredPatchPreview(applyOutcome.committed)}
@@ -767,9 +766,22 @@ func applyStructuredPatchChanges(root *os.Root, relativeRoot string, changes []s
 		if err != nil {
 			forgetStructuredPatchFiles(tracker, changes)
 			committedPaths := changedFilesFromStructuredPatch(relativeRoot, outcome.committed)
-			committedPaths = appendUniqueStructuredPatchPaths(committedPaths, relativeRoot, outcome.incompletePaths)
-			if len(committedPaths) > 0 {
-				return outcome, fmt.Errorf("%w; patch was partially applied — already committed: %s; the remaining files are unchanged; re-read the committed files before retrying", err, strings.Join(committedPaths, ", "))
+			unverifiedPaths := appendUniqueStructuredPatchPaths(nil, relativeRoot, outcome.incompletePaths)
+			if len(committedPaths) > 0 || len(unverifiedPaths) > 0 {
+				parts := []string{"patch was partially applied"}
+				if len(committedPaths) > 0 {
+					parts = append(parts, "already committed: "+strings.Join(committedPaths, ", "))
+				}
+				if len(unverifiedPaths) > 0 {
+					parts = append(parts, "published but unverified: "+strings.Join(unverifiedPaths, ", "))
+				}
+				parts = append(parts, "the remaining files are unchanged")
+				if len(unverifiedPaths) > 0 {
+					parts = append(parts, "re-read the listed files before retrying")
+				} else {
+					parts = append(parts, "re-read the committed files before retrying")
+				}
+				return outcome, fmt.Errorf("%w; %s", err, strings.Join(parts, "; "))
 			}
 			return outcome, err
 		}
@@ -959,7 +971,7 @@ func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, conte
 		}
 	}
 	if createOnly {
-		return publishStructuredPatchNoReplace(root, tempName, target.relative, mode)
+		return structuredPatchPublishNoReplace(root, tempName, target.relative, mode)
 	}
 	if err := root.Rename(tempName, target.relative); err != nil {
 		return false, fmt.Errorf("writing %s: %w", target.relative, err)
@@ -970,6 +982,11 @@ func writeStructuredPatchFile(root *os.Root, target structuredPatchTarget, conte
 func publishStructuredPatchNoReplace(root *os.Root, source, target string, mode os.FileMode) (bool, error) {
 	return publishStructuredPatchNoReplaceWith(root, source, target, mode, root.Link)
 }
+
+// structuredPatchPublishNoReplace is a deterministic test seam for failures
+// after a create-only target has become visible. Production uses the atomic
+// no-replace publisher above.
+var structuredPatchPublishNoReplace = publishStructuredPatchNoReplace
 
 func publishStructuredPatchNoReplaceWith(root *os.Root, source, target string, mode os.FileMode, link func(string, string) error) (bool, error) {
 	if linkErr := link(source, target); linkErr == nil {
