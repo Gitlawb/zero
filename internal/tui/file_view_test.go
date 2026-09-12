@@ -1343,8 +1343,10 @@ func TestFileViewLifecycle_RapidResizeCoalesced(t *testing.T) {
 	}
 }
 
-// TestFileViewLifecycle_ThemeSwitchReloadsActiveView tests that selecting a theme
-// in production immediately triggers a reload command for the active file view.
+// TestFileViewLifecycle_ThemeSwitchReloadsActiveView tests that selecting a
+// registered theme in production immediately triggers a reload for the active
+// file view, and that the returned command structure actually delivers the
+// reloaded snapshot under the new cache generation.
 func TestFileViewLifecycle_ThemeSwitchReloadsActiveView(t *testing.T) {
 	defer applyTheme(themeDark, true)
 	resetFileViewCacheForTest()
@@ -1359,21 +1361,30 @@ func TestFileViewLifecycle_ThemeSwitchReloadsActiveView(t *testing.T) {
 	m.cwd = dir
 	m = testOpenFile(m, "theme_active.go")
 
-	// Trigger /theme light via command handling
-	cmdAction := parsedCommand{kind: commandTheme, text: "light"}
-	updated, reloadCmd := m.dispatchCommand(cmdAction)
+	generationBefore := defaultFileViewCache.generation()
+
+	// "dune" is a registered palette (unlike the retired "light" preference), so
+	// the dispatch clears the theme's palette and advances the cache generation.
+	cmdAction := parsedCommand{kind: commandTheme, text: "dune"}
+	updated, dispatchCmd := m.dispatchCommand(cmdAction)
 	m = updated.(model)
 
-	if reloadCmd == nil {
-		t.Fatal("expected reload command on active file view after theme change")
+	if dispatchCmd == nil {
+		t.Fatal("expected a command on the active file view after a valid theme change")
+	}
+	if generationAfter := defaultFileViewCache.generation(); generationAfter <= generationBefore {
+		t.Fatalf("valid theme switch must advance the cache generation: before=%d after=%d", generationBefore, generationAfter)
 	}
 
-	// Complete the reload
-	updated, _ = m.Update(reloadCmd())
-	m = updated.(model)
+	// dispatchCommand returns tea.Batch(noticeCmd, loadCmd); unwrap the batch so
+	// the load completion is delivered to Update instead of being dropped.
+	m = deliverCommandMessages(t, m, dispatchCmd)
 
-	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package theme") {
-		t.Fatalf("expected reloaded theme content, got: %s", plainRender(t, m.renderFileViewFull(80)))
+	if m.fileView.loading {
+		t.Fatal("active file view must leave the loading state after the reload completes")
+	}
+	if got := plainRender(t, m.renderFileViewFull(80)); !strings.Contains(got, "package theme") {
+		t.Fatalf("expected reloaded theme content, got: %s", got)
 	}
 	if m.fileView.loadedGen != defaultFileViewCache.generation() {
 		t.Fatalf("expected loadedGen %d, got %d", defaultFileViewCache.generation(), m.fileView.loadedGen)
@@ -3111,5 +3122,397 @@ func TestFileViewCacheFreshnessBySourceHash(t *testing.T) {
 	}
 	if stats := cache.stats(); stats.HighlightCalls != 2 {
 		t.Fatalf("HighlightCalls = %d, want 2 (hash mismatch must force a miss)", stats.HighlightCalls)
+	}
+}
+
+// deliverCommandMessages executes a tea.Cmd tree and feeds every produced
+// message back into the model through Update, unwrapping tea.BatchMsg so a
+// batched dispatch (notice + reload) reaches its load completion. Commands that
+// Update schedules in response are intentionally not followed.
+func deliverCommandMessages(t *testing.T, m model, cmd tea.Cmd) model {
+	t.Helper()
+	if cmd == nil {
+		return m
+	}
+	pending := []tea.Cmd{cmd}
+	for len(pending) > 0 {
+		current := pending[0]
+		pending = pending[1:]
+		if current == nil {
+			continue
+		}
+		msg := current()
+		if msg == nil {
+			continue
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			pending = append(pending, batch...)
+			continue
+		}
+		updated, _ := m.Update(msg)
+		m = updated.(model)
+	}
+	return m
+}
+
+// TestFileViewLifecycle_OversizedReplacementEvictsObsoleteEntry verifies that an
+// oversized replacement is still the displayed snapshot: the obsolete resident
+// entry is removed and cannot win the next cache lookup, and the oversized
+// admission is counted without being retained.
+func TestFileViewLifecycle_OversizedReplacementEvictsObsoleteEntry(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	name := "oversized_lifecycle.go"
+	filePath := filepath.Join(dir, name)
+	if err := os.WriteFile(filePath, []byte("package original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, name)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package original") {
+		t.Fatal("expected the seed file to be cached and displayed")
+	}
+	m = m.exitFileView()
+
+	// 4000 * 78 == 312000 bytes: inside the 1 MiB read budget, but the retained
+	// source plus its highlighted and rendered payload exceeds the cache budget.
+	line := "var a = 123; var b = 456; var c = 789; var d = 123; var e = 456; var f = 789;\n"
+	payload := strings.Repeat(line, 4000)
+	if len(payload) != 312000 {
+		t.Fatalf("test payload = %d bytes, want 312000", len(payload))
+	}
+	if err := os.WriteFile(filePath, []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	statsBefore := fileViewCacheStatsForTest()
+	m = testOpenFile(m, name)
+
+	displayed := plainRender(t, m.renderFileViewFull(80))
+	if strings.Contains(displayed, "package original") {
+		t.Fatal("the obsolete cached entry must not override the oversized replacement")
+	}
+	if !strings.Contains(displayed, "var a = 123") {
+		t.Fatal("the oversized replacement must be the displayed snapshot")
+	}
+	statsAfter := fileViewCacheStatsForTest()
+	if statsAfter.SkippedOversized <= statsBefore.SkippedOversized {
+		t.Fatalf("SkippedOversized must increase: before=%d after=%d", statsBefore.SkippedOversized, statsAfter.SkippedOversized)
+	}
+	defaultFileViewCache.mu.Lock()
+	_, resident := defaultFileViewCache.items[filePath]
+	defaultFileViewCache.mu.Unlock()
+	if resident {
+		t.Fatal("an oversized replacement must not remain resident")
+	}
+}
+
+// TestFileViewLifecycle_PendingRefreshPreservesViewport verifies that a pending
+// full-file reload keeps the reader's scroll position, and that completion
+// reconciles that position against the real body instead of leaving it at the
+// loading placeholder's zero height.
+func TestFileViewLifecycle_PendingRefreshPreservesViewport(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	name := "viewport.go"
+	var body strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&body, "line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.altScreen = true
+	m.width = 100
+	m.height = 30
+	m = testOpenFile(m, name)
+	if !m.fileView.snapshotReady {
+		t.Fatal("expected the initial full-file snapshot")
+	}
+
+	m.chatScrollOffset = 50
+	updated, batchCmd := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(model)
+	if batchCmd == nil {
+		t.Fatal("resize on an open full view must schedule a reload")
+	}
+	if !m.fileView.loading {
+		t.Fatal("reload should be pending after the resize")
+	}
+	if m.chatScrollOffset != 50 {
+		t.Fatalf("pending reload must preserve the reading position: got %d, want 50", m.chatScrollOffset)
+	}
+
+	m = deliverCommandMessages(t, m, batchCmd)
+	if m.fileView.loading {
+		t.Fatal("expected the reload to complete")
+	}
+	if m.chatScrollOffset != 50 {
+		t.Fatalf("completed reload must preserve the reading position: got %d, want 50", m.chatScrollOffset)
+	}
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(100)), "line 199") {
+		t.Fatal("expected the completed body to render the file tail")
+	}
+}
+
+// TestFileViewLifecycle_BTWPreservesParentLoadOwnership verifies that a parent
+// file load completing while a BTW conversation is visible is routed to the
+// hidden parent, so returning restores a settled snapshot rather than a stalled
+// "Loading…" view.
+func TestFileViewLifecycle_BTWPreservesParentLoadOwnership(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	name := "parent_view.go"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package parent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newBTWTestModel(t)
+	m.cwd = dir
+
+	// Open a full view but keep its load command pending in the parent.
+	m, parentLoadCmd := m.openFileView(name)
+	if parentLoadCmd == nil {
+		t.Fatal("expected a pending parent load command")
+	}
+	if !m.fileView.loading {
+		t.Fatal("parent view should be loading")
+	}
+
+	// Enter BTW; the hidden parent retains ownership of its pending load.
+	side, _ := m.handleBTWCommand("")
+	if !side.btw.active || side.btw.parent == nil {
+		t.Fatal("expected an active BTW conversation")
+	}
+
+	// The parent's load completes while BTW is visible. It must update the hidden
+	// parent, not the side surface.
+	updated, _ := side.Update(parentLoadCmd())
+	side = updated.(model)
+	if side.btw.parent == nil {
+		t.Fatal("BTW lost the parent snapshot")
+	}
+	if side.btw.parent.fileView.loading {
+		t.Fatal("parent load completion must settle the hidden parent's loading state")
+	}
+	if !side.btw.parent.fileView.snapshotReady {
+		t.Fatal("hidden parent must integrate its snapshot before returning")
+	}
+
+	restored, _ := side.leaveBTW()
+	if restored.fileView.loading {
+		t.Fatal("restored parent must not be stuck loading")
+	}
+	got := plainRender(t, restored.renderFileViewFull(80))
+	if !strings.Contains(got, "package parent") {
+		t.Fatalf("restored parent must render its snapshot, got: %s", got)
+	}
+	if strings.Contains(got, fileViewLoadingPlaceholder) {
+		t.Fatal("restored parent must not show the loading placeholder")
+	}
+}
+
+// TestFileViewLifecycle_RevisionMetadataBounded verifies that per-path revision
+// counters for never-cached paths stay bounded, and that retiring a revision
+// cannot make an older request appear current (ABA protection).
+func TestFileViewLifecycle_RevisionMetadataBounded(t *testing.T) {
+	dir := t.TempDir()
+	warm := filepath.Join(dir, "revision_warm.go")
+	if err := os.WriteFile(warm, []byte("package warm\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := newFileViewRenderCache(defaultFileViewCacheMaxEntries, defaultFileViewCacheMaxBytes)
+	oldRev := cache.invalidatePath(warm)
+	if _, err := cache.loadAndRender(warm, "revision_warm.go", 80, nil, "", cache.generation(), zeroTheme, oldRev, nil, 0); err != nil {
+		t.Fatalf("warm load: %v", err)
+	}
+
+	for i := 0; i < 10000; i++ {
+		cache.invalidatePath(filepath.Join(dir, fmt.Sprintf("never_cached_%d.go", i)))
+	}
+
+	cache.mu.Lock()
+	revisionCount := len(cache.pathRevisions)
+	epochFloor := cache.revEpochFloor
+	cache.mu.Unlock()
+	if revisionCount > fileViewMaxPathRevisions {
+		t.Fatalf("pathRevisions = %d, exceeds hard cap %d", revisionCount, fileViewMaxPathRevisions)
+	}
+	if revisionCount > cache.maxPathRevisions() {
+		t.Fatalf("pathRevisions = %d, exceeds policy bound %d", revisionCount, cache.maxPathRevisions())
+	}
+
+	if got := cache.requiredRevision(warm); got <= oldRev {
+		t.Fatalf("retired revision must not read as current: required=%d old=%d", got, oldRev)
+	}
+	if epochFloor <= oldRev {
+		t.Fatalf("epoch floor %d must advance past retired revision %d", epochFloor, oldRev)
+	}
+
+	// A request captured before the retirement must not reuse the still-resident
+	// entry; it has to re-render under the advanced authority.
+	highlightBefore := cache.stats().HighlightCalls
+	if _, err := cache.loadAndRender(warm, "revision_warm.go", 80, nil, "", cache.generation(), zeroTheme, oldRev, nil, 0); err != nil {
+		t.Fatalf("stale load: %v", err)
+	}
+	if highlightAfter := cache.stats().HighlightCalls; highlightAfter != highlightBefore+1 {
+		t.Fatalf("stale request must not commit a cache hit: HighlightCalls %d -> %d", highlightBefore, highlightAfter)
+	}
+}
+
+// TestFileViewLifecycle_TruncationStateEquivalence verifies that two versions
+// with identical size, timestamp, and retained source hash but a different
+// truncation status are not interchangeable: the clipped version keeps its
+// warning, and the warning disappears again when clipping stops.
+func TestFileViewLifecycle_TruncationStateEquivalence(t *testing.T) {
+	resetFileViewCacheForTest()
+
+	dir := t.TempDir()
+	name := "truncation_state.go"
+	filePath := filepath.Join(dir, name)
+	stamp := time.Unix(1700000000, 0)
+	fill := strings.Repeat("x", fileViewMaxLineBytes)
+
+	// Version A: CRLF-terminated, so the line is exactly at the limit and not clipped.
+	if err := os.WriteFile(filePath, []byte(fill+"\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filePath, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	first, err := defaultFileViewCache.loadAndRender(filePath, name, 80, nil, "", defaultFileViewCache.generation(), zeroTheme, 0, nil, 0)
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	if strings.Contains(plainRender(t, first), "truncated") {
+		t.Fatal("an unclipped line must not display a truncation warning")
+	}
+
+	// Version B: the same 4098 bytes and timestamp, but the physical line now
+	// exceeds the per-line display limit while the retained line and hash do not.
+	if err := os.WriteFile(filePath, []byte(fill+"Z\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filePath, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	second, err := defaultFileViewCache.loadAndRender(filePath, name, 80, nil, "", defaultFileViewCache.generation(), zeroTheme, 0, nil, 0)
+	if err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	if !strings.Contains(plainRender(t, second), "truncated") {
+		t.Fatal("a clipped replacement must display its truncation warning")
+	}
+
+	// Reverse: going back to the unclipped CRLF form must drop the warning.
+	if err := os.WriteFile(filePath, []byte(fill+"\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filePath, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	third, err := defaultFileViewCache.loadAndRender(filePath, name, 80, nil, "", defaultFileViewCache.generation(), zeroTheme, 0, nil, 0)
+	if err != nil {
+		t.Fatalf("third load: %v", err)
+	}
+	if strings.Contains(plainRender(t, third), "truncated") {
+		t.Fatal("a previously cached warning must disappear when clipping stops")
+	}
+}
+
+// TestFileViewLifecycle_VariantAccountingConsistency verifies that same-key
+// variant rewrites do not charge the key twice, and that a detached or purged
+// entry cannot leak bytes into the cache's retained counter.
+func TestFileViewLifecycle_VariantAccountingConsistency(t *testing.T) {
+	// Same-key replacement accounts for the difference, not the key again.
+	entry := &fileViewCachedEntry{}
+	key := "80:"
+	current := strings.Repeat("a", 100)
+	if delta := entry.putRender(key, current); delta != len(key)+len(current) {
+		t.Fatalf("initial put delta = %d, want %d", delta, len(key)+len(current))
+	}
+	for i := 0; i < 10; i++ {
+		next := strings.Repeat("b", 40+i)
+		delta := entry.putRender(key, next)
+		if want := len(next) - len(current); delta != want {
+			t.Fatalf("same-key rewrite %d delta = %d, want %d", i, delta, want)
+		}
+		current = next
+	}
+	if got, want := entry.byteSize(), len(key)+len(current); got != want {
+		t.Fatalf("entry byteSize = %d, want %d", got, want)
+	}
+
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "variant_accounting.go")
+	if err := os.WriteFile(path, []byte("package accounting\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache := newFileViewRenderCache(64, defaultFileViewCacheMaxBytes)
+	if _, err := cache.loadAndRender(path, "variant_accounting.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
+		t.Fatalf("seed load: %v", err)
+	}
+
+	cache.mu.Lock()
+	elem := cache.items[path]
+	retainedBefore := cache.retained
+	var residentBytes int
+	if elem != nil {
+		residentBytes = elem.Value.(*fileViewCachedEntry).byteSize()
+	}
+	cache.mu.Unlock()
+	if elem == nil {
+		t.Fatal("expected a resident entry to seed the accounting check")
+	}
+	if retainedBefore != residentBytes {
+		t.Fatalf("retained = %d, want resident payload %d", retainedBefore, residentBytes)
+	}
+
+	// Evicting the entry detaches it without destroying the value the caller holds.
+	cache.evictPath(path)
+	cache.mu.Lock()
+	afterEvict := cache.retained
+	_, resident := cache.items[path]
+	cache.mu.Unlock()
+	if afterEvict != 0 || resident {
+		t.Fatalf("eviction must release and detach the entry: retained=%d resident=%v", afterEvict, resident)
+	}
+	cache.commitRenderPut(elem.Value.(*fileViewCachedEntry), "80:detached", strings.Repeat("z", 512))
+	cache.mu.Lock()
+	polluted := cache.retained
+	_, readmitted := cache.items[path]
+	cache.mu.Unlock()
+	if polluted != afterEvict {
+		t.Fatalf("a detached entry must not charge retained: %d -> %d", afterEvict, polluted)
+	}
+	if readmitted {
+		t.Fatal("a detached entry must not be re-admitted by commitRenderPut")
+	}
+
+	// A purge detaches every entry the same way.
+	if _, err := cache.loadAndRender(path, "variant_accounting.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	cache.mu.Lock()
+	purged := cache.items[path].Value.(*fileViewCachedEntry)
+	cache.mu.Unlock()
+	cache.clear()
+	cache.commitRenderPut(purged, "80:purged", strings.Repeat("y", 512))
+	cache.mu.Lock()
+	retainedAfterPurge := cache.retained
+	purgedItems := len(cache.items)
+	cache.mu.Unlock()
+	if retainedAfterPurge != 0 || purgedItems != 0 {
+		t.Fatalf("a purged entry must not charge retained: retained=%d items=%d", retainedAfterPurge, purgedItems)
 	}
 }

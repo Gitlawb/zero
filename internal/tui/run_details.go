@@ -36,10 +36,6 @@ type runDetailsLayout struct {
 	fileStart int
 }
 
-func (m model) runDetailsLines(width int) []string {
-	return m.runDetailsLayout(width).lines
-}
-
 func (m model) runDetailsLayout(width int) runDetailsLayout {
 	var out runDetailsLayout
 	out.fileStart = -1

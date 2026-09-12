@@ -1375,11 +1375,12 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 }
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var resizeCmd tea.Cmd
 	if size, ok := msg.(tea.WindowSizeMsg); ok {
-		m = m.resizeBTWParent(size)
+		m, resizeCmd = m.resizeBTWParent(size)
 	}
 	if next, cmd, routed := m.routeBTWParentMessage(msg); routed {
-		return next, cmd
+		return next, batchCommands(cmd, resizeCmd)
 	}
 	switch msg := msg.(type) {
 	case fileViewLoadedMsg:
@@ -2485,9 +2486,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.fileView.active && m.fileView.mode == fileViewFull {
 			var cmd tea.Cmd
 			m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
-			return m, tea.Batch(m.ensureSpinnerTick(), cmd)
+			return m, batchCommands(m.ensureSpinnerTick(), cmd, resizeCmd)
 		}
-		return m, m.ensureSpinnerTick()
+		return m, batchCommands(m.ensureSpinnerTick(), resizeCmd)
 	case permissionRequestMsg:
 		// The agent goroutine that raised this request is BLOCKED waiting on the
 		// decision callback, so every branch below must resolve it exactly once —
@@ -3738,6 +3739,15 @@ func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
 // so the absolute view holds; at the bottom (offset 0) it follows normally. Only the
 // scrolled-up path renders the body, so the common case stays cheap.
 func (m model) syncChatScroll() model {
+	// A pending full-file reload temporarily renders a one-line loading
+	// placeholder. Measuring it would clamp the reader's offset to 0 and lose
+	// their place, so hold the preserved offset until handleFileViewLoaded
+	// reconciles it against the real body.
+	if m.altScreen && m.fileView.active && m.fileView.mode == fileViewFull &&
+		m.fileView.loading && m.fileView.preservedScrollOffset > 0 {
+		m.chatScrollOffset = m.fileView.preservedScrollOffset
+		return m
+	}
 	if !m.altScreen || m.chatScrollOffset <= 0 {
 		// At the bottom (or inline mode): follow the tail; reset the pin baseline.
 		m.chatBodyLines = 0
@@ -4597,10 +4607,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	case pickerSession:
 		// item.Value is the chosen session id; handleResumeCommand hydrates it and
 		// rebuilds the transcript (returning "" on success, an error note on failure).
+		previousSessionID := m.activeSession.SessionID
 		text := ""
 		m, text = m.handleResumeCommand(item.Value)
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		}
+		if m.activeSession.SessionID != previousSessionID {
+			m, cmd = m.refreshFileViewMarkers()
 		}
 	case pickerSkill:
 		// Fill the composer with "/name " so the user adds their request before
@@ -4770,7 +4784,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		if m.loopActive() {
 			m = m.appendLoopSystem(m.loopFooterSummary() + " still running — /loop stop all to end them.")
 		}
-		return m, nil
+		var clearCmd tea.Cmd
+		m, clearCmd = m.refreshFileViewMarkers()
+		return m, clearCmd
 	case commandNew:
 		// A fresh session mid-run would strand the in-flight turn's events; make the
 		// user cancel first. Idle, /new saves the current session (already on disk)
@@ -4779,7 +4795,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "A run is in progress. Press Esc to cancel it first, then /new."})
 			return m, nil
 		}
-		return m.startNewSession(), nil
+		next := m.startNewSession()
+		var newCmd tea.Cmd
+		next, newCmd = next.refreshFileViewMarkers()
+		return next, newCmd
 	case commandBTW:
 		return m.handleBTWCommand(command.text)
 	case commandLoop:
@@ -4912,6 +4931,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
 		return m, nil
 	case commandResume:
+		previousSessionID := m.activeSession.SessionID
 		if m.pending {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
@@ -4939,7 +4959,11 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		} else if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
-		return m, nil
+		var resumeCmd tea.Cmd
+		if m.activeSession.SessionID != previousSessionID {
+			m, resumeCmd = m.refreshFileViewMarkers()
+		}
+		return m, resumeCmd
 	case commandRename:
 		if title := strings.TrimSpace(command.text); title != "" {
 			return m.renameActiveSession(title), nil
