@@ -120,8 +120,10 @@ func PublishProviderCredential(path string, exactName string, key string) error 
 	return err
 }
 
-// ForgetProviderKey removes a provider's stored API key from the credential store,
-// reporting whether one existed. Used by the lifecycle "remove key" / auth logout.
+// ForgetProviderKey removes a provider's stored API key and publishes the default
+// user config with every apiKeyStored marker sharing its normalized credential
+// identity cleared, in one transaction. It reports whether a credential existed.
+// A missing config or invalid persisted provider names skip config publication.
 func ForgetProviderKey(provider string) (bool, error) {
 	path, err := DefaultUserConfigPath()
 	if err != nil {
