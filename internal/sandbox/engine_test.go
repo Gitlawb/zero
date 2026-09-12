@@ -876,3 +876,40 @@ func TestEvaluateAllowsWritesInsideDefaultTempRoot(t *testing.T) {
 		t.Fatalf("temp-root write risk=%v, must not be out_of_workspace", decision.Risk)
 	}
 }
+
+// A FRAMEWORK BUILD KEEPS THE SEPARATE NETWORK DECISION AFTER A SHELL GRANT.
+//
+// The analyzer-level assertion says Network=true; this pins the consumer that
+// matters. With bash allowed for ordinary commands, `next build` and its
+// siblings must still come back as the network prompt, exactly as `curl` does,
+// because on the platforms where the approval gate is the network boundary this
+// prompt is the only thing between an ordinary grant and egress from build-time
+// repository code. Reported by gnanam1990.
+func TestEngineShellGrantDoesNotRunAFrameworkBuildWithoutTheNetworkDecision(t *testing.T) {
+	store, err := NewGrantStore(StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedSandboxTime("2026-09-12T06:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	if _, err := store.Grant(GrantInput{ToolName: "bash", Decision: GrantAllow, Reason: "regular commands"}); err != nil {
+		t.Fatalf("Grant bash allow returned error: %v", err)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy(), Store: store})
+	for _, command := range []string{"next build", "vite build --mode production", "nuxt generate", "astro check"} {
+		decision := engine.Evaluate(context.Background(), Request{
+			ToolName:       "bash",
+			SideEffect:     SideEffectShell,
+			Permission:     PermissionPrompt,
+			PermissionMode: PermissionModeAsk,
+			Args:           map[string]any{"command": command},
+		})
+		if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+			t.Errorf("%q with a bash allow grant = %#v, want the network prompt", command, decision)
+		}
+		if decision.GrantMatched {
+			t.Errorf("%q: the network prompt must not report the bash allow grant as matched: %#v", command, decision)
+		}
+	}
+}

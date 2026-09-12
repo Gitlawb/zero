@@ -255,9 +255,19 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 		return true
 	}
 	words := literalWordTexts(args)
-	// localServerPrograms deliberately does NOT land here. Binding a port is not
-	// egress, and counting it as such is what made `python -m http.server` ask
-	// for network approval to serve files out of the workspace.
+	// A framework CLI stays conservative for Network whatever its subcommand.
+	// Binding a port is not egress, but next, vite, nuxt and astro execute the
+	// repository's config, plugins and application code during a build as
+	// surely as during a serve, and nothing in the subcommand name proves that
+	// code makes no requests. On Windows the approval gate IS the network
+	// boundary, so an ordinary shell grant must not run `next build` without
+	// the separate network decision. LocalServer alone carries the serve/build
+	// distinction (commandRunsLocalServer); `python -m http.server` is decided
+	// by pythonModuleUsesNetwork below, not by this inventory. Reported by
+	// @gnanam1990.
+	if localServerPrograms[prog] {
+		return true
+	}
 	if pythonLauncherPrograms[prog] {
 		return pythonModuleUsesNetwork(words)
 	}
@@ -419,17 +429,24 @@ func frameworkSubcommandRunsLocalServer(prog string, words []string) bool {
 	case "http-server", "serve":
 		return true
 	}
-	switch firstSubcommand(words, nil) {
-	case "dev", "start", "serve", "preview":
-		return true
-	case "build", "optimize", "generate", "check", "lint", "export":
-		return false
+	// The subcommand is not simply the first operand: a global option before it
+	// consumes the next word (`vite --config vite.prod.ts build`), and reading
+	// that value as the subcommand made the build fall through to the bare-vite
+	// rule and count as a server. Walk the positions a subcommand can occupy,
+	// the same way the package managers do; see subcommandPositions.
+	operands, eatable := commandOperands(words)
+	for index := 0; index < subcommandPositions(operands, eatable); index++ {
+		switch operands[index] {
+		case "dev", "start", "serve", "preview":
+			return true
+		case "build", "optimize", "generate", "check", "lint", "export":
+			return false
+		}
 	}
-	// No recognized subcommand: either a bare invocation, or firstSubcommand
-	// landed on an option VALUE, since it skips flags but not what they consume
-	// (`vite --host 127.0.0.1` yields "127.0.0.1"). Both mean "no subcommand was
-	// given", so fall back to what the program does when run bare: vite starts
-	// its dev server, while the multi-command frameworks print help.
+	// No recognized subcommand at any position it could occupy: a bare
+	// invocation, or only option values. Fall back to what the program does when
+	// run bare: vite starts its dev server, while the multi-command frameworks
+	// print help.
 	return prog == "vite"
 }
 

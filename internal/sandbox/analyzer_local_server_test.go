@@ -43,13 +43,39 @@ func TestLocalServerDistinguishesServingFromBuilding(t *testing.T) {
 	}
 }
 
-// The point of the distinction is that binding is not egress, so neither form
-// may be mistaken for network access. A build that genuinely fetches is caught
-// by the network rules for its own program, not by this flag.
-func TestBuildingDoesNotCountAsNetworkEgress(t *testing.T) {
-	for _, command := range []string{"next build", "vite build"} {
-		if AnalyzeCommand(command).Network {
-			t.Errorf("%q was classified as network egress; compiling locally is not", command)
+// BUILDING IS NOT SERVING, BUT IT IS STILL NETWORK.
+//
+// The serve/build distinction lives in LocalServer alone. Network stays
+// conservative for the whole framework inventory, because next, vite, nuxt and
+// astro run the repository config, plugins and application code during a build
+// as surely as during a serve, and the subcommand name cannot prove that code
+// makes no requests. An earlier head of this branch let build-like spellings
+// drop to Network=false, and on Windows the approval gate IS the network
+// boundary, so an ordinary shell grant would have run them without the separate
+// network decision main applies. Reported by gnanam1990.
+func TestFrameworkBuildsStayNetworkWithoutBeingServers(t *testing.T) {
+	for _, command := range []string{
+		"next build", "next lint", "next",
+		"vite build", "vite optimize",
+		"nuxt generate", "nuxt build",
+		"astro check", "astro build",
+		// Option-bearing forms: a more precise action parse must not remove the gate.
+		"next build --profile", "vite build --mode production",
+		"vite --config vite.prod.ts build", "nuxt generate --dotenv .env.prod",
+		"astro check --watch",
+	} {
+		analysis := AnalyzeCommand(command)
+		if !analysis.Network {
+			t.Errorf("%q lost its network classification; a framework build runs repository code and cannot be proven inert", command)
+		}
+		if analysis.LocalServer {
+			t.Errorf("%q compiles rather than serving but was classified as a local server", command)
+		}
+	}
+	for _, command := range []string{"next dev", "vite", "nuxt dev", "astro dev", "astro preview"} {
+		analysis := AnalyzeCommand(command)
+		if !analysis.Network || !analysis.LocalServer {
+			t.Errorf("%q = Network %v LocalServer %v, want both: serving binds AND may egress", command, analysis.Network, analysis.LocalServer)
 		}
 	}
 }
