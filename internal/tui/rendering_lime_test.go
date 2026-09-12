@@ -1973,7 +1973,7 @@ func TestPermissionCollapseIsRunScoped(t *testing.T) {
 }
 
 func TestSessionsCardFieldsAreSanitized(t *testing.T) {
-	if got := sanitizeCardField("evil\x1ftitle\nwith\x00bytes"); strings.ContainsAny(got, "\x1f\n\x00") {
+	if got := sanitizeCardField("evil\x1ftitle\nwith\r\x00bytes"); strings.ContainsAny(got, "\x1f\n\r\x00") {
 		t.Fatalf("sanitizeCardField left separator bytes: %q", got)
 	}
 }
