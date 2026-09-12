@@ -342,6 +342,19 @@ func TestRegistryToolIsDeferredEligible(t *testing.T) {
 	}
 }
 
+func TestRegistryToolCanAdvertiseInAutoWithoutPreapproval(t *testing.T) {
+	tool := newRegistryTool(
+		Server{Name: "docs", Type: "stdio"},
+		RemoteTool{Name: "search"},
+		&fakeToolClient{},
+		RegisterOptions{Autonomy: AutonomyLow, AdvertiseInAuto: true},
+	)
+	safety := tool.Safety()
+	if safety.Permission != tools.PermissionPrompt || !safety.AdvertiseInAuto {
+		t.Fatalf("MCP safety = %#v", safety)
+	}
+}
+
 // TestRegistryToolReportsMCPServerName verifies the registryTool reports its true
 // configured server name (not the sanitized tool-name token) so the deferred-tools
 // discovery label names a multi-token server correctly via tools.DeferredSource.
