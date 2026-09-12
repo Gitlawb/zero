@@ -514,6 +514,35 @@ func TestSessionPickerWarningSanitizesEveryDiscoveryProblem(t *testing.T) {
 	}
 }
 
+func TestSessionPickerWarningDoesNotLeakSplitCredentialFragments(t *testing.T) {
+	key := "sk-proj-" + strings.Repeat("B", 87)
+	for _, separator := range []struct {
+		name  string
+		value string
+	}{
+		{name: "ESC", value: "\x1b"},
+		{name: "NUL", value: "\x00"},
+		{name: "NEL", value: "\u0085"},
+		{name: "zero width space", value: "\u200b"},
+		{name: "right-to-left override", value: "\u202e"},
+		{name: "carriage return", value: "\r"},
+		{name: "tab", value: "\t"},
+	} {
+		t.Run(separator.name, func(t *testing.T) {
+			got := sessionPickerWarning(nil, []error{errors.New("claude-code: " + key[:48] + separator.value + key[48:])})
+			for start := 0; start+8 <= len(key); start++ {
+				run := key[start : start+8]
+				if strings.Contains(got, run) {
+					t.Fatalf("picker warning leaked credential run %q at byte %d: %q", run, start, got)
+				}
+			}
+			if !strings.Contains(got, "claude-code") || !strings.Contains(got, "[REDACTED]") {
+				t.Fatalf("picker warning did not preserve context and a redaction marker: %q", got)
+			}
+		})
+	}
+}
+
 // A FAILED IMPORT MUST NOT HIDE THE WORK IT FAILED TO COPY. Import creates the
 // local session and appends its transcript separately, so an append that fails
 // leaves a session carrying the import tag and no events. That tag alone used to

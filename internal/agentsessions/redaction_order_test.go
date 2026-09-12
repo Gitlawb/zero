@@ -247,3 +247,39 @@ func TestCombinedRemovedSeparatorsCannotHideSplitCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestDisplayFieldDoesNotLeakCredentialFragmentsAcrossNormalizedSeparators(t *testing.T) {
+	key := "sk-proj-" + strings.Repeat("B", 87)
+	separators := []struct {
+		name  string
+		value string
+	}{
+		{name: "ESC", value: "\x1b"},
+		{name: "NUL", value: "\x00"},
+		{name: "NEL", value: "\u0085"},
+		{name: "zero width space", value: "\u200b"},
+		{name: "right-to-left override", value: "\u202e"},
+		{name: "carriage return", value: "\r"},
+		{name: "tab", value: "\t"},
+	}
+
+	for _, separator := range separators {
+		t.Run(separator.name, func(t *testing.T) {
+			got := DisplayField("problem " + key[:48] + separator.value + key[48:] + " end")
+			assertNoCredentialRun(t, got, key, 8)
+			if !strings.Contains(got, "problem") || !strings.Contains(got, "end") || !strings.Contains(got, "[REDACTED]") {
+				t.Fatalf("DisplayField did not retain readable context and a redaction marker: %q", got)
+			}
+		})
+	}
+}
+
+func assertNoCredentialRun(t *testing.T, got, credential string, runLength int) {
+	t.Helper()
+	for start := 0; start+runLength <= len(credential); start++ {
+		run := credential[start : start+runLength]
+		if strings.Contains(got, run) {
+			t.Fatalf("output leaked credential run %q at byte %d: %q", run, start, got)
+		}
+	}
+}
