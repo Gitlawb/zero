@@ -145,6 +145,37 @@ func TestFormatOnWriteReadsMutatedFileAfterFormatterFailure(t *testing.T) {
 	}
 }
 
+func TestFormatOnWriteReportsWhenFormatterFailureCannotBeRestored(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	targetPath := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(targetPath, []byte("requested"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priorRunner := runFormatOnWriteCommand
+	runFormatOnWriteCommand = func(_ context.Context, _ string, _ []string, _ string) error {
+		if err := os.Remove(targetPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(targetPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return exec.ErrNotFound
+	}
+	t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
+
+	formatting := maybeFormatWrittenFile(context.Background(), targetPath, "requested")
+	if !formatting.RestoreFailed {
+		t.Fatal("failed recovery was not reported")
+	}
+	if formatting.ContentKnown {
+		t.Fatalf("failed recovery reported known content %q", formatting.Content)
+	}
+	if notice := formatting.notice("a.go"); !strings.Contains(notice, "WARNING: a.go may not hold what was written") {
+		t.Fatalf("failed recovery notice = %q", notice)
+	}
+}
+
 func TestFormatOnWriteMarksUnreadableFinalStateUnknown(t *testing.T) {
 	requireGofmt(t)
 	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
