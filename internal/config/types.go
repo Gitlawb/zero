@@ -465,10 +465,10 @@ type Overrides struct {
 }
 
 type ResolvedConfig struct {
-	ActiveProvider      string
-	Providers           []ProviderProfile
-	Provider            ProviderProfile
-	MaxTurns            int
+	ActiveProvider string
+	Providers      []ProviderProfile
+	Provider       ProviderProfile
+	MaxTurns       int
 	// MaxTurnsSet reports whether MaxTurns came from an explicit source (a
 	// config file, a provider command, ZERO_MAX_TURNS, or CLI overrides) rather
 	// than the built-in default — callers that need a different default can

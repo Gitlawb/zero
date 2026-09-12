@@ -2252,3 +2252,45 @@ func TestResolveRejectsInvalidCrossSessionInbound(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestResolveReportsExplicitMaxTurns(t *testing.T) {
+	const providerJSON = `{
+		"activeProvider": "p",
+		"providers": [{"name": "p", "provider_kind": "openai-compatible", "base_url": "https://x.example/v1", "apiKey": "k", "model": "m"}]
+	}`
+	providerWithTurns := strings.Replace(providerJSON, `"activeProvider": "p"`, `"activeProvider": "p", "maxTurns": 40`, 1)
+
+	cases := []struct {
+		name string
+		opts ResolveOptions
+		set  bool
+	}{
+		{"built-in default only", ResolveOptions{
+			Overrides: Overrides{Provider: ProviderProfile{Name: "p", ProviderKind: "openai-compatible", BaseURL: "https://x.example/v1", APIKey: "k", Model: "m"}},
+		}, false},
+		{"user config", ResolveOptions{UserConfigPath: writeConfig(t, providerWithTurns)}, true},
+		{"project config", ResolveOptions{
+			UserConfigPath:    writeConfig(t, providerJSON),
+			ProjectConfigPath: writeConfig(t, `{"maxTurns": 40}`),
+		}, true},
+		{"env", ResolveOptions{
+			Env:       map[string]string{MaxTurnsEnv: "120"},
+			Overrides: Overrides{Provider: ProviderProfile{Name: "p", ProviderKind: "openai-compatible", BaseURL: "https://x.example/v1", APIKey: "k", Model: "m"}},
+		}, true},
+		{"cli override", ResolveOptions{
+			Overrides: Overrides{
+				MaxTurns: 42,
+				Provider: ProviderProfile{Name: "p", ProviderKind: "openai-compatible", BaseURL: "https://x.example/v1", APIKey: "k", Model: "m"},
+			},
+		}, true},
+	}
+	for _, tc := range cases {
+		resolved, err := Resolve(tc.opts)
+		if err != nil {
+			t.Fatalf("%s: Resolve() error = %v", tc.name, err)
+		}
+		if resolved.MaxTurnsSet != tc.set {
+			t.Fatalf("%s: MaxTurnsSet = %v, want %v (MaxTurns=%d)", tc.name, resolved.MaxTurnsSet, tc.set, resolved.MaxTurns)
+		}
+	}
+}
