@@ -29,6 +29,16 @@ func TestValidateFileReturnsParseIssueForMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestValidateBytesSelectsNamelessOpenAIProvider(t *testing.T) {
+	cfg, issues := ValidateBytes([]byte(`{"activeProvider":"openai","providers":[{"providerKind":"openai","model":"gpt-4.1"}]}`))
+	if len(issues) != 0 {
+		t.Fatalf("ValidateBytes() issues = %+v", issues)
+	}
+	if cfg.ActiveProvider != "openai" {
+		t.Fatalf("activeProvider = %q, want openai", cfg.ActiveProvider)
+	}
+}
+
 func TestValidateFileSurfacesSemanticIssue(t *testing.T) {
 	path := writeValidateFixture(t, `{
 		"activeProvider": "main",
