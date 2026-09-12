@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
@@ -1973,8 +1974,27 @@ func TestPermissionCollapseIsRunScoped(t *testing.T) {
 }
 
 func TestSessionsCardFieldsAreSanitized(t *testing.T) {
-	if got := sanitizeCardField("evil\x1ftitle\nwith\x00bytes"); strings.ContainsAny(got, "\x1f\n\x00") {
-		t.Fatalf("sanitizeCardField left separator bytes: %q", got)
+	inputs := []string{
+		"evil\x1ftitle",
+		"line\nbreak",
+		"line\rbreak",
+		"nul\x00byte",
+		"esc\x1b[31mred",
+		"csi\x1b[2J\x1b[H",
+		"osc\x1b]0;pwned\a",
+		"bell\aring",
+		"back\bspace",
+		"tab\there",
+		"vert\vtab",
+		"nel\u0085here",
+	}
+	for _, input := range inputs {
+		got := sanitizeCardField(input)
+		for _, r := range got {
+			if unicode.IsControl(r) {
+				t.Fatalf("sanitizeCardField(%q) left control rune %q in %q", input, r, got)
+			}
+		}
 	}
 }
 
