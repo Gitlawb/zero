@@ -424,23 +424,18 @@ func sessionPickerLabel(when, title string) string {
 }
 
 // sessionPickerDetail composes the faint second line under a /resume row:
-// the session's project directory (~/-contracted), the model it ran on, its
-// size in events, and a short status chip when the session is not a plain
-// mainline run (forks, tagged sessions such as btw side-chats). Missing
-// fields are simply omitted — the picker is workspace-scoped, so the project
-// column is a confirmation, not a disambiguator.
+// the session's project directory (~/-contracted), the model it ran on, and a
+// short status chip when the session is not a plain mainline run (forks,
+// tagged sessions such as btw side-chats). Missing fields are simply omitted —
+// the picker is workspace-scoped, so the project column is a confirmation,
+// not a disambiguator.
 func (m model) sessionPickerDetail(meta sessions.Metadata) string {
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 3)
 	if project := displayPath(m.cwd, meta.Cwd); project != "" {
 		parts = append(parts, project)
 	}
 	if modelID := strings.TrimSpace(meta.ModelID); modelID != "" {
 		parts = append(parts, modelID)
-	}
-	if meta.EventCount == 1 {
-		parts = append(parts, "1 event")
-	} else if meta.EventCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d events", meta.EventCount))
 	}
 	if status := sessionPickerStatus(meta); status != "" {
 		parts = append(parts, status)

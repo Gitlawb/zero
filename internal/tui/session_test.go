@@ -1278,38 +1278,33 @@ func TestRelativeAgeFormatsLastActivity(t *testing.T) {
 	}
 }
 
-func TestSessionPickerDetailComposesProjectModelAndSize(t *testing.T) {
+func TestSessionPickerDetailComposesProjectAndModel(t *testing.T) {
 	m := model{cwd: "/repo"}
 	detail := m.sessionPickerDetail(sessions.Metadata{
-		Title:      "work",
-		Cwd:        "/repo",
-		ModelID:    "gpt-5",
-		EventCount: 42,
+		Title:   "work",
+		Cwd:     "/repo",
+		ModelID: "gpt-5",
 	})
-	for _, want := range []string{"/repo", "gpt-5", "42 events"} {
+	for _, want := range []string{"/repo", "gpt-5"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("detail %q missing %q", detail, want)
 		}
 	}
 	// Missing fields are omitted rather than rendered as empty segments.
-	sparse := m.sessionPickerDetail(sessions.Metadata{Title: "bare", EventCount: 1})
-	if strings.Contains(sparse, " · ") {
-		t.Fatalf("sparse detail should have no separators, got %q", sparse)
-	}
-	if sparse != "1 event" {
-		t.Fatalf("singular event count = %q, want %q", sparse, "1 event")
+	if sparse := m.sessionPickerDetail(sessions.Metadata{Title: "bare"}); sparse != "" {
+		t.Fatalf("empty metadata should produce no detail line, got %q", sparse)
 	}
 }
 
 func TestSessionPickerDetailStatusChips(t *testing.T) {
 	m := model{}
-	if got := m.sessionPickerDetail(sessions.Metadata{SessionKind: sessions.SessionKindFork, EventCount: 2}); !strings.Contains(got, "fork") {
+	if got := m.sessionPickerDetail(sessions.Metadata{SessionKind: sessions.SessionKindFork}); !strings.Contains(got, "fork") {
 		t.Fatalf("fork session detail %q should carry the fork chip", got)
 	}
-	if got := m.sessionPickerDetail(sessions.Metadata{Tag: "btw", EventCount: 2}); !strings.Contains(got, "btw") {
+	if got := m.sessionPickerDetail(sessions.Metadata{Tag: "btw"}); !strings.Contains(got, "btw") {
 		t.Fatalf("tagged session detail %q should carry the tag", got)
 	}
-	if got := m.sessionPickerDetail(sessions.Metadata{EventCount: 2}); strings.Contains(got, "fork") {
+	if got := m.sessionPickerDetail(sessions.Metadata{Title: "plain"}); got != "" {
 		t.Fatalf("plain session detail %q should have no status chip", got)
 	}
 }
