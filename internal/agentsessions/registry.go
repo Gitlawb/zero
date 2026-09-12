@@ -121,6 +121,30 @@ func ParseImportTag(tag string) (agent string, sourceID string, ok bool) {
 	return sessions.ParseImportedSessionTag(tag)
 }
 
+// ForeignSourceRefFromTag returns the display-level "agent:id" identity used
+// to suppress a foreign picker row after it has been imported. Unlike
+// ParseImportTag, this deliberately recognizes the legacy
+// "imported:<agent>:<plaintext id>" spelling written by older builds. It is
+// not an authority check: callers deciding whether a session may inherit
+// foreign state must continue to use the strict versioned parser.
+func ForeignSourceRefFromTag(tag string) (string, bool) {
+	if agent, sourceID, ok := ParseImportTag(tag); ok {
+		return agent + ":" + sourceID, true
+	}
+	trimmed := strings.TrimSpace(tag)
+	rest := strings.TrimPrefix(trimmed, importTagPrefix)
+	if rest == trimmed || strings.HasPrefix(rest, "v1:") {
+		return "", false
+	}
+	agent, sourceID, found := strings.Cut(rest, ":")
+	agent = strings.TrimSpace(agent)
+	sourceID = strings.TrimSpace(sourceID)
+	if !found || agent == "" || sourceID == "" {
+		return "", false
+	}
+	return agent + ":" + sourceID, true
+}
+
 // ImportedAgent is the agent a session was imported from, or "" for a session
 // Zero produced itself. Unlike ParseImportTag this accepts the older
 // "imported:<agent>" form, so sessions imported before the tag carried a source

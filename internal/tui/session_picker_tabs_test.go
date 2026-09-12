@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,7 +123,7 @@ func TestAnAgentWithNoSessionsGetsNoTab(t *testing.T) {
 	env := agentsessions.Env{Home: home}
 	agentsessions.InvalidateDiscovery()
 	m := model{agentSessionsEnv: env, cwd: workspace}
-	foreign := m.foreignSessionItems(nil, time.Now())
+	foreign, _ := m.foreignSessionItems(nil, time.Now())
 	if len(foreign) != 1 || foreign[0].ForeignSource == nil || foreign[0].ForeignSource.Path != transcript {
 		t.Fatalf("foreign picker row lost exact source identity: %+v", foreign)
 	}
@@ -157,7 +158,7 @@ func TestForeignSessionItemsSuppressAnImportedSource(t *testing.T) {
 	agentsessions.InvalidateDiscovery()
 	m := model{agentSessionsEnv: agentsessions.Env{Home: home}, cwd: workspace}
 	existing := []sessions.Metadata{{Tag: agentsessions.ImportTag("claude-code", "abc"), EventCount: 1}}
-	if items := m.foreignSessionItems(existing, time.Now()); len(items) != 0 {
+	if items, _ := m.foreignSessionItems(existing, time.Now()); len(items) != 0 {
 		t.Fatalf("already imported source was offered again: %+v", items)
 	}
 }
@@ -453,6 +454,66 @@ func TestNewSessionPickerStillOffersForeignSessionsWhenLocalHistoryFails(t *test
 	}
 }
 
+func TestForeignDiscoveryProblemsAreSurfacedWithoutHidingHealthyRows(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "work")
+	writeTranscript := func(project, id string) {
+		t.Helper()
+		path := filepath.Join(home, ".claude", "projects", project, id+".jsonl")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, foreignSessionRecord(t, workspace, id), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTranscript("healthy", "abc")
+	secret := "sk-ant-api03-" + strings.Repeat("A", 24)
+	writeTranscript("duplicate-one", secret)
+	writeTranscript("duplicate-two", secret)
+
+	agentsessions.InvalidateDiscovery()
+	m := model{
+		sessionStore:     testSessionStore(t),
+		agentSessionsEnv: agentsessions.Env{Home: home},
+		cwd:              workspace,
+		now:              func() time.Time { return time.Unix(0, 0) },
+	}
+	m, cmd := m.sessionPickerCmd()
+	msg, ok := cmd().(sessionPickerLoadedMsg)
+	if !ok {
+		t.Fatal("session picker command returned an unexpected message")
+	}
+	if msg.picker == nil || len(msg.picker.items) != 1 || msg.picker.items[0].Value != "claude-code:abc" {
+		t.Fatalf("discovery problem hid the healthy foreign session: %+v", msg.picker)
+	}
+	if !strings.Contains(msg.text, "claude-code") || !strings.Contains(msg.text, "ambiguous") {
+		t.Fatalf("foreign discovery problem was not surfaced with the picker: %q", msg.text)
+	}
+	if strings.Contains(msg.text, secret) || !strings.Contains(msg.text, "[REDACTED]") {
+		t.Fatalf("foreign discovery warning was not redacted: %q", msg.text)
+	}
+	updated, _ := m.updateModel(msg)
+	next := updated.(model)
+	if next.picker == nil || !transcriptContains(next.transcript, "ambiguous") {
+		t.Fatalf("picker and foreign warning were not surfaced together: picker=%+v transcript=%+v", next.picker, next.transcript)
+	}
+}
+
+func TestSessionPickerWarningSanitizesEveryDiscoveryProblem(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("A", 36)
+	got := sessionPickerWarning(
+		errors.New("local "+secret),
+		[]error{nil, errors.New("claude-code: unreadable " + secret)},
+	)
+	if strings.Contains(got, secret) {
+		t.Fatalf("picker warning leaked an unredacted secret: %q", got)
+	}
+	if strings.Count(got, "[REDACTED]") != 2 || !strings.Contains(got, "could not read local Zero sessions") || !strings.Contains(got, "could not read some external sessions") {
+		t.Fatalf("picker warning did not preserve and sanitize both problem classes: %q", got)
+	}
+}
+
 // A FAILED IMPORT MUST NOT HIDE THE WORK IT FAILED TO COPY. Import creates the
 // local session and appends its transcript separately, so an append that fails
 // leaves a session carrying the import tag and no events. That tag alone used to
@@ -484,5 +545,32 @@ func TestAnEmptyImportedSessionDoesNotHideItsForeignSource(t *testing.T) {
 	got := importedSourceRefs(mixed)
 	if got[ref] || !got["codex:def"] {
 		t.Errorf("imported set = %v, want only codex:def", got)
+	}
+}
+
+func TestImportedSourceRefsUsesDisplayProvenanceWithoutGrantingAuthority(t *testing.T) {
+	const ref = "claude-code:abc"
+	for _, tc := range []struct {
+		name       string
+		tag        string
+		eventCount int
+		want       bool
+	}{
+		{name: "versioned import", tag: agentsessions.ImportTag("claude-code", "abc"), eventCount: 2, want: true},
+		{name: "legacy import with source id", tag: "imported:claude-code:abc", eventCount: 2, want: true},
+		{name: "legacy import without source id", tag: "imported:claude-code", eventCount: 2, want: false},
+		{name: "empty versioned import remains retryable", tag: agentsessions.ImportTag("claude-code", "abc"), eventCount: 0, want: false},
+		{name: "malformed versioned import is not legacy", tag: "imported:v1:bad:bad:extra", eventCount: 2, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := sessions.Metadata{Tag: tc.tag, EventCount: tc.eventCount}
+			got := importedSourceRefs([]sessions.Metadata{meta})[ref]
+			if got != tc.want {
+				t.Fatalf("importedSourceRefs(tag=%q, events=%d)[%q] = %v, want %v", tc.tag, tc.eventCount, ref, got, tc.want)
+			}
+			if strings.HasPrefix(tc.name, "legacy") && sessions.IsImportedSession(meta) {
+				t.Fatalf("display-only legacy tag %q gained import authority", tc.tag)
+			}
+		})
 	}
 }

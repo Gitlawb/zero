@@ -25,6 +25,7 @@ func (store *Store) CreateChild(parentSessionID string, input ChildInput) (Metad
 	if len(parentEvents) > 0 {
 		lastParentEvent = parentEvents[len(parentEvents)-1]
 	}
+	parentModelID, sourceModelID := resolveImportedModelFields(*parent)
 
 	child, err := store.Create(CreateInput{
 		SessionID:           input.SessionID,
@@ -32,7 +33,8 @@ func (store *Store) CreateChild(parentSessionID string, input ChildInput) (Metad
 		Title:               childTitle(input.Title, input.AgentName, parent.Title),
 		Cwd:                 firstNonEmpty(input.Cwd, parent.Cwd),
 		WorkspaceKey:        derivedWorkspaceKey(input.Cwd, parent.WorkspaceKey),
-		ModelID:             firstNonEmpty(input.ModelID, parent.ModelID),
+		ModelID:             firstNonEmpty(input.ModelID, parentModelID),
+		SourceModelID:       sourceModelID,
 		Provider:            firstNonEmpty(input.Provider, parent.Provider),
 		Tag:                 input.Tag,
 		Depth:               input.Depth,

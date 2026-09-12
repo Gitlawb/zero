@@ -534,15 +534,7 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	if kind != SessionKindFork && kind != SessionKindSide {
 		return Metadata{}, fmt.Errorf("invalid zero fork session kind %q", kind)
 	}
-	parentModelID := parent.ModelID
-	sourceModelID := parent.SourceModelID
-	if IsImportedSession(*parent) && sourceModelID == "" && !parent.ModelSelectedLocally {
-		// Older imports stored the foreign model in the operational field. A new
-		// fork must migrate that value to provenance instead of inheriting it as a
-		// local provider choice.
-		sourceModelID = parentModelID
-		parentModelID = ""
-	}
+	parentModelID, sourceModelID := resolveImportedModelFields(*parent)
 	fork, err := store.Create(CreateInput{
 		SessionID:          input.SessionID,
 		SessionKind:        kind,
