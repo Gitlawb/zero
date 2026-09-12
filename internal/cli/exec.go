@@ -49,6 +49,14 @@ const (
 	exitInterrupted = 130
 )
 
+// defaultExecMaxTurns is the headless tool-turn budget when no source sets one.
+// An interactive run can be continued past the shared interactive default by the
+// user; an exec run has nobody to unstick it, so evals and automation would
+// truncate mid-task at 80 turns. The ceiling is the already-justified bound —
+// still finite against a genuinely runaway loop, which the loop's empty-turn
+// guard also cuts independently of this budget.
+const defaultExecMaxTurns = config.MaxTurnsCeiling
+
 type execOutputFormat string
 type execInputFormat string
 
@@ -319,6 +327,15 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 		}
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
+	}
+	// A headless run has no interactive user to continue past the shared
+	// interactive turn default, so an unconfigured budget starts at the
+	// documented ceiling instead of truncating mid-task. Explicit sources
+	// (--max-turns, mode presets, ZERO_MAX_TURNS, config files) resolved as
+	// MaxTurnsSet and keep their value; an exec-profile budget still wins via
+	// applyProfileTurnBudget below.
+	if !resolved.MaxTurnsSet {
+		resolved.MaxTurns = defaultExecMaxTurns
 	}
 	var displacedMaxTurns int
 	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
