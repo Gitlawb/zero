@@ -45,6 +45,8 @@ const (
 	// source+display payload plus every rendered variant.
 	defaultFileViewCacheMaxBytes = 8 << 20 // 8 MiB
 	fileViewMaxRenderVariants    = 4       // max rendered variants (width/fingerprint) per cached file entry
+	fileViewMaxPathRevisions     = 1024    // hard cap on retained per-path revision counters
+	fileViewMinPathRevisions     = 256     // floor for the revision bound on small caches
 	fileViewLoadingPlaceholder   = "Loading…"
 )
 
@@ -178,7 +180,7 @@ func (e *fileViewCachedEntry) putRender(key string, val string) int {
 	}
 	delta := 0
 	if prev, ok := e.renders[key]; ok {
-		delta -= len(prev)
+		delta = len(val) - len(prev)
 	} else {
 		for len(e.renders) >= fileViewMaxRenderVariants {
 			if len(e.renderKeys) > 0 {
@@ -195,9 +197,9 @@ func (e *fileViewCachedEntry) putRender(key string, val string) int {
 			}
 		}
 		e.renderKeys = append(e.renderKeys, key)
+		delta += len(key) + len(val)
 	}
 	e.renders[key] = val
-	delta += len(key) + len(val)
 	return delta
 }
 
@@ -210,6 +212,9 @@ type fileViewRenderCache struct {
 	lru           *list.List
 	gen           int
 	pathRevisions map[string]uint64
+	revOrder      *list.List               // LRU of revision keys: front = most recently invalidated path
+	revElems      map[string]*list.Element // targetPath -> *list.Element containing the path string
+	revEpochFloor uint64                   // minimum required revision for any path absent from pathRevisions
 	statsData     fileViewCacheStats
 }
 
@@ -222,14 +227,22 @@ func newFileViewRenderCache(maxEntries int, maxBytes int) *fileViewRenderCache {
 		items:         make(map[string]*list.Element),
 		lru:           list.New(),
 		pathRevisions: make(map[string]uint64),
+		revOrder:      list.New(),
+		revElems:      make(map[string]*list.Element),
 	}
 }
 
 func (c *fileViewRenderCache) invalidatePath(targetPath string) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pathRevisions[targetPath]++
 	rev := c.pathRevisions[targetPath]
+	if rev < c.revEpochFloor {
+		rev = c.revEpochFloor
+	}
+	rev++
+	c.pathRevisions[targetPath] = rev
+	c.touchRevisionLocked(targetPath)
+	c.trimRevisionsLocked()
 	c.removeItemLocked(targetPath)
 	return rev
 }
@@ -237,7 +250,79 @@ func (c *fileViewRenderCache) invalidatePath(targetPath string) uint64 {
 func (c *fileViewRenderCache) requiredRevision(targetPath string) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.pathRevisions[targetPath]
+	return c.requiredRevisionLocked(targetPath)
+}
+
+// requiredRevisionLocked returns targetPath's revision, or the epoch floor when
+// its metadata has been evicted. Any request older than an evicted revision is
+// therefore rejected without needing the dead key to stay resident.
+func (c *fileViewRenderCache) requiredRevisionLocked(targetPath string) uint64 {
+	if rev, ok := c.pathRevisions[targetPath]; ok {
+		return rev
+	}
+	return c.revEpochFloor
+}
+
+// maxPathRevisions bounds how many per-path revision counters are retained. It
+// scales with the entry budget but never drops below a small floor and never
+// grows past a hard cap.
+func (c *fileViewRenderCache) maxPathRevisions() int {
+	limit := c.maxEntries * 4
+	if limit < fileViewMinPathRevisions {
+		limit = fileViewMinPathRevisions
+	}
+	if limit > fileViewMaxPathRevisions {
+		limit = fileViewMaxPathRevisions
+	}
+	return limit
+}
+
+// touchRevisionLocked moves targetPath to the front of the revision LRU,
+// inserting it when new.
+func (c *fileViewRenderCache) touchRevisionLocked(targetPath string) {
+	if c.revOrder == nil {
+		c.revOrder = list.New()
+	}
+	if c.revElems == nil {
+		c.revElems = make(map[string]*list.Element)
+	}
+	if elem, ok := c.revElems[targetPath]; ok {
+		c.revOrder.MoveToFront(elem)
+		return
+	}
+	c.revElems[targetPath] = c.revOrder.PushFront(targetPath)
+}
+
+// dropRevisionLocked removes a path's revision metadata and advances the epoch
+// floor so requests captured before the removal cannot commit.
+func (c *fileViewRenderCache) dropRevisionLocked(targetPath string) {
+	rev, ok := c.pathRevisions[targetPath]
+	if !ok {
+		return
+	}
+	delete(c.pathRevisions, targetPath)
+	if c.revElems != nil {
+		if elem, ok := c.revElems[targetPath]; ok {
+			c.revOrder.Remove(elem)
+			delete(c.revElems, targetPath)
+		}
+	}
+	if rev > c.revEpochFloor {
+		c.revEpochFloor = rev
+	}
+}
+
+// trimRevisionsLocked evicts the oldest revision keys once the map exceeds the
+// bound, advancing the epoch floor as it goes.
+func (c *fileViewRenderCache) trimRevisionsLocked() {
+	limit := c.maxPathRevisions()
+	for len(c.pathRevisions) > limit {
+		back := c.revOrder.Back()
+		if back == nil {
+			return
+		}
+		c.dropRevisionLocked(back.Value.(string))
+	}
 }
 
 // removeItemLocked drops targetPath from the LRU and folds its bytes back out
@@ -267,18 +352,25 @@ func (c *fileViewRenderCache) evictOverflowLocked() {
 		c.retained -= backEntry.byteSize()
 		delete(c.items, backEntry.targetPath)
 		c.lru.Remove(back)
-		delete(c.pathRevisions, backEntry.targetPath)
+		c.dropRevisionLocked(backEntry.targetPath)
 		c.statsData.Evictions++
 	}
 }
 
-// commitRenderPut applies a variant's byte delta and re-trims the cache.
+// commitRenderPut applies a variant's byte delta and re-trims the cache. The
+// entry is only accounted for while it is still the resident cache value for
+// its path: a concurrent purge, eviction, or replacement must not leak bytes
+// into c.retained from a detached entry.
 func (c *fileViewRenderCache) commitRenderPut(entry *fileViewCachedEntry, key string, val string) {
-	delta := entry.putRender(key, val)
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	elem, ok := c.items[entry.targetPath]
+	if !ok || elem.Value.(*fileViewCachedEntry) != entry {
+		return
+	}
+	delta := entry.putRender(key, val)
 	c.retained += delta
 	c.evictOverflowLocked()
-	c.mu.Unlock()
 }
 
 func (c *fileViewRenderCache) evictPath(targetPath string) {
@@ -293,6 +385,9 @@ func (c *fileViewRenderCache) purgeLocked() {
 	c.lru.Init()
 	c.retained = 0
 	c.pathRevisions = make(map[string]uint64)
+	c.revOrder = list.New()
+	c.revElems = make(map[string]*list.Element)
+	c.revEpochFloor = 0
 }
 
 func (c *fileViewRenderCache) clear() {
@@ -318,6 +413,15 @@ func (c *fileViewRenderCache) resetStats() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.statsData = fileViewCacheStats{}
+}
+
+// recordHit notes a snapshot served entirely from resident state. The accepted
+// snapshot bypasses the LRU lookup, so it accounts for its own hit to keep the
+// no-I/O contract observable in the cache statistics.
+func (c *fileViewRenderCache) recordHit() {
+	c.mu.Lock()
+	c.statsData.CacheHits++
+	c.mu.Unlock()
 }
 
 func (c *fileViewRenderCache) stats() fileViewCacheStats {
@@ -675,7 +779,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		return "", errors.New("request superseded by cache invalidation")
 	}
 
-	curRequiredRev := c.pathRevisions[targetPath]
+	curRequiredRev := c.requiredRevisionLocked(targetPath)
 	if reqSourceRev < curRequiredRev {
 		reqSourceRev = curRequiredRev
 	}
@@ -687,7 +791,9 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 			entry.modTime.Equal(modTime) &&
 			entry.size == size &&
 			entry.displayPath == displayPath &&
-			entry.sourceHash == sourceHash {
+			entry.sourceHash == sourceHash &&
+			entry.truncated == readRes.truncated &&
+			entry.omittedLines == readRes.omittedLines {
 			if fileViewSuperseded(liveSeq, seq) {
 				c.mu.Unlock()
 				return "", errFileViewSuperseded
@@ -815,6 +921,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	}
 	if c.maxEntries <= 0 || c.maxBytes <= 0 || entry.byteSize() > c.maxBytes {
 		c.statsData.SkippedOversized++
+		c.removeItemLocked(targetPath)
 		c.mu.Unlock()
 		return rendered, nil
 	}
@@ -903,6 +1010,9 @@ type fileViewState struct {
 	path               string // workspace-relative, as carried by changedFiles
 	mode               int    // fileViewDiff | fileViewFull
 	parentScrollOffset int
+	// preservedScrollOffset holds the reader's offset while an async reload
+	// swaps the body for the one-line loading placeholder.
+	preservedScrollOffset int
 
 	// View session lifetime identity (UUIDv7 RFC 9562 0-alloc)
 	lifetimeToken [16]byte
@@ -937,6 +1047,16 @@ func (m model) startFileViewRefreshCmd(width int) (model, tea.Cmd) {
 	return m.startFileViewLoad(width, true)
 }
 
+// refreshFileViewMarkers reloads an open full-file view so its gutter markers
+// and fingerprint are recomputed against the current transcript after a session
+// or transcript transition. No-op unless a full view is open.
+func (m model) refreshFileViewMarkers() (model, tea.Cmd) {
+	if m.fileView.active && m.fileView.mode == fileViewFull {
+		return m.startFileViewLoadCmd(m.chatColumnWidth())
+	}
+	return m, nil
+}
+
 func (m model) startFileViewLoad(width int, refreshSource bool) (model, tea.Cmd) {
 	if !m.fileView.active || m.fileView.mode != fileViewFull || m.fileView.path == "" {
 		return m, nil
@@ -958,6 +1078,11 @@ func (m model) startFileViewLoad(width int, refreshSource bool) (model, tea.Cmd)
 		m.fileView.requiredSourceRev = curReq
 	}
 
+	// Remember where the reader is before the body temporarily becomes the
+	// loading placeholder; syncChatScroll holds it and handleFileViewLoaded
+	// reconciles it against the real body. Intentional resets (new file,
+	// diff/full switch) zero chatScrollOffset before reaching here.
+	m.fileView.preservedScrollOffset = m.chatScrollOffset
 	m.fileView.desiredSeq++
 	m.fileView.desiredWidth = width
 	m.fileView.loading = true
@@ -1096,6 +1221,17 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	m.fileView.loadedSeq = msg.seq
 	m.fileView.loadedRev = msg.requiredSourceRev
 	m.fileView.hasError = (msg.err != nil)
+	// Reconcile the held reading offset against the real body now that the
+	// loading placeholder is gone; clamp in case the file shrank.
+	if m.fileView.preservedScrollOffset > 0 {
+		current, maxOffset := m.chatScrollMetrics()
+		m.chatScrollOffset = clampInt(m.fileView.preservedScrollOffset, 0, maxOffset)
+		if m.chatScrollOffset > 0 {
+			m.chatBodyLines = current
+		} else {
+			m.chatBodyLines = 0
+		}
+	}
 	return m, nil
 }
 
@@ -1184,16 +1320,17 @@ func (m model) renderFileViewFull(width int) string {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.desiredFingerprint, m.fileView.loadedSeq, m.fileView.desiredSeq, m.fileView.loadedRev, m.fileView.requiredSourceRev); ok {
-		return cached
-	}
 	if m.fileView.snapshotReady &&
 		m.fileView.loadedPath == m.fileView.path &&
 		m.fileView.loadedSeq == m.fileView.desiredSeq &&
 		m.fileView.loadedRev >= m.fileView.requiredSourceRev &&
 		m.fileView.loadedGen == defaultFileViewCache.generation() &&
 		m.fileView.loadedToken == m.fileView.lifetimeToken {
+		defaultFileViewCache.recordHit()
 		return m.fileView.renderedContent
+	}
+	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.desiredFingerprint, m.fileView.loadedSeq, m.fileView.desiredSeq, m.fileView.loadedRev, m.fileView.requiredSourceRev); ok {
+		return cached
 	}
 	return zeroTheme.faint.Render(fileViewLoadingPlaceholder)
 }
