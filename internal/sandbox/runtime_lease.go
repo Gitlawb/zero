@@ -1,10 +1,22 @@
 package sandbox
 
 import (
+	"errors"
 	"sync"
 )
 
 const sandboxRuntimeLeaseSuffix = ".lease"
+
+// errRuntimeLeaseReplaced says a lock was taken on a lease object that the lease
+// name no longer resolves to: cleanup unlinked or replaced it while this call was
+// waiting. Both acquisitions retry from their open on it, and surface it only
+// once the retries are spent.
+var errRuntimeLeaseReplaced = errors.New("the sandbox runtime lease was removed or replaced while it was being taken")
+
+// runtimeLeaseAcquireAttempts bounds those retries. Each stale lock means one
+// cleanup ran to completion in the window, and cleanups do not chain without
+// limit; a third stale object in a row is reported rather than chased.
+const runtimeLeaseAcquireAttempts = 3
 
 // sandboxRuntimeLease is one holder's grip on a runtime root.
 //
@@ -46,6 +58,28 @@ func sandboxRuntimeLeasePath(root string) string {
 // caller now goes through acquireRuntimeLeaseForPlatform, which descends from a
 // retained parent handle no-follow. Leaving the weaker door defined next to the
 // stronger one is how a later change quietly takes it.
+
+// appendCreatedRuntimeDirs merges one acquisition attempt's ledger into the
+// running one. A path seen again was re-created after cleanup removed the
+// earlier object, so the later identity supersedes; rollback verifies identity
+// before it removes anything, and a stale one would make it refuse the directory
+// this run actually made.
+func appendCreatedRuntimeDirs(existing, made []windowsCreatedRuntimeDir) []windowsCreatedRuntimeDir {
+	for _, record := range made {
+		replaced := false
+		for index := range existing {
+			if existing[index].path == record.path {
+				existing[index] = record
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			existing = append(existing, record)
+		}
+	}
+	return existing
+}
 
 func tryAcquireSandboxRuntimeCleanupLease(root string) (*sandboxRuntimeLease, bool, error) {
 	handle, inUse, err := tryAcquireExclusiveRuntimeLease(root)

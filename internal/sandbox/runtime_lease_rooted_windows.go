@@ -66,20 +66,34 @@ func acquireRuntimeLeaseRooted(root string) (*sandboxRuntimeLease, []windowsCrea
 		tail = append(tail, current)
 	}
 
-	created, parent, err := createRuntimeTailRetainingHandle(base, tail)
-	if err != nil {
-		if parent != 0 {
-			_ = windows.CloseHandle(parent)
+	// THE WHOLE ACQUISITION RETRIES, NOT JUST THE LOCK. A contender that waited
+	// on the lease while cleanup held it exclusively can wake on an object cleanup
+	// has since marked for deletion, and by then cleanup has compensated the tail
+	// this run created as well. Re-taking the lock alone would lock a fresh file
+	// beside a leaf that is gone, so a stale lock sends the caller back through
+	// tail creation. The ledger accumulates across attempts: a directory this run
+	// made on an earlier pass and cleanup did not remove is still this run's to
+	// compensate.
+	var created []windowsCreatedRuntimeDir
+	for attempt := 1; ; attempt++ {
+		made, parent, err := createRuntimeTailRetainingHandle(base, tail)
+		created = appendCreatedRuntimeDirs(created, made)
+		if err != nil {
+			if parent != 0 {
+				_ = windows.CloseHandle(parent)
+			}
+			return nil, created, err
 		}
-		return nil, created, err
-	}
-	defer func() { _ = windows.CloseHandle(parent) }()
-
-	handle, madeLease, err := acquireSharedRuntimeLeaseAt(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
-	if err != nil {
+		handle, madeLease, err := acquireSharedRuntimeLeaseAt(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
+		_ = windows.CloseHandle(parent)
+		if err == nil {
+			return &sandboxRuntimeLease{handle: handle, root: root, createdFile: madeLease}, created, nil
+		}
+		if errors.Is(err, errRuntimeLeaseReplaced) && attempt < runtimeLeaseAcquireAttempts {
+			continue
+		}
 		return nil, created, fmt.Errorf("acquire sandbox runtime lease: %w", err)
 	}
-	return &sandboxRuntimeLease{handle: handle, root: root, createdFile: madeLease}, created, nil
 }
 
 // acquireSharedRuntimeLeaseAt is acquireSharedRuntimeLease with the file named
@@ -155,7 +169,82 @@ func acquireSharedRuntimeLeaseAt(parent windows.Handle, name string) (runtimeLea
 		_ = file.Close()
 		return runtimeLeaseHandle{}, false, err
 	}
+	// THE LOCK IS ON AN OBJECT, THE COORDINATION IS ON A NAME. LockFileEx waits
+	// while cleanup holds the exclusive lock, and cleanup marks the lease for
+	// deletion before it lets go; this handle was opened with FILE_SHARE_DELETE
+	// precisely so cleanup could. A waiter then locks a delete-pending object and
+	// returns a lease that coordinates with nobody: once this handle closes the
+	// name is free, the next cleanup creates a fresh file there, locks it
+	// unopposed, and reports the root unused while this holder is still running
+	// in it. So the lock is only a lease once the locked object is still what the
+	// name resolves to. Reported by @gnanam1990.
+	current, err := runtimeLeaseIsCurrentAt(parent, name, windows.Handle(file.Fd()))
+	if err != nil {
+		_ = file.Close()
+		return runtimeLeaseHandle{}, false, err
+	}
+	if !current {
+		// Not undone, whatever created says: the object is already going, and the
+		// name now belongs to whoever comes next. Closing this handle is what lets
+		// the name go so the retry can take a current one.
+		_ = file.Close()
+		return runtimeLeaseHandle{}, false, errRuntimeLeaseReplaced
+	}
 	return lease, created, nil
+}
+
+// runtimeLeaseIsCurrentAt reports whether the locked lease is still the object
+// the lease name resolves to under parent.
+//
+// Both answers come from handles: the locked file's own identity, and a fresh
+// no-follow open of the name relative to the retained parent, asked for nothing
+// but attributes. A name that is gone or delete-pending, or that resolves to a
+// different volume and file index, means the coordination moved on while this
+// call was waiting.
+func runtimeLeaseIsCurrentAt(parent windows.Handle, name string, locked windows.Handle) (bool, error) {
+	var lockedInfo windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(locked, &lockedInfo); err != nil {
+		return false, fmt.Errorf("inspect the locked sandbox runtime lease %s: %w", name, err)
+	}
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return false, fmt.Errorf("encode sandbox runtime lease name %s: %w", name, err)
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		RootDirectory: parent,
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE,
+	}
+	attributes.Length = uint32(unsafe.Sizeof(attributes))
+	var probe windows.Handle
+	var iosb windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(
+		&probe,
+		windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+		&attributes,
+		&iosb,
+		nil,
+		0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
+		0,
+		0,
+	)
+	if err != nil {
+		if errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) || errors.Is(err, windows.STATUS_DELETE_PENDING) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect the sandbox runtime lease entry %s: %w", name, err)
+	}
+	defer func() { _ = windows.CloseHandle(probe) }()
+	var entryInfo windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(probe, &entryInfo); err != nil {
+		return false, fmt.Errorf("inspect the sandbox runtime lease entry %s: %w", name, err)
+	}
+	return lockedInfo.VolumeSerialNumber == entryInfo.VolumeSerialNumber &&
+		lockedInfo.FileIndexHigh == entryInfo.FileIndexHigh &&
+		lockedInfo.FileIndexLow == entryInfo.FileIndexLow, nil
 }
 
 // undoCreatedRuntimeLease removes a lease file this call created, when a later
@@ -245,53 +334,72 @@ func tryAcquireExclusiveRuntimeLeaseRooted(root string) (runtimeLeaseHandle, boo
 	}
 	attributes.Length = uint32(unsafe.Sizeof(attributes))
 
-	var handle windows.Handle
-	var iosb windows.IO_STATUS_BLOCK
-	// FILE_OPEN_IF matches what cleanup did by pathname with O_CREATE: a runtime
-	// root whose lease file is gone is held by nobody, and creating the empty lease
-	// is how that is expressed.
-	err = windows.NtCreateFile(
-		&handle,
-		windows.DELETE|windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
-		&attributes,
-		&iosb,
-		nil,
-		windows.FILE_ATTRIBUTE_NORMAL,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		windows.FILE_OPEN_IF,
-		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
-		0,
-		0,
-	)
-	if err != nil {
-		return runtimeLeaseHandle{}, false, err
-	}
-	created := iosb.Information == windowsFileCreatedDisposition
-	if err := refuseReparseRuntimeLeaseHandle(handle, name); err != nil {
-		err = undoCreatedRuntimeLease(created, handle, err)
-		_ = windows.CloseHandle(handle)
-		return runtimeLeaseHandle{}, false, err
-	}
-	file := os.NewFile(uintptr(handle), name)
-	if file == nil {
-		err := undoCreatedRuntimeLease(created, handle, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name))
-		_ = windows.CloseHandle(handle)
-		return runtimeLeaseHandle{}, false, err
-	}
-	lease := runtimeLeaseHandle{file: file}
-	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
-	if err := windows.LockFileEx(windows.Handle(file.Fd()), flags, 0, 1, 0, &lease.overlapped); err != nil {
-		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			// Somebody holds it, so it is not this call's to remove, whatever the
-			// open reported. A file this call created cannot reach here anyway.
-			_ = file.Close()
-			return runtimeLeaseHandle{}, true, nil
+	for attempt := 1; ; attempt++ {
+		var handle windows.Handle
+		var iosb windows.IO_STATUS_BLOCK
+		// FILE_OPEN_IF matches what cleanup did by pathname with O_CREATE: a
+		// runtime root whose lease file is gone is held by nobody, and creating the
+		// empty lease is how that is expressed.
+		err = windows.NtCreateFile(
+			&handle,
+			windows.DELETE|windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
+			&attributes,
+			&iosb,
+			nil,
+			windows.FILE_ATTRIBUTE_NORMAL,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			windows.FILE_OPEN_IF,
+			windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
+			0,
+			0,
+		)
+		if err != nil {
+			return runtimeLeaseHandle{}, false, err
 		}
-		err = undoCreatedRuntimeLease(created, windows.Handle(file.Fd()), err)
-		_ = file.Close()
-		return runtimeLeaseHandle{}, false, err
+		created := iosb.Information == windowsFileCreatedDisposition
+		if err := refuseReparseRuntimeLeaseHandle(handle, name); err != nil {
+			err = undoCreatedRuntimeLease(created, handle, err)
+			_ = windows.CloseHandle(handle)
+			return runtimeLeaseHandle{}, false, err
+		}
+		file := os.NewFile(uintptr(handle), name)
+		if file == nil {
+			err := undoCreatedRuntimeLease(created, handle, fmt.Errorf("wrap the sandbox runtime lease handle for %s", name))
+			_ = windows.CloseHandle(handle)
+			return runtimeLeaseHandle{}, false, err
+		}
+		lease := runtimeLeaseHandle{file: file}
+		flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
+		if err := windows.LockFileEx(windows.Handle(file.Fd()), flags, 0, 1, 0, &lease.overlapped); err != nil {
+			if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+				// Somebody holds it, so it is not this call's to remove, whatever the
+				// open reported. A file this call created cannot reach here anyway.
+				_ = file.Close()
+				return runtimeLeaseHandle{}, true, nil
+			}
+			err = undoCreatedRuntimeLease(created, windows.Handle(file.Fd()), err)
+			_ = file.Close()
+			return runtimeLeaseHandle{}, false, err
+		}
+		// The exclusive side has the same window in miniature: between its open
+		// and its lock another cleanup can mark the object for deletion, and an
+		// exclusive lock on that object would then remove a tree a holder of the
+		// replacement is entering. Same check, same answer: only the current
+		// object counts, and a stale one is reopened rather than reasoned about.
+		current, err := runtimeLeaseIsCurrentAt(parent, name, windows.Handle(file.Fd()))
+		if err != nil {
+			_ = file.Close()
+			return runtimeLeaseHandle{}, false, err
+		}
+		if !current {
+			_ = file.Close()
+			if attempt < runtimeLeaseAcquireAttempts {
+				continue
+			}
+			return runtimeLeaseHandle{}, false, errRuntimeLeaseReplaced
+		}
+		return lease, false, nil
 	}
-	return lease, false, nil
 }
 
 // windowsFileCreatedDisposition is the IO_STATUS_BLOCK Information value that

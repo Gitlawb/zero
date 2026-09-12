@@ -47,17 +47,31 @@ func acquireRuntimeLeaseRootedUnix(root string) (*sandboxRuntimeLease, []windows
 		tail = append(tail, current)
 	}
 
-	created, parent, err := createRuntimeTailRetainingFD(base, tail)
-	if err != nil {
-		return nil, created, err
-	}
-	defer func() { _ = unix.Close(parent) }()
-
-	handle, madeLease, err := acquireSharedRuntimeLeaseAtFD(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
-	if err != nil {
+	// THE WHOLE ACQUISITION RETRIES, NOT JUST THE LOCK. A contender that waited
+	// on the lease while cleanup held it exclusively can wake on an object cleanup
+	// has since unlinked, and by then cleanup has compensated the tail this run
+	// created as well. Re-taking the lock alone would lock a fresh file beside a
+	// leaf that is gone, so a stale lock sends the caller back through tail
+	// creation. The ledger accumulates across attempts: a directory this run made
+	// on an earlier pass and cleanup did not remove is still this run's to
+	// compensate.
+	var created []windowsCreatedRuntimeDir
+	for attempt := 1; ; attempt++ {
+		made, parent, err := createRuntimeTailRetainingFD(base, tail)
+		created = appendCreatedRuntimeDirs(created, made)
+		if err != nil {
+			return nil, created, err
+		}
+		handle, madeLease, err := acquireSharedRuntimeLeaseAtFD(parent, filepath.Base(sandboxRuntimeLeasePath(root)))
+		_ = unix.Close(parent)
+		if err == nil {
+			return &sandboxRuntimeLease{handle: handle, root: root, createdFile: madeLease}, created, nil
+		}
+		if errors.Is(err, errRuntimeLeaseReplaced) && attempt < runtimeLeaseAcquireAttempts {
+			continue
+		}
 		return nil, created, fmt.Errorf("acquire sandbox runtime lease: %w", err)
 	}
-	return &sandboxRuntimeLease{handle: handle, root: root, createdFile: madeLease}, created, nil
 }
 
 // acquireSharedRuntimeLeaseAtFD opens the lease relative to a verified parent and
@@ -76,7 +90,49 @@ func acquireSharedRuntimeLeaseAtFD(parent int, name string) (runtimeLeaseHandle,
 		_ = file.Close()
 		return runtimeLeaseHandle{}, false, err
 	}
+	// THE LOCK IS ON AN INODE, THE COORDINATION IS ON A NAME. Flock blocks while
+	// cleanup holds the exclusive lock, and cleanup unlinks the lease name before
+	// it lets go. A waiter then acquires the old, unlinked inode and returns a
+	// lease that coordinates with nobody: the next cleanup creates a fresh file at
+	// the name, locks it unopposed, and reports the root unused while this holder
+	// is still running in it. So the lock is only a lease once the locked object
+	// is still what the name resolves to. Reported by @gnanam1990.
+	current, err := runtimeLeaseIsCurrentAtFD(parent, name, int(file.Fd()))
+	if err != nil {
+		_ = file.Close()
+		return runtimeLeaseHandle{}, false, err
+	}
+	if !current {
+		// Not undone by name, whatever created says: the name is no longer this
+		// object's, so an unlink there would take somebody else's lease.
+		_ = file.Close()
+		return runtimeLeaseHandle{}, false, errRuntimeLeaseReplaced
+	}
 	return runtimeLeaseHandle{file: file}, created, nil
+}
+
+// runtimeLeaseIsCurrentAtFD reports whether the locked lease is still the object
+// the lease name resolves to under parent.
+//
+// Both answers come from the descriptor side: the locked file's own identity and
+// the directory entry read relative to the retained parent, no-follow. A missing
+// entry, a different inode at the name, or a locked inode with no links left all
+// mean the coordination moved on while this call was waiting.
+func runtimeLeaseIsCurrentAtFD(parent int, name string, fd int) (bool, error) {
+	var locked, entry unix.Stat_t
+	if err := unix.Fstat(fd, &locked); err != nil {
+		return false, fmt.Errorf("inspect the locked sandbox runtime lease %s: %w", name, err)
+	}
+	if locked.Nlink == 0 {
+		return false, nil
+	}
+	if err := unix.Fstatat(parent, name, &entry, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect the sandbox runtime lease entry %s: %w", name, err)
+	}
+	return locked.Dev == entry.Dev && locked.Ino == entry.Ino, nil
 }
 
 // undoCreatedRuntimeLeaseAtFD removes a lease file this call created, when a
@@ -188,20 +244,39 @@ func tryAcquireExclusiveRuntimeLeaseRootedUnix(root string) (runtimeLeaseHandle,
 	defer func() { _ = unix.Close(parent) }()
 
 	name := filepath.Base(sandboxRuntimeLeasePath(root))
-	file, created, err := openRuntimeLeaseAtFD(parent, name)
-	if err != nil {
-		return runtimeLeaseHandle{}, false, err
-	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
-			// Somebody holds it, so it is not this call's to remove, whatever the
-			// open reported. A file this call created cannot reach here anyway.
-			_ = file.Close()
-			return runtimeLeaseHandle{}, true, nil
+	for attempt := 1; ; attempt++ {
+		file, created, err := openRuntimeLeaseAtFD(parent, name)
+		if err != nil {
+			return runtimeLeaseHandle{}, false, err
 		}
-		err = undoCreatedRuntimeLeaseAtFD(created, parent, name, err)
-		_ = file.Close()
-		return runtimeLeaseHandle{}, false, err
+		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+				// Somebody holds it, so it is not this call's to remove, whatever the
+				// open reported. A file this call created cannot reach here anyway.
+				_ = file.Close()
+				return runtimeLeaseHandle{}, true, nil
+			}
+			err = undoCreatedRuntimeLeaseAtFD(created, parent, name, err)
+			_ = file.Close()
+			return runtimeLeaseHandle{}, false, err
+		}
+		// The exclusive side has the same window in miniature: between its open
+		// and its lock another cleanup can unlink and replace the name, and an
+		// exclusive lock on the old inode would then remove a tree a holder of the
+		// new one is entering. Same check, same answer: only the current object
+		// counts, and a stale one is reopened rather than reasoned about.
+		current, err := runtimeLeaseIsCurrentAtFD(parent, name, int(file.Fd()))
+		if err != nil {
+			_ = file.Close()
+			return runtimeLeaseHandle{}, false, err
+		}
+		if !current {
+			_ = file.Close()
+			if attempt < runtimeLeaseAcquireAttempts {
+				continue
+			}
+			return runtimeLeaseHandle{}, false, errRuntimeLeaseReplaced
+		}
+		return runtimeLeaseHandle{file: file}, false, nil
 	}
-	return runtimeLeaseHandle{file: file}, false, nil
 }
