@@ -25,14 +25,18 @@ const maxTurnsAnswer = "Agent reached maximum number of turns without a final an
 const maxTurnsFinalAnswerPrompt = "You have reached the tool-turn limit. Do not call tools. Give a concise final answer now: summarize what you completed, what you found, and any remaining blockers."
 
 // maxStreamStallRetries bounds how many times a turn that timed out (idle/stall)
-// WITH NO OUTPUT yet is re-issued on a fresh connection before giving up. Only
-// the no-output case is retried (a partial turn would duplicate), so this is a
-// safe recovery for a stalled/dead pooled connection.
+// OR hit a mid-stream transport abort (#973) with no answer text yet is re-issued
+// on a fresh connection before giving up. Incomplete tool-call previews are
+// allowed through the gate (they are never dispatched before the error return).
+// The safety claim is only that visible answer prose is not duplicated on retry —
+// not that every partial stream shape is excluded. Covers a stalled/dead pooled
+// connection or a socket abort before tool dispatch.
 //
 // Set to 1 (not 2): each attempt can itself idle for the full stream timeout
 // (~5min) before the stall is even detected, so 2 retries left an interactive
 // session frozen for ~15min. One retry keeps the common single-hiccup recovery
-// while bounding the worst case to ~2× the idle timeout.
+// while bounding the worst case to ~2× the idle timeout. Mid-stream transport
+// aborts share this bound (do not raise it for #973).
 const maxStreamStallRetries = 1
 
 const (
@@ -374,7 +378,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					rec.StampFirstToken()
 				}
 				if onText != nil {
-					forwardedVisibleText = true
+					// Zero-length chunks are not committed answer prose; counting
+					// them would block an eligible mid-stream abort retry.
+					if s != "" {
+						forwardedVisibleText = true
+					}
 					onText(s)
 				}
 			}
@@ -450,9 +458,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			result.Messages = copyMessages(messages)
 			return result, ctx.Err()
 		}
-		// A stream idle/stall timeout is safely re-issued when the turn committed NO
-		// answer text — no forwarded visible prose (forwardedVisibleText) and no
-		// collected final text (collected.Text). This covers two cases:
+		// A stream idle/stall timeout OR mid-stream transport abort (#973 — wsarecv /
+		// connection reset / unexpected EOF / connection closed / broken pipe) is
+		// safely re-issued when the turn committed NO answer text — no forwarded
+		// visible prose (forwardedVisibleText) and no collected final text
+		// (collected.Text). The abort gate matches midStreamAbortNeedles only, not
+		// the full shouldReconnect list: connect-phase timeouts and connection
+		// refused are NOT retried here (a slow healthy server must not cost a
+		// second prefill). This covers three cases:
 		//   1. Nothing streamed at all before the connection died (the original
 		//      macOS stale-pooled-connection hang past the response-header timeout).
 		//   2. The model streamed transient reasoning and began a tool call (e.g. a
@@ -463,13 +476,27 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		//      re-render is transient previews, not duplicated answer text. This is
 		//      why the gate no longer excludes collected.ToolCalls: an incomplete
 		//      tool call from a timed-out stream is discard-and-retry, not output.
+		//   3. Mid-stream socket abort after connect succeeded (Windows WSAECONNABORTED /
+		//      wsarecv, connection reset by peer). Same no-tool-executed safety: the
+		//      error returns before tool dispatch, so a bounded retry is safe.
 		// A turn that forwarded real prose is NOT retried (it would duplicate visible
 		// answer text) and falls through to the error return below. Capped +
 		// exponential backoff, with a user-visible notice per attempt.
 		for attempt := 1; attempt <= maxStreamStallRetries &&
-			isStreamTimeoutError(collected.Error) && !forwardedVisibleText &&
+			(isStreamTimeoutError(collected.Error) || isMidStreamTransportAbort(collected.Error)) &&
+			!forwardedVisibleText &&
 			collected.Text == ""; attempt++ {
-			if notify := stallRetryNoticeFor(options); notify != nil {
+			var notify reconnectNotifier
+			if isStreamTimeoutError(collected.Error) {
+				notify = stallRetryNoticeFor(options)
+			} else {
+				notify = reconnectNoticeFor(options)
+				// Count this post-connect reissue even when the replacement
+				// connect succeeds immediately. streamWithReconnect only
+				// increments reconnect_count after a failed connect attempt.
+				options.Trace.Counter(trace.CounterReconnectCount, 1)
+			}
+			if notify != nil {
 				notify(attempt, maxStreamStallRetries)
 			}
 			if err := sleepWithContext(ctx, backoffFor(attempt)); err != nil {
@@ -482,11 +509,21 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			retryStream, retryErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 			if retryErr != nil {
 				result.Messages = copyMessages(messages)
+				if ctx.Err() != nil {
+					return result, ctx.Err()
+				}
 				return result, retryErr
 			}
 			stallGenSpan := options.Trace.Span(trace.SpanGeneration)
 			collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, forwardingOpts)
 			stallGenSpan.End()
+		}
+		// Recheck ctx after a retried CollectStream: helpers.go stores
+		// ctx.Err().Error() in collected.Error, and errors.New of that string
+		// drops the context.Canceled sentinel ACP branches on.
+		if ctx.Err() != nil {
+			result.Messages = copyMessages(messages)
+			return result, ctx.Err()
 		}
 		if collected.Error != "" {
 			// Route a reissued stream's non-stall error through the SAME recovery as
@@ -497,6 +534,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			if stop != nil {
 				result.Messages = copyMessages(messages)
 				return result, stop
+			}
+			if ctx.Err() != nil {
+				result.Messages = copyMessages(messages)
+				return result, ctx.Err()
 			}
 			if collected.Error != "" {
 				result.Messages = copyMessages(messages)
