@@ -50,3 +50,8 @@ func terminateOwnedProcess(cmd *exec.Cmd) (bool, error) {
 	}
 	return alreadyExited, terminateErr
 }
+
+// Windows has no persistent process-group identity to query after a dead root
+// is reaped. Preserve TerminateCommand's existing, documented dead-root
+// behavior; the stronger independent target check is available on POSIX.
+func terminationTargetGoneAfterReap(*exec.Cmd) bool { return true }

@@ -339,3 +339,60 @@ func TestDecodeSSERPCMessageSkipsNotifications(t *testing.T) {
 		t.Fatalf("expected a result payload, got %#v", msg)
 	}
 }
+
+func TestDecodeSSERPCMessageSkipsEmptyAndNullMethod(t *testing.T) {
+	stream := "event: message\n" +
+		`data: {"jsonrpc":"2.0","id":7,"method":""}` + "\n\n" +
+		"event: message\n" +
+		`data: {"jsonrpc":"2.0","id":7,"method":null}` + "\n\n" +
+		"event: message\n" +
+		`data: {"jsonrpc":"2.0","id":7,"result":{"ok":true}}` + "\n\n"
+
+	msg, err := decodeSSERPCMessage(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("decodeSSERPCMessage: %v", err)
+	}
+	if msg.isRequestOrNotification() {
+		t.Fatalf("empty/null method must not be treated as the response, got method %q present=%v", msg.Method, msg.methodPresent)
+	}
+	if !rpcIDMatches(msg.ID, 7) {
+		t.Fatalf("expected response id 7, got %#v", msg.ID)
+	}
+}
+
+func TestDeliverEventMessageSkipsMethodPresence(t *testing.T) {
+	client := &remoteSSEClient{pending: map[string]chan ssePendingResponse{}}
+	key := rpcResponseKey(1)
+	pending := make(chan ssePendingResponse, 1)
+	client.pending[key] = pending
+
+	if err := client.deliverEventMessage(`{"jsonrpc":"2.0","id":1,"method":""}`); err != nil {
+		t.Fatalf("deliverEventMessage empty method: %v", err)
+	}
+	if err := client.deliverEventMessage(`{"jsonrpc":"2.0","id":1,"method":null}`); err != nil {
+		t.Fatalf("deliverEventMessage null method: %v", err)
+	}
+	select {
+	case got := <-pending:
+		t.Fatalf("method presence must not complete pending, got %#v", got)
+	default:
+	}
+	if _, ok := client.pending[key]; !ok {
+		t.Fatal("deliverEventMessage must not delete pending for a request/notification")
+	}
+
+	if err := client.deliverEventMessage(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`); err != nil {
+		t.Fatalf("deliverEventMessage response: %v", err)
+	}
+	select {
+	case got := <-pending:
+		if got.err != nil {
+			t.Fatalf("true response: %v", got.err)
+		}
+		if got.message.isRequestOrNotification() {
+			t.Fatal("true response must not carry a method")
+		}
+	default:
+		t.Fatal("true response must complete pending")
+	}
+}
