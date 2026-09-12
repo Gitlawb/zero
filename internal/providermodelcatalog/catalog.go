@@ -214,6 +214,8 @@ var curatedModels = map[string][]Model{
 		{ID: "gpt-4.1", Description: "catalog default"},
 		{ID: "gpt-4o-mini", Description: "fast model"},
 	},
+	// atomic-chat-local has no curated list: discover the user-loaded model
+	// from the runtime's /v1/models endpoint.
 	"opencode-go-anthropic-compatible": {
 		{ID: "minimax-m3", Description: "MiniMax M3: default"},
 		{ID: "minimax-m2.7", Description: "MiniMax M2.7: coding model"},
