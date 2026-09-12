@@ -59,6 +59,7 @@ var sshSupportDirectives = map[string]bool{
 // and the other path-valued directives.
 type sshDiscovery struct {
 	errors []string
+	env    []string
 }
 
 func (s *sshDiscovery) fail(path, reason string) {
@@ -291,7 +292,7 @@ func (s *sshDiscovery) collectConfigPaths(path, home, sshDir string, seen map[st
 			continue
 		}
 		for _, raw := range values {
-			expanded := expandSSHConfigPath(raw, home, sshDir)
+			expanded := expandSSHConfigPath(raw, home, sshDir, s.env...)
 			if expanded == "" {
 				continue
 			}
@@ -322,7 +323,7 @@ func sshConfigIdentity(path string) string {
 }
 
 func (s *sshDiscovery) includePaths(pattern, home, sshDir string) []string {
-	expanded := expandSSHConfigPath(pattern, home, sshDir)
+	expanded := expandSSHConfigPath(pattern, home, sshDir, s.env...)
 	if expanded == "" {
 		return nil
 	}
@@ -409,16 +410,17 @@ func splitSSHTokens(s string) []string {
 	return out
 }
 
-func expandSSHConfigPath(value, home, sshDir string) string {
+func expandSSHConfigPath(value, home, sshDir string, env ...string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || strings.EqualFold(value, "none") || strings.EqualFold(value, "SSH_AUTH_SOCK") {
 		return ""
 	}
 	// OpenSSH expands environment variables in IdentityFile. ${HOME}/$HOME
 	// resolves to the supplied home argument. Other variables resolve from the
-	// process environment. Unset or invalid $VAR is treated like an unsupported
-	// token: drop the path so we never deny or follow an unresolved pattern.
-	expandedEnv, ok := expandSSHConfigPathEnv(value, home)
+	// supplied environment, falling back to the process environment. Unset or
+	// invalid $VAR drops the path, like an unsupported token, so discovery never
+	// follows an unresolved pattern.
+	expandedEnv, ok := expandSSHConfigPathEnv(value, home, env...)
 	if !ok {
 		return ""
 	}
@@ -442,9 +444,10 @@ func expandSSHConfigPath(value, home, sshDir string) string {
 }
 
 // expandSSHConfigPathEnv resolves ${VAR} and $VAR. ${HOME} and $HOME resolve
-// to the supplied home argument. Other variables resolve from the environment.
+// to the supplied home argument. Other variables prefer the supplied environment
+// over the inherited process environment.
 // An undefined variable, dangling $, or malformed ${...} drops the path.
-func expandSSHConfigPathEnv(value, home string) (string, bool) {
+func expandSSHConfigPathEnv(value, home string, env ...string) (string, bool) {
 	if !strings.Contains(value, "$") {
 		return value, true
 	}
@@ -480,7 +483,7 @@ func expandSSHConfigPathEnv(value, home string) (string, bool) {
 		if name == "HOME" {
 			b.WriteString(home)
 		} else {
-			val := os.Getenv(name)
+			val := sshDiscoveryEnvValue(env, name)
 			if val == "" {
 				return "", false
 			}
@@ -488,6 +491,18 @@ func expandSSHConfigPathEnv(value, home string) (string, bool) {
 		}
 	}
 	return b.String(), true
+}
+
+// Command overrides use last-entry precedence, including an explicitly empty
+// value. Only a missing override falls back to the inherited environment.
+func sshDiscoveryEnvValue(env []string, key string) string {
+	for i := len(env) - 1; i >= 0; i-- {
+		name, value, ok := strings.Cut(env[i], "=")
+		if ok && name == key {
+			return value
+		}
+	}
+	return os.Getenv(key)
 }
 
 func sshEnvVarStart(c byte) bool {

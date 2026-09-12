@@ -1259,6 +1259,68 @@ func TestCredentialDenyReadPathsTraversesNestedDirectorySymlink(t *testing.T) {
 	}
 }
 
+func TestSSHDiscoveryUsesCommandEnvironment(t *testing.T) {
+	home := t.TempDir()
+	keys := t.TempDir()
+	t.Setenv("SSH_KEY_DIR", "")
+	t.Setenv("SSH_CONFIG_DIR", "")
+	for _, variable := range []string{"${SSH_KEY_DIR}", "$SSH_KEY_DIR"} {
+		t.Run(variable, func(t *testing.T) {
+			key := filepath.Join(keys, "work")
+			mustWriteFile(t, key, sshPrivateKeyFixture())
+			mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "IdentityFile "+variable+"/work\n")
+			options := credentialPathOptionsFromEnvironment([]string{home}, []string{
+				"HOME=" + home, "SSH_KEY_DIR=" + keys,
+			})
+			got := credentialDenyReadPathsIn(options, nil)
+			if len(got.DiscoveryErrors) != 0 {
+				t.Fatalf("discovery failed: %v", got.DiscoveryErrors)
+			}
+			if !denyCovered(got.Paths, key) {
+				t.Fatal("command environment key missing from credential denies")
+			}
+		})
+	}
+	t.Run("included configuration", func(t *testing.T) {
+		configDir := t.TempDir()
+		key := filepath.Join(keys, "included")
+		mustWriteFile(t, key, sshPrivateKeyFixture())
+		mustWriteFile(t, filepath.Join(home, ".ssh", "config"), "Include ${SSH_CONFIG_DIR}/extra\n")
+		mustWriteFile(t, filepath.Join(configDir, "extra"), "IdentityFile ${SSH_KEY_DIR}/included\n")
+		options := credentialPathOptionsFromEnvironment([]string{home}, []string{
+			"HOME=" + home, "SSH_KEY_DIR=" + keys, "SSH_CONFIG_DIR=" + configDir,
+		})
+		got := credentialDenyReadPathsIn(options, nil)
+		if len(got.DiscoveryErrors) != 0 || !denyCovered(got.Paths, key) {
+			t.Fatalf("command environment did not reach included configuration: %v", got.DiscoveryErrors)
+		}
+	})
+}
+
+func TestSSHConfigEnvironmentPrecedence(t *testing.T) {
+	home, sshDir := sshGPGNormalizationHome()
+	t.Setenv("SSH_KEY_DIR", filepath.Join(home, "inherited"))
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"inherited", nil, filepath.Join(home, "inherited", "work")},
+		{"override", []string{"SSH_KEY_DIR=" + filepath.Join(home, "command")}, filepath.Join(home, "command", "work")},
+		{"last override wins", []string{"SSH_KEY_DIR=ignored", "SSH_KEY_DIR=" + filepath.Join(home, "last")}, filepath.Join(home, "last", "work")},
+		{"empty override drops path", []string{"SSH_KEY_DIR="}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := expandSSHConfigPath("${SSH_KEY_DIR}/work", home, sshDir, tc.env...); got != tc.want {
+				t.Fatalf("expanded path = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := expandSSHConfigPath("$HOME/work", home, sshDir, "HOME=ignored"); got != filepath.Join(home, "work") {
+		t.Fatalf("HOME must use discovery home, got %q", got)
+	}
+}
+
 func TestOpenSSHPathParsingEscapesAndEnv(t *testing.T) {
 	home, sshDir := sshGPGNormalizationHome()
 	t.Setenv("SSH_KEY_DIR", filepath.Join(home, "secret-keys"))
