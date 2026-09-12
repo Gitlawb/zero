@@ -183,6 +183,24 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	return resolveCommandArgv(body, depth).needsNetworkGate()
 }
 
+// delegatedCommand selects a child argv suffix without rebuilding its tokens.
+// The AST caller uses the suffix length to retain the original words (including
+// expansions); the fallback caller retains its token text. Selection alone is
+// not a local verdict: both callers must recursively resolve the child using
+// the shared depth budget. A nil child means the launcher executes no command.
+func delegatedCommand(program string, args []string) ([]string, commandResolution, bool) {
+	switch program {
+	case "busybox":
+		child, status := busyboxDelegatedCommand(args)
+		return child, status, true
+	case "strace":
+		child, status := straceDelegatedCommand(args)
+		return child, status, true
+	default:
+		return nil, commandKnownLocal, false
+	}
+}
+
 // resolveCommandArgv is the bounded, wrapper-aware resolver shared by the AST
 // and fallback paths. It distinguishes a proven-local command from network
 // access and from argv/source that the supported launcher grammars cannot
@@ -215,25 +233,16 @@ func resolveCommandArgv(body []string, depth int) commandResolution {
 	if fallbackTokenLooksDynamic(body[0]) {
 		return commandUnresolved
 	}
+	if command, status, delegated := delegatedCommand(program, args); delegated {
+		if status != commandKnownLocal {
+			return status
+		}
+		if len(command) == 0 {
+			return commandKnownLocal
+		}
+		return resolveCommandArgv(command, depth+1)
+	}
 	switch program {
-	case "busybox":
-		command, status := busyboxDelegatedCommand(args)
-		if status != commandKnownLocal {
-			return status
-		}
-		if len(command) == 0 {
-			return commandKnownLocal
-		}
-		return resolveCommandArgv(command, depth+1)
-	case "strace":
-		command, status := straceDelegatedCommand(args)
-		if status != commandKnownLocal {
-			return status
-		}
-		if len(command) == 0 {
-			return commandKnownLocal
-		}
-		return resolveCommandArgv(command, depth+1)
 	case "eval":
 		if len(args) == 0 {
 			return commandKnownLocal

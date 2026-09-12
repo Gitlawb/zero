@@ -830,15 +830,6 @@ func straceDelegatedCommand(args []string) ([]string, commandResolution) {
 	return args[index:], commandKnownLocal
 }
 
-// straceChildIndex retains the index surface used by AST literalness checks.
-// Unresolved option grammar is deliberately not exposed as "no child"; the
-// shared argv resolver consumes straceChildResolution directly and keeps the
-// network gate in that state.
-func straceChildIndex(args []string) (int, bool) {
-	index, status := straceChildResolution(args)
-	return index, status == commandKnownLocal && index >= 0
-}
-
 func straceChildResolution(args []string) (int, commandResolution) {
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
