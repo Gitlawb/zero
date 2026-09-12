@@ -825,7 +825,11 @@ func (m model) pickerOverlay(width int) string {
 		if showDetails && item.Detail != "" {
 			// The detail line sits under the row on the same selection band,
 			// indented to the label column so it reads as part of the item.
-			detail := surface(zeroTheme.faint).Render("  " + item.Detail)
+			// Pad the remainder like the row above so the band is full-width.
+			detailText := "  " + item.Detail
+			detailGap := innerWidth - lipgloss.Width(detailText)
+			detail := surface(zeroTheme.faint).Render(detailText) +
+				surface(zeroTheme.faint).Render(strings.Repeat(" ", maxInt(0, detailGap)))
 			lines = append(lines, fitStyledLine(detail, innerWidth))
 		}
 	}
