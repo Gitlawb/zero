@@ -303,6 +303,54 @@ func TestDisplayFieldDoesNotLeakCredentialFragmentsAcrossNormalizedSeparators(t 
 	}
 }
 
+func TestDisplayFieldFragmentProbeIsBounded(t *testing.T) {
+	// Repeated split prefix-shaped text forces the expensive branch at many
+	// starting positions. The injected detector makes the work count exact and
+	// independent of machine speed.
+	input := strings.Repeat("g h p _ a ", 2048)
+	probes := 0
+	maxProbe := 0
+	got, _ := redactDisplaySpaceSplitsWithProbe(input, nil, func(candidate string) bool {
+		probes++
+		if len(candidate) > maxProbe {
+			maxProbe = len(candidate)
+		}
+		return false
+	})
+	if got != input {
+		t.Fatal("a detector that found no secret changed the field")
+	}
+	if maxProbe > maxDisplaySecretProbeBytes {
+		t.Fatalf("largest probe = %d bytes, want at most %d", maxProbe, maxDisplaySecretProbeBytes)
+	}
+	// There are fewer than len(input) possible starts, and each start can add at
+	// most maxDisplaySecretProbeBytes one-byte fragments before it must stop.
+	if probes > len(input)*maxDisplaySecretProbeBytes {
+		t.Fatalf("detector called %d times for %d bytes", probes, len(input))
+	}
+}
+
+func TestDisplayFieldPrefixFilterKeepsEverySupportedSecretFamily(t *testing.T) {
+	secrets := []string{
+		"sk-ant-api03-" + strings.Repeat("A", 24),
+		"github_pat_" + strings.Repeat("A", 22),
+		"ghp_" + strings.Repeat("A", 36),
+		"glpat-" + strings.Repeat("A", 12),
+		"AIza" + strings.Repeat("A", 35),
+		"xoxb-" + strings.Repeat("A", 10),
+		"AKIA" + strings.Repeat("A", 16),
+		"eyJ" + strings.Repeat("A", 10) + ".eyJ" + strings.Repeat("B", 10) + "." + strings.Repeat("C", 10),
+	}
+	for _, secret := range secrets {
+		split := len(secret) / 2
+		got := DisplayField(secret[:split] + "\t" + secret[split:])
+		if !strings.Contains(got, "[REDACTED]") {
+			t.Errorf("split %q was not redacted: %q", secret, got)
+		}
+		assertNoCredentialRun(t, got, secret, 8)
+	}
+}
+
 func assertNoCredentialRun(t *testing.T, got, credential string, runLength int) {
 	t.Helper()
 	for start := 0; start+runLength <= len(credential); start++ {

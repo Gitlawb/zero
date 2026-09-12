@@ -130,6 +130,18 @@ type byteSpan struct {
 	end   int
 }
 
+// Every fixed-prefix text credential reaches its minimum recognizable shape
+// within 40 joined bytes. The larger cap leaves room for OpenAI's digit-based
+// false-positive filter while making work per possible start independent of the
+// discovery-line size. An unresolved sk- candidate at the cap fails closed.
+const maxDisplaySecretProbeBytes = 256
+
+var displaySecretPrefixes = []string{
+	"sk-", "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
+	"glpat-", "AIza", "xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-",
+	"AKIA", "ASIA", "eyJ",
+}
+
 // redactDisplaySpaceSplits catches credentials whose bytes were separated by
 // layout controls. DisplayField keeps those controls as a space for legibility,
 // but an attacker can put one inside a key: the ordinary matcher then redacts a
@@ -142,6 +154,13 @@ type byteSpan struct {
 // could redact unrelated text later in the field.
 func redactDisplaySpaceSplits(value string, boundaries []int) (string, []int) {
 	const boundaryHint = "\ue000"
+	return redactDisplaySpaceSplitsWithProbe(value, boundaries, func(candidate string) bool {
+		probe := redaction.RedactString(boundaryHint+candidate, redaction.Options{})
+		return strings.Contains(probe, redaction.RedactedSecret)
+	})
+}
+
+func redactDisplaySpaceSplitsWithProbe(value string, boundaries []int, detectsSecret func(string) bool) (string, []int) {
 	type fragment struct{ start, end int }
 	fragments := []fragment{}
 	for index := 0; index < len(value); {
@@ -166,9 +185,24 @@ func redactDisplaySpaceSplits(value string, boundaries []int) (string, []int) {
 					break
 				}
 			}
-			candidate.WriteString(value[fragments[end].start:fragments[end].end])
-			probe := redaction.RedactString(boundaryHint+candidate.String(), redaction.Options{})
-			if !strings.Contains(probe, redaction.RedactedSecret) {
+			fragmentText := value[fragments[end].start:fragments[end].end]
+			remaining := maxDisplaySecretProbeBytes - candidate.Len()
+			if len(fragmentText) > remaining {
+				fragmentText = fragmentText[:remaining]
+			}
+			candidate.WriteString(fragmentText)
+			probeText := candidate.String()
+			if !displaySecretPrefixPossible(probeText) {
+				break
+			}
+			detected := detectsSecret(probeText)
+			if !detected && candidate.Len() >= maxDisplaySecretProbeBytes && strings.HasPrefix(probeText, "sk-") {
+				detected = true
+			}
+			if !detected {
+				if candidate.Len() >= maxDisplaySecretProbeBytes {
+					break
+				}
 				continue
 			}
 
@@ -227,6 +261,15 @@ func redactDisplaySpaceSplits(value string, boundaries []int) (string, []int) {
 		}
 	}
 	return value, kept
+}
+
+func displaySecretPrefixPossible(candidate string) bool {
+	for _, prefix := range displaySecretPrefixes {
+		if strings.HasPrefix(prefix, candidate) || strings.HasPrefix(candidate, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTextSecretByte(value byte) bool {
