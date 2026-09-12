@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -95,9 +96,12 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// Capture the prior content (before we replace it) so an overwrite can show a
 	// real diff; a fresh create stays "" and previews as all-additions.
 	priorContent := ""
+	priorReadOK := true
 	if existed {
 		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
 			priorContent = string(prev)
+		} else {
+			priorReadOK = false
 		}
 	}
 
@@ -107,15 +111,27 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
-		return errorResult("Error writing file " + relativePath + ": " + err.Error())
-	}
 	modelKnownContent := content
-	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
-	// FileTracker baseline: recording pre-format content would make the very
-	// next edit look like an external modification and trip the conflict guard.
+	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Format staged bytes, then
+	// publish once. Recording pre-format content would make the next edit look
+	// like an external modification and trip the conflict guard; formatting the
+	// destination in place after publication would reintroduce partial writes.
 	formatting := maybeFormatWrittenFile(ctx, absolutePath, content)
 	content = formatting.Content
+	if existed {
+		current, rerr := os.ReadFile(absolutePath)
+		if rerr != nil || !priorReadOK || !bytes.Equal(current, []byte(priorContent)) {
+			return errorResult(fileConflictMessage(relativePath))
+		}
+	} else if _, serr := os.Stat(absolutePath); serr == nil {
+		return errorResult(fileConflictMessage(relativePath))
+	} else if !os.IsNotExist(serr) {
+		return errorResult("Error writing file " + relativePath + ": " + serr.Error())
+	}
+	cleanupWarning, err := committedWrite(absolutePath, []byte(content), 0o644)
+	if err != nil {
+		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	}
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
@@ -139,6 +155,9 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
 	summary += formatting.notice(relativePath)
+	if cleanupWarning != "" {
+		summary += " " + cleanupWarning
+	}
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}

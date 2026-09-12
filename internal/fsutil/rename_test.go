@@ -2,6 +2,8 @@ package fsutil
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"testing"
@@ -31,17 +33,150 @@ func TestRenameWithRetryRetriesOnWindows(t *testing.T) {
 	}
 }
 
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "sub", "test.txt")
+	content := []byte("hello atomic world")
+
+	if err := WriteFileAtomic(target, content, 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic failed: %v", err)
+	}
+
+	read, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if string(read) != string(content) {
+		t.Fatalf("read content mismatch: got %q, want %q", string(read), string(content))
+	}
+
+	// Overwrite test
+	newContent := []byte("overwritten atomic content")
+	if err := WriteFileAtomic(target, newContent, 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic overwrite failed: %v", err)
+	}
+	read2, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile after overwrite failed: %v", err)
+	}
+	if string(read2) != string(newContent) {
+		t.Fatalf("read content mismatch: got %q, want %q", string(read2), string(newContent))
+	}
+}
+
+func TestWriteFileAtomicPreservesExistingMode(t *testing.T) {
+	dir := t.TempDir()
+	cases := []os.FileMode{0o600, 0o755}
+	for _, want := range cases {
+		target := filepath.Join(dir, "mode-"+want.String()+".txt")
+		if err := os.WriteFile(target, []byte("old"), want); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		if err := os.Chmod(target, want); err != nil {
+			t.Fatalf("Chmod: %v", err)
+		}
+		initialInfo, err := os.Stat(target)
+		if err != nil {
+			t.Fatalf("Stat initial: %v", err)
+		}
+		expectedMode := initialInfo.Mode().Perm()
+		if err := WriteFileAtomic(target, []byte("new"), 0o644); err != nil {
+			t.Fatalf("WriteFileAtomic: %v", err)
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != expectedMode {
+			t.Fatalf("mode = %04o, want %04o", got, expectedMode)
+		}
+		got, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		if string(got) != "new" {
+			t.Fatalf("content = %q, want %q", got, "new")
+		}
+	}
+}
+
 func TestRenameWithRetryNonRetryableError(t *testing.T) {
-	sentinel := errors.New("disk on fire")
 	var attempts int
+	expectedErr := os.ErrInvalid
 	err := RenameWithRetry("src", "dst", func(src, dst string) error {
 		attempts++
-		return sentinel
+		return expectedErr
 	})
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("expected sentinel error, got: %v", err)
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("got err %v, want %v", err, expectedErr)
 	}
 	if attempts != 1 {
-		t.Errorf("expected only 1 attempt for non-retryable error, got %d", attempts)
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestWriteFileAtomicLeavesDestinationOnReplaceFailure(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	marker := filepath.Join(target, "keep.txt")
+	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := WriteFileAtomic(target, []byte("should-not-land"), 0o644); err == nil {
+		t.Fatal("expected replace failure when destination is a directory")
+	}
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("original destination was disturbed: %v", err)
+	}
+	if string(got) != "keep" {
+		t.Fatalf("marker = %q, want keep", got)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dir, ".zero-tmp-*"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("temporary files left behind: %v", leftovers)
+	}
+}
+
+func TestWriteFileAtomicRefusesNonWritableTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "readonly.txt")
+	if err := os.WriteFile(target, []byte("original"), 0o444); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(target, 0o444); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	probe, err := os.OpenFile(target, os.O_WRONLY, 0)
+	if err == nil {
+		_ = probe.Close()
+		t.Skip("this host allows writing a mode-0444 file (for example when running as root)")
+	}
+
+	if err := WriteFileAtomic(target, []byte("replaced"), 0o644); err == nil {
+		t.Fatal("expected WriteFileAtomic to refuse a non-writable destination")
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("content = %q, want %q", got, "original")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got&0o222 != 0 {
+		t.Fatalf("destination became writable: perm=%04o", got)
 	}
 }
