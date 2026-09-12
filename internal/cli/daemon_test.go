@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -238,6 +239,7 @@ func TestDaemonServeRemoteCanonicalizesTokenFileBeforeStartingWorkers(t *testing
 	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "")
 	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", "token")
 	t.Setenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED", "")
+	t.Setenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_IDENTITY", "")
 
 	code, _, _ := runDaemonCLI(t, "serve-remote", "--addr", "127.0.0.1:not-a-port", "--tls-cert", certFile, "--tls-key", keyFile)
 	if code != exitCrash {
@@ -256,6 +258,76 @@ func TestDaemonServeRemoteCanonicalizesTokenFileBeforeStartingWorkers(t *testing
 	}
 	if got := os.Getenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED"); got != resolved {
 		t.Fatalf("resolved token source = %q, want %q", got, resolved)
+	}
+}
+
+type daemonTestWriter func([]byte) (int, error)
+
+func (write daemonTestWriter) Write(data []byte) (int, error) { return write(data) }
+
+func TestDaemonServeRemoteJoinsLocalServeBeforeReturningBindError(t *testing.T) {
+	certFile, keyFile := writeDaemonTestCertificate(t)
+	// Make local Serve fail without opening a socket on any platform.
+	runtimeFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(runtimeFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeFile)
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "test-token")
+	localLogging := make(chan struct{})
+	releaseLocal := make(chan struct{})
+	localFinished := make(chan struct{})
+	returned := make(chan int, 1)
+	var terminalError string
+	stderr := daemonTestWriter(func(data []byte) (int, error) {
+		if strings.Contains(string(data), "local serve error:") {
+			close(localLogging)
+			<-releaseLocal
+			close(localFinished)
+		} else {
+			terminalError += string(data)
+		}
+		return len(data), nil
+	})
+	// Do not let the main goroutine reach the TLS failure select until its
+	// local server goroutine is demonstrably still inside the logging callback.
+	stdout := daemonTestWriter(func(data []byte) (int, error) {
+		select {
+		case <-localLogging:
+			return len(data), nil
+		case <-time.After(5 * time.Second):
+			return 0, io.ErrNoProgress
+		}
+	})
+	go func() {
+		returned <- runDaemonServeRemote([]string{"--addr", "127.0.0.1:not-a-port", "--tls-cert", certFile, "--tls-key", keyFile}, stdout, stderr)
+	}()
+	select {
+	case <-localLogging:
+	case <-time.After(5 * time.Second):
+		close(releaseLocal)
+		t.Fatal("local Serve did not reach the synchronized failure")
+	}
+	select {
+	case code := <-returned:
+		close(releaseLocal)
+		<-localFinished
+		t.Fatalf("serve-remote returned %d while local Serve was still logging", code)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseLocal)
+	select {
+	case code := <-returned:
+		if code != exitCrash || !strings.Contains(terminalError, "not-a-port") {
+			t.Fatalf("original TLS bind error was lost: code=%d stderr=%q", code, terminalError)
+		}
+		select {
+		case <-localFinished:
+		default:
+			t.Fatal("local Serve callback outlived serve-remote")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve-remote did not finish after releasing local Serve")
 	}
 }
 

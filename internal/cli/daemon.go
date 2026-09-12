@@ -555,7 +555,9 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 	}
 
 	// Serve the local control socket too, so local clients keep working.
+	localServeDone := make(chan struct{})
 	go func() {
+		defer close(localServeDone)
 		if serveErr := srv.Serve(); serveErr != nil {
 			logf("local serve error: " + serveErr.Error())
 		}
@@ -566,6 +568,7 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	fmt.Fprintf(stdout, "zero daemon remote bridge listening on %s (TLS)\n", addr)
 	select {
@@ -573,10 +576,15 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 		srv.Shutdown()
 		_ = bridge.Close()
 		<-serveErr // wait for the accept loop to unwind
+		<-localServeDone
 		return exitSuccess
 	case err := <-serveErr:
 		// Bind/serve failed before any signal (e.g. address in use).
 		srv.Shutdown()
+		// Shutdown interrupts Serve even during startup. Join its cleanup and
+		// final logging before writing the terminal error or returning ownership
+		// of the writers/runtime directory to the caller.
+		<-localServeDone
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 }
