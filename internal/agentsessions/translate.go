@@ -135,6 +135,93 @@ func redactAtRemovedBoundaries(value string, boundaries []int) string {
 	return redaction.RedactString(value, redaction.Options{})
 }
 
+type byteSpan struct {
+	start int
+	end   int
+}
+
+// redactDisplaySpaceSplits catches credentials whose bytes were separated by
+// layout controls. DisplayField keeps those controls as a space for legibility,
+// but an attacker can put one inside a key: the ordinary matcher then redacts a
+// recognizable prefix and leaves the suffix on screen. Ask the shared redactor
+// whether the adjacent ASCII fragments form a known secret, then replace the
+// complete original span (including the display space).
+//
+// It also remaps the remaining removed-control boundaries. Their byte offsets
+// feed redactAtRemovedBoundaries, so leaving offsets from before a replacement
+// could redact unrelated text later in the field.
+func redactDisplaySpaceSplits(value string, boundaries, spaceBoundaries []int) (string, []int) {
+	const boundaryHint = "\ue000"
+	spans := make([]byteSpan, 0, len(spaceBoundaries))
+	for _, position := range spaceBoundaries {
+		if position < 0 || position >= len(value) || value[position] != ' ' {
+			continue
+		}
+		left := position
+		for left > 0 && isTextSecretByte(value[left-1]) {
+			left--
+		}
+		right := position + 1
+		for right < len(value) && isTextSecretByte(value[right]) {
+			right++
+		}
+		if left == position || right == position+1 {
+			continue
+		}
+		candidate := value[left:position] + value[position+1:right]
+		probe := redaction.RedactString(boundaryHint+candidate, redaction.Options{})
+		if !strings.Contains(probe, redaction.RedactedSecret) {
+			continue
+		}
+		spans = append(spans, byteSpan{start: left, end: right})
+	}
+	if len(spans) == 0 {
+		return value, boundaries
+	}
+
+	// Boundaries are discovered left-to-right, so overlapping spans can only
+	// extend the previous span. Merging first prevents duplicate markers when a
+	// credential contains more than one layout control.
+	merged := spans[:0]
+	for _, span := range spans {
+		if len(merged) > 0 && span.start <= merged[len(merged)-1].end {
+			if span.end > merged[len(merged)-1].end {
+				merged[len(merged)-1].end = span.end
+			}
+			continue
+		}
+		merged = append(merged, span)
+	}
+
+	for i := len(merged) - 1; i >= 0; i-- {
+		span := merged[i]
+		value = value[:span.start] + redaction.RedactedSecret + value[span.end:]
+		delta := len(redaction.RedactedSecret) - (span.end - span.start)
+		for j, position := range boundaries {
+			switch {
+			case position >= span.start && position <= span.end:
+				boundaries[j] = -1
+			case position > span.end:
+				boundaries[j] += delta
+			}
+		}
+	}
+	kept := boundaries[:0]
+	for _, position := range boundaries {
+		if position >= 0 {
+			kept = append(kept, position)
+		}
+	}
+	return value, kept
+}
+
+func isTextSecretByte(value byte) bool {
+	return value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' ||
+		value == '_' || value == '-' || value == '.'
+}
+
 // Every event a translation produces carries sessions.ImportedEventKey. The
 // resume digest keeps only the last 80 eligible events, so the boundary note
 // persisted ahead of the transcript aged out of the window on the first resume
@@ -682,13 +769,13 @@ func omittedRecordsEvent(count int) sessions.AppendEventInput {
 
 // DisplayField makes one foreign metadata value safe to draw in a terminal.
 //
-// TWO SEPARATE HAZARDS, WITH REDACTION ON BOTH SIDES OF NORMALIZATION. The value is a field another product
+// TWO SEPARATE HAZARDS. The value is a field another product
 // wrote into its own file: it can carry terminal escapes that repaint the rows
 // around it, and it can carry something shaped like a credential — a title is
 // often the user's first prompt, which is where a pasted key ends up.
 //
-// A pre-pass catches an intact secret immediately after a control/escape; then
-// controls are stripped so a secret split by one cannot evade the post-pass.
+// Controls are normalized before redaction so a secret split by one cannot
+// evade the shape match.
 // Layout goes as well, unlike the transcript
 // helper, because a metadata field is drawn as one row and a newline in it moves
 // the rest of the line somewhere the caller did not intend.
@@ -705,16 +792,14 @@ func omittedRecordsEvent(count int) sessions.AppendEventInput {
 // invisible bytes — C0, DEL, C1, Cf — are still DELETED, because those are the
 // ones an escape can hide inside a key.
 func DisplayField(value string) string {
-	// Redact once before normalization as well as after it. The first pass catches
-	// an intact credential immediately following an escape/control sequence; the
-	// second catches a credential whose bytes were split by controls and become
-	// contiguous only after those controls are removed.
-	value = redaction.RedactString(value, redaction.Options{})
 	var b strings.Builder
 	b.Grow(len(value))
 	boundaries := []int{}
+	spaceBoundaries := []int{}
 	for _, r := range value {
 		if r == '\t' || r == '\n' || r == '\r' {
+			boundaries = appendBoundary(boundaries, b.Len())
+			spaceBoundaries = appendBoundary(spaceBoundaries, b.Len())
 			b.WriteRune(' ')
 			continue
 		}
@@ -726,5 +811,6 @@ func DisplayField(value string) string {
 		}
 		b.WriteRune(r)
 	}
-	return strings.TrimSpace(redactAtRemovedBoundaries(b.String(), boundaries))
+	normalized, boundaries := redactDisplaySpaceSplits(b.String(), boundaries, spaceBoundaries)
+	return strings.TrimSpace(redactAtRemovedBoundaries(normalized, boundaries))
 }
