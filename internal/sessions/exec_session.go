@@ -554,9 +554,24 @@ func extractText(value any) string {
 		if summary, ok := typed["summary"].(string); ok && strings.TrimSpace(summary) != "" {
 			return summary
 		}
-		parts := []string{}
-		for _, item := range typed {
-			if text := extractText(item); text != "" {
+		// BY KEY, BECAUSE THIS TEXT BECOMES PART OF A PROMPT. Go randomizes map
+		// iteration, so the same session rendered its resume context in a
+		// different field order in every process: one run said
+		// `c1 read_file {"path":...}` and the next `{"path":...} c1 read_file`.
+		// The block goes into the user prompt, so the prompt itself changed run
+		// to run, which gives a provider nothing stable to prefix-cache and
+		// leaves two resumes of one session impossible to diff while debugging.
+		//
+		// Only the ordering is decided here. Which fields survive is the
+		// caller's projection, and a slice keeps the order it was written in.
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			if text := extractText(typed[key]); text != "" {
 				parts = append(parts, text)
 			}
 		}
