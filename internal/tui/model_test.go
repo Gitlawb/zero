@@ -1087,16 +1087,16 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 }
 
 func TestSessionPickerLabelAlignsTitles(t *testing.T) {
-	today := sessionPickerLabel("20:47:50", "Today title")
-	older := sessionPickerLabel("Jul 24 10:47", "Older title")
+	recent := sessionPickerLabel("2h ago", "Recent title")
+	older := sessionPickerLabel("2006-01-02", "Older title")
 
-	todayColumn := strings.Index(today, "Today title")
+	recentColumn := strings.Index(recent, "Recent title")
 	olderColumn := strings.Index(older, "Older title")
-	if todayColumn < 0 || olderColumn < 0 {
-		t.Fatalf("sessionPickerLabel omitted a title: today=%q older=%q", today, older)
+	if recentColumn < 0 || olderColumn < 0 {
+		t.Fatalf("sessionPickerLabel omitted a title: recent=%q older=%q", recent, older)
 	}
-	if todayColumn != olderColumn {
-		t.Fatalf("title columns differ: today=%d (%q), older=%d (%q)", todayColumn, today, olderColumn, older)
+	if recentColumn != olderColumn {
+		t.Fatalf("title columns differ: recent=%d (%q), older=%d (%q)", recentColumn, recent, olderColumn, older)
 	}
 }
 

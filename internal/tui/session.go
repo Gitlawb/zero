@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/execution"
@@ -360,28 +359,10 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 	})
 }
 
-// sessionWhen formats a session's RFC3339 timestamp for the picker: a precise
-// clock time (with seconds) for today so same-minute sessions stay distinct, the
-// month/day and time earlier this year, else the date. Empty on a parse error.
-func sessionWhen(timestamp string, now time.Time) string {
-	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(timestamp))
-	if err != nil {
-		return ""
-	}
-	parsed, now = parsed.Local(), now.Local()
-	switch {
-	case parsed.Year() == now.Year() && parsed.YearDay() == now.YearDay():
-		return parsed.Format("15:04:05")
-	case parsed.Year() == now.Year():
-		return parsed.Format("Jan _2 15:04")
-	default:
-		return parsed.Format("2006-01-02")
-	}
-}
-
 // newSessionPicker builds the interactive /resume picker (mirrors /model & /provider):
-// one row per resumable session — title (Label) + id and relative age (Meta). Returns
-// nil when there are no resumable sessions so the caller falls back to the text path.
+// one row per resumable session — age + title (Label), session id (Value), and a
+// project/model/size line (Detail). Returns nil when there are no resumable
+// sessions so the caller falls back to the text path.
 func (m model) newSessionPicker() *commandPicker {
 	if m.sessionStore == nil {
 		return nil
@@ -415,7 +396,7 @@ func (m model) newSessionPicker() *commandPicker {
 		// The raw id remains the selection/search value but stays out of the row:
 		// rendering it consumed half the picker and truncated the useful title.
 		label := displayValue(meta.Title, "untitled")
-		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
+		if when := relativeAge(meta.UpdatedAt, now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
 		items = append(items, pickerItem{
@@ -436,7 +417,7 @@ func (m model) newSessionPicker() *commandPicker {
 	}
 }
 
-const sessionPickerTimeWidth = len("Jan 02 15:04")
+const sessionPickerTimeWidth = len("2006-01-02")
 
 func sessionPickerLabel(when, title string) string {
 	return fmt.Sprintf("%-*s  %s", sessionPickerTimeWidth, when, title)
@@ -456,7 +437,9 @@ func (m model) sessionPickerDetail(meta sessions.Metadata) string {
 	if modelID := strings.TrimSpace(meta.ModelID); modelID != "" {
 		parts = append(parts, modelID)
 	}
-	if meta.EventCount > 0 {
+	if meta.EventCount == 1 {
+		parts = append(parts, "1 event")
+	} else if meta.EventCount > 0 {
 		parts = append(parts, fmt.Sprintf("%d events", meta.EventCount))
 	}
 	if status := sessionPickerStatus(meta); status != "" {

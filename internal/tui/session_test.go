@@ -1249,3 +1249,129 @@ func assertPayloadFieldContains(t *testing.T, event sessions.Event, key string, 
 		t.Fatalf("expected payload %s to contain %q, got %#v in %#v", key, want, payload[key], payload)
 	}
 }
+
+func TestRelativeAgeFormatsLastActivity(t *testing.T) {
+	now := time.Date(2026, 9, 12, 15, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		ts   time.Time
+		want string
+	}{
+		{"just now", now.Add(-10 * time.Second), "now"},
+		{"slight clock skew", now.Add(30 * time.Second), "now"},
+		{"minutes", now.Add(-42 * time.Minute), "42m ago"},
+		{"hours", now.Add(-3 * time.Hour), "3h ago"},
+		{"days", now.Add(-12 * 24 * time.Hour), "12d ago"},
+		{"this year", time.Date(2026, 1, 5, 9, 0, 0, 0, time.UTC), "Jan  5"},
+		{"last year", time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC), "2025-06-01"},
+	}
+	for _, tc := range cases {
+		if got := relativeAge(tc.ts.Format(time.RFC3339), now); got != tc.want {
+			t.Errorf("%s: sessionAge = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if got := relativeAge("not-a-time", now); got != "" {
+		t.Errorf("unparseable timestamp = %q, want empty", got)
+	}
+	if got := relativeAge("", now); got != "" {
+		t.Errorf("empty timestamp = %q, want empty", got)
+	}
+}
+
+func TestSessionPickerDetailComposesProjectModelAndSize(t *testing.T) {
+	m := model{cwd: "/repo"}
+	detail := m.sessionPickerDetail(sessions.Metadata{
+		Title:      "work",
+		Cwd:        "/repo",
+		ModelID:    "gpt-5",
+		EventCount: 42,
+	})
+	for _, want := range []string{"/repo", "gpt-5", "42 events"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detail %q missing %q", detail, want)
+		}
+	}
+	// Missing fields are omitted rather than rendered as empty segments.
+	sparse := m.sessionPickerDetail(sessions.Metadata{Title: "bare", EventCount: 1})
+	if strings.Contains(sparse, " · ") {
+		t.Fatalf("sparse detail should have no separators, got %q", sparse)
+	}
+	if sparse != "1 event" {
+		t.Fatalf("singular event count = %q, want %q", sparse, "1 event")
+	}
+}
+
+func TestSessionPickerDetailStatusChips(t *testing.T) {
+	m := model{}
+	if got := m.sessionPickerDetail(sessions.Metadata{SessionKind: sessions.SessionKindFork, EventCount: 2}); !strings.Contains(got, "fork") {
+		t.Fatalf("fork session detail %q should carry the fork chip", got)
+	}
+	if got := m.sessionPickerDetail(sessions.Metadata{Tag: "btw", EventCount: 2}); !strings.Contains(got, "btw") {
+		t.Fatalf("tagged session detail %q should carry the tag", got)
+	}
+	if got := m.sessionPickerDetail(sessions.Metadata{EventCount: 2}); strings.Contains(got, "fork") {
+		t.Fatalf("plain session detail %q should have no status chip", got)
+	}
+}
+
+func TestResumePickerDetailRendersOnlyAtMediumWidth(t *testing.T) {
+	store := testSessionStore(t)
+	sess, err := store.Create(sessions.CreateInput{Title: "Detail row", ModelID: "gpt-5-pickertest", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": "assistant", "content": "hi"},
+	}); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.input.SetValue("/resume")
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if next.picker == nil || next.picker.kind != pickerSession {
+		t.Fatalf("expected /resume to open the session picker, got %#v", next.picker)
+	}
+
+	next.width = 120
+	if wide := viewString(next.View()); !strings.Contains(wide, "gpt-5-pickertest") {
+		t.Fatalf("wide picker should render the detail line with the model:\n%s", wide)
+	}
+	next.width = 60
+	if narrow := viewString(next.View()); strings.Contains(narrow, "gpt-5-pickertest") {
+		t.Fatalf("narrow picker should keep the single-line fallback:\n%s", narrow)
+	}
+}
+
+func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
+	store := testSessionStore(t)
+	mk := func(title, modelID string) {
+		sess, err := store.Create(sessions.CreateInput{Title: title, ModelID: modelID, Provider: "openai"})
+		if err != nil {
+			t.Fatalf("Create %q returned error: %v", title, err)
+		}
+		if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{
+			Type:    sessions.EventMessage,
+			Payload: map[string]any{"role": "assistant", "content": "hi"},
+		}); err != nil {
+			t.Fatalf("AppendEvent %q returned error: %v", title, err)
+		}
+	}
+	mk("alpha", "gpt-5")
+	mk("beta", "claude-sonnet-4.5")
+
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.input.SetValue("/resume")
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if next.picker == nil {
+		t.Fatal("expected /resume to open the session picker")
+	}
+	// The model id lives only on the detail line; it must still filter rows.
+	next.picker.query = "claude-sonnet"
+	next.picker.applyQuery()
+	if len(next.picker.items) != 1 || !strings.Contains(next.picker.items[0].Label, "beta") {
+		t.Fatalf("filter by model should keep only the matching session, got %#v", next.picker.items)
+	}
+}

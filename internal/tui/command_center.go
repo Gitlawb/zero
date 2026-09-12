@@ -375,7 +375,9 @@ func sanitizeCardField(value string) string {
 	return strings.ReplaceAll(value, "\x00", "")
 }
 
-// relativeAge renders an RFC3339 timestamp as a short age ("2h ago"); ""
+// relativeAge renders an RFC3339 timestamp as a short age ("2h ago"), falling
+// back to the month/day this year and the bare date for sessions older than a
+// month, so deep history reads as a calendar date rather than "400d ago"; ""
 // when the timestamp does not parse, so the card simply omits it.
 func relativeAge(timestamp string, now time.Time) string {
 	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(timestamp))
@@ -385,14 +387,19 @@ func relativeAge(timestamp string, now time.Time) string {
 	age := now.Sub(parsed)
 	switch {
 	case age < time.Minute:
-		return "just now"
+		return "now"
 	case age < time.Hour:
 		return fmt.Sprintf("%dm ago", int(age.Minutes()))
 	case age < 24*time.Hour:
 		return fmt.Sprintf("%dh ago", int(age.Hours()))
-	default:
+	case age < 30*24*time.Hour:
 		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
 	}
+	parsed, now = parsed.Local(), now.Local()
+	if parsed.Year() == now.Year() {
+		return parsed.Format("Jan _2")
+	}
+	return parsed.Format("2006-01-02")
 }
 
 // handleModelCommand applies a model switch against the ACTIVE provider (the
