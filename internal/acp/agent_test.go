@@ -525,6 +525,122 @@ func TestACPCustomProviderAllowsUnadvertisedModel(t *testing.T) {
 	}
 }
 
+func TestACPLoadImportedSessionDoesNotRestoreUnadvertisedForeignModel(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
+		}}, nil
+	}
+	workspace := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:   "legacy imported session",
+		Cwd:     workspace,
+		ModelID: "foreign-expensive-model",
+		Tag:     sessions.ImportedSessionTag("claude-code", "foreign-id"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+		SessionID: meta.SessionID,
+		Cwd:       workspace,
+	}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "workspace-model" || modelChoiceExists(option.Options, "foreign-expensive-model") {
+		t.Fatalf("imported model gained ACP authority: %+v", option)
+	}
+}
+
+func TestACPLoadImportedSessionRestoresLaterLocalModelSelection(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
+		}}, nil
+	}
+	clientCwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:         "modern imported session",
+		Cwd:           "/foreign/display",
+		WorkspaceKey:  clientCwd,
+		SourceModelID: "foreign-expensive-model",
+		Tag:           sessions.ImportedSessionTag("claude-code", "foreign-id"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := newHarness(t, deps)
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: clientCwd}, &loaded); err != nil {
+		t.Fatalf("initial session/load: %v", err)
+	}
+	if got := loaded.ConfigOptions[0].CurrentValue; got != "workspace-model" {
+		t.Fatalf("initial imported model = %q, want workspace default", got)
+	}
+	var selected SetSessionConfigOptionResult
+	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
+		SessionID: meta.SessionID, ConfigID: configIDModel, Value: "local-choice",
+	}, &selected); err != nil {
+		t.Fatalf("set local model: %v", err)
+	}
+	if got := selected.ConfigOptions[0].CurrentValue; got != "local-choice" {
+		t.Fatalf("selected model = %q", got)
+	}
+	h.stop()
+
+	h = newHarness(t, deps)
+	defer h.stop()
+	loaded = LoadSessionResult{}
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: clientCwd}, &loaded); err != nil {
+		t.Fatalf("fresh session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "local-choice" || !modelChoiceExists(option.Options, "local-choice") {
+		t.Fatalf("fresh load discarded persisted local choice: %+v", option)
+	}
+}
+
+func TestACPLoadNativeImportedPrefixTagRestoresItsModel(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
+		}}, nil
+	}
+	workspace := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:   "native archived session",
+		Cwd:     workspace,
+		ModelID: "native-model",
+		Tag:     "imported:archive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: workspace}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "native-model" || !modelChoiceExists(option.Options, "native-model") {
+		t.Fatalf("native tagged model was discarded as foreign: %+v", option)
+	}
+}
+
 func TestACPModelDiscoveryFiltersProviderIncompatibleModels(t *testing.T) {
 	a := &Agent{deps: Deps{
 		ResolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
@@ -1023,7 +1139,6 @@ func TestACPSameConnectionReloadRefreshesRecoveredHistory(t *testing.T) {
 		prompts <- prompt
 		return agent.Result{FinalAnswer: "continued"}, nil
 	}
-
 	h := newHarness(t, deps)
 	defer h.stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1077,6 +1192,47 @@ func TestACPSameConnectionReloadRefreshesRecoveredHistory(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
+	}
+}
+
+func TestACPLoadUsesOperationalWorkspaceKeyForPersistedIdentity(t *testing.T) {
+	deps := testDeps(t)
+	displayCwd := filepath.Join(t.TempDir(), "[REDACTED]", "repo")
+	operationalCwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:        "imported session",
+		Cwd:          displayCwd,
+		WorkspaceKey: operationalCwd,
+		Tag:          sessions.ImportedSessionTag("claude-code", "foreign-id"),
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	var resolved []string
+	deps.ResolveWorkspaceRoot = func(cwd string) (string, error) {
+		resolved = append(resolved, cwd)
+		return cwd, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID}, &LoadSessionResult{}); err == nil {
+		t.Fatal("session/load accepted an imported session without an ACP client workspace")
+	}
+	if len(resolved) != 0 {
+		t.Fatalf("omitted client workspace reached resolver: %q", resolved)
+	}
+
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+		SessionID: meta.SessionID,
+		Cwd:       operationalCwd,
+	}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	if len(resolved) != 2 || resolved[0] != operationalCwd || resolved[1] != operationalCwd {
+		t.Fatalf("session/load resolved workspaces %q, want persisted and requested %q", resolved, operationalCwd)
 	}
 }
 

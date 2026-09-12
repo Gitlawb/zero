@@ -44,6 +44,11 @@ func (store *Store) RestoreToSequence(sessionID, workspaceRoot string, targetSeq
 // lets ApplyRewind run restore/truncate/prune/marker atomically under one lock.
 func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, targetSeq int) (RestoreReport, error) {
 	report := RestoreReport{TargetSequence: targetSeq}
+	metadata, err := store.readMetadata(sessionID)
+	if err != nil {
+		return report, err
+	}
+	imported := IsImportedSession(metadata)
 	checkpoints, err := store.sortedCheckpointsAfter(sessionID, targetSeq)
 	if err != nil {
 		return report, err
@@ -61,6 +66,15 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 			// caller asked for. Corruption is a hard error.
 			return report, fmt.Errorf("decode checkpoint payload seq %d: %w", ev.Sequence, err)
 		}
+		checkpointRoot := strings.TrimSpace(payload.WorkspaceRoot)
+		if checkpointRoot == "" {
+			if imported {
+				return report, fmt.Errorf("checkpoint seq %d has no verified local workspace binding; refusing to rewind imported session", ev.Sequence)
+			}
+			// Legacy native-Zero checkpoints predate the binding field. Their
+			// session workspace was locally authored, so preserve compatibility.
+			checkpointRoot = workspaceRoot
+		}
 		for _, f := range payload.Files {
 			// Resolve/confine the target FIRST so the dedupe key below is the
 			// canonical workspace path. Defense in depth: never write/delete outside
@@ -77,7 +91,7 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 			// per-component O_NOFOLLOW), which is platform-specific; tracked for
 			// the CLI/TUI rewind-wiring work. The narrow window plus the
 			// workspace-write-access precondition make this low-risk here.
-			abs, ok := resolveWithinWorkspace(workspaceRoot, f.Path)
+			abs, ok := resolveWithinWorkspace(checkpointRoot, f.Path)
 
 			// Process only the CLOSEST-to-target entry per RESOLVED path. We iterate
 			// closest-to-target first, so the first time we see a resolved path is
