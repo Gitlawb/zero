@@ -90,7 +90,7 @@ var formatterCommands = map[string][]string{
 	".yaml":  {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
 	".yml":   {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
 	".zig":   {"zig", "fmt", "--stdin"},
-	".dart":  {"dart", "format", "--output=show", "--stdin-name", formatterPathPlaceholder, "-"},
+	".dart":  {"dart", "format", "--output=show", "--stdin-name", formatterPathPlaceholder},
 	".tf":    {"terraform", "fmt", "-"},
 	".gleam": {"gleam", "format", "--stdin"},
 	".sh":    {"shfmt", "--filename", formatterPathPlaceholder},
@@ -100,7 +100,7 @@ var formatterCommands = map[string][]string{
 	".cpp":   {"clang-format", "--assume-filename=" + formatterPathPlaceholder},
 	".hpp":   {"clang-format", "--assume-filename=" + formatterPathPlaceholder},
 	".cc":    {"clang-format", "--assume-filename=" + formatterPathPlaceholder},
-	".kt":    {"ktlint", "--stdin"},
+	".kt":    {"ktlint", "--format", "--stdin", "--stdin-path", formatterPathPlaceholder, "--log-level=none"},
 	".swift": {"swiftformat", "--stdinpath", formatterPathPlaceholder},
 	".lua":   {"stylua", "--stdin-filepath", formatterPathPlaceholder, "-"},
 }

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -215,6 +216,74 @@ printf 'formatted\n'
 	if string(onDisk) != formatting.Content {
 		t.Fatalf("published content = %q, want %q", onDisk, formatting.Content)
 	}
+}
+
+// Keep the real argv and replace only the executable with a deterministic CLI
+// contract fixture. Replacing the entire command would hide broken production
+// flags (lint-only Kotlin can succeed with empty stdout; Dart rejects a dash).
+func TestFormatOnWriteStdinCommandContracts(t *testing.T) {
+	for _, extension := range []string{".kt", ".dart"} {
+		t.Run(extension, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "source file"+extension)
+			command := formatterCommands[extension]
+			fixture := []string{os.Args[0], "-test.run=^TestFormatOnWriteStdinContractHelper$", "--", command[0]}
+			formatterCommands[extension] = append(fixture, command[1:]...)
+			t.Cleanup(func() { formatterCommands[extension] = command })
+			t.Setenv("ZERO_FORMATTER_CONTRACT_TARGET", target)
+			t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+			result := NewScopedWriteFileTool(dir, nil).Run(context.Background(), map[string]any{
+				"path": filepath.Base(target), "content": "unformatted source\n",
+			})
+			if result.Status != StatusOK {
+				t.Fatalf("write failed: %q", result.Output)
+			}
+			content, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(content) != "formatted source\n" {
+				t.Fatalf("stdin contract did not publish non-empty formatted source: got %q", content)
+			}
+		})
+	}
+}
+
+func TestFormatOnWriteStdinContractHelper(t *testing.T) {
+	target := os.Getenv("ZERO_FORMATTER_CONTRACT_TARGET")
+	if target == "" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 || separator+1 >= len(os.Args) {
+		os.Exit(2)
+	}
+	arguments := os.Args[separator+1:]
+	var want []string
+	switch arguments[0] {
+	case "ktlint":
+		// Lint-only mode succeeds without emitting source for valid Kotlin.
+		if slices.Equal(arguments, []string{"ktlint", "--stdin"}) {
+			os.Exit(0)
+		}
+		want = []string{"ktlint", "--format", "--stdin", "--stdin-path", target, "--log-level=none"}
+	case "dart":
+		// Dart uses stdin only when there are no positional paths.
+		want = []string{"dart", "format", "--output=show", "--stdin-name", target}
+	default:
+		os.Exit(3)
+	}
+	if !slices.Equal(arguments, want) {
+		os.Exit(4)
+	}
+	content, err := io.ReadAll(os.Stdin)
+	if err != nil || string(content) != "unformatted source\n" {
+		os.Exit(5)
+	}
+	if _, err := io.WriteString(os.Stdout, "formatted source\n"); err != nil {
+		os.Exit(6)
+	}
+	os.Exit(0)
 }
 
 func TestFormatOnWriteUsesDestinationForProjectConfiguration(t *testing.T) {
