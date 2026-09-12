@@ -238,3 +238,55 @@ func TestWindowsSandboxRuntimeCandidatesAreDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// EVERY ROOT THE SELECTOR CAN CHOOSE HAS TO BE IN THE SET SETUP GRANTS.
+//
+// The tests above all iterate whatever windowsSandboxRuntimeCandidates returns,
+// so they hold for any self-consistent candidate set, including one missing an
+// entry. That is the half this pins: sandboxRuntimeRootFor prefers the
+// cache-derived root and falls back to the temp-derived one when the cache root
+// is unusable, and prepareSandboxRuntime takes that fallback when the primary
+// lease cannot be acquired. A candidate set carrying only the preferred root
+// would be internally consistent and still leave the fallback ungranted, so a
+// machine that fell back would be refused the write it needs. Reported by
+// @anandh8x.
+//
+// Driven through the selector rather than by re-deriving the fallback here, so
+// the assertion stays true if the selection rule changes.
+func TestWindowsSandboxRuntimeCandidatesCoverEverySelectableRoot(t *testing.T) {
+	config := runtimeRootTestConfig(t)
+	workspace := canonicalSandboxWorkspaceRoot(config.WorkspaceRoots[0])
+	candidates := windowsSandboxRuntimeCandidates(config.WorkspaceRoots)
+	if len(candidates) == 0 {
+		t.Fatal("windowsSandboxRuntimeCandidates returned none, so this test proves nothing")
+	}
+	granted := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		granted[windowsCapabilityPathKey(candidate)] = struct{}{}
+	}
+
+	cacheRoot, err := sandboxUserCacheDir()
+	if err != nil {
+		t.Fatalf("sandboxUserCacheDir: %v", err)
+	}
+	// The ordinary selection, and then the selection a machine makes when the
+	// cache-derived root is not usable. Naming an unusable cache root reproduces
+	// that second case without depending on the host's real cache directory.
+	preferred, err := sandboxRuntimeRootFor(workspace, canonicalSandboxWorkspaceRoot(cacheRoot))
+	if err != nil {
+		t.Fatalf("sandboxRuntimeRootFor(usable cache): %v", err)
+	}
+	fallback, err := sandboxRuntimeRootFor(workspace, workspace)
+	if err != nil {
+		t.Fatalf("sandboxRuntimeRootFor(unusable cache): %v", err)
+	}
+	if preferred == fallback {
+		t.Fatalf("both selections returned %s, so this test cannot tell the fallback from the preferred root", preferred)
+	}
+	for _, selected := range []string{preferred, fallback} {
+		if _, ok := granted[windowsCapabilityPathKey(selected)]; !ok {
+			t.Errorf("the selector can choose runtime root %s but setup grants only %v, "+
+				"so a command that selects it is refused the write it was provisioned for", selected, candidates)
+		}
+	}
+}
