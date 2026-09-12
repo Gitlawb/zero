@@ -18,7 +18,7 @@ func TestEnsurePrivateDirRejectsSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensurePrivateDir(link); err == nil {
+	if err := EnsurePrivateDir(link); err == nil {
 		t.Fatal("expected symlink runtime directory to be rejected")
 	}
 }
@@ -33,7 +33,7 @@ func TestEnsurePrivateDirRejectsSymlinkedParent(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensurePrivateDir(filepath.Join(link, "peers")); err == nil {
+	if err := EnsurePrivateDir(filepath.Join(link, "peers")); err == nil {
 		t.Fatal("expected symlinked parent to be rejected")
 	}
 }
