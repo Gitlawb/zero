@@ -2085,9 +2085,10 @@ func noticesBefore(outcome hooks.DispatchOutcome) []string {
 // NO REBUDGET HERE, AND THAT IS LOAD-BEARING ON WHAT MAY PASS THROUGH. The
 // normal tail appends and then calls Registry.RebudgetAfterHook, because what it
 // appends is afterTool feedback: hook stdout, which a hook can make arbitrarily
-// large. These notices cannot be. Their one producer is
-// sandbox.windowsDenyReadWarnings, which returns a single fixed sentence, and
-// nothing hook-authored reaches this slice: DispatchOutcome.Messages is where
+// large. These notices cannot be: they are CommandPlan.Notes, which only this
+// package's own fixed sentences may fill (none does today; #1006 refuses the
+// denyRead trade the last one described), and nothing hook-authored reaches
+// this slice: DispatchOutcome.Messages is where
 // hook output lives, and the capture site deliberately does not read it.
 //
 // So if anything ever widens what is delivered here to include text a hook or a
