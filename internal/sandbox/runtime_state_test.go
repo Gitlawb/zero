@@ -277,13 +277,14 @@ func withoutGitEnvironmentOverrides(env []string) []string {
 func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 	workspace := t.TempDir()
 	cacheRoot := t.TempDir()
-	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+	home := filepath.Join(t.TempDir(), "home")
+	t.Setenv("HOME", home)
 	original := sandboxUserCacheDir
 	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
-		Policy:        DefaultPolicy(),
+		Policy:        testPolicyWithSSHDirectoryDeny(t, home),
 		Backend: Backend{
 			Name:            BackendLinuxBwrap,
 			Available:       true,
@@ -310,8 +311,8 @@ func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 	} else if !inUse {
 		t.Fatal("command plan runtime must be marked in use")
 	}
-	if got := envListValue(plan.Env, "HOME", ""); got != os.Getenv("HOME") {
-		t.Fatalf("HOME = %q, want caller home %q", got, os.Getenv("HOME"))
+	if got := envListValue(plan.Env, "HOME", ""); got != home {
+		t.Fatalf("HOME = %q, want caller home %q", got, home)
 	}
 	foundWriteRoot := false
 	for _, root := range plan.PermissionProfile.FileSystem.WriteRoots {

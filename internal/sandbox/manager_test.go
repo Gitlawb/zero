@@ -874,7 +874,6 @@ func TestPermissionProfileUnionsProcessAndCommandCredentialRootsWithoutCreatingC
 	t.Setenv("USERPROFILE", parentHome)
 	t.Setenv("XDG_CONFIG_HOME", parentConfig)
 	t.Setenv("CLOUDSDK_CONFIG", "")
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", parentToken)
 	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 	t.Setenv("NPM_CONFIG_USERCONFIG", "")
@@ -888,9 +887,14 @@ func TestPermissionProfileUnionsProcessAndCommandCredentialRootsWithoutCreatingC
 	childHome := filepath.Join(workspace, "child-home")
 	childConfig := filepath.Join(childHome, "config")
 	childToken := filepath.Join(workspace, "child-store", "tokens.json")
+	policy := testPolicyWithSSHDirectoryDeny(t, parentHome, childHome)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", parentToken)
+	// The unavailable backend cannot enforce explicit denies. Grant only these
+	// empty, test-owned SSH directories to isolate the token-root contract.
+	policy.AllowRead, policy.DenyRead = policy.DenyRead, nil
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
-		Policy:        DefaultPolicy(),
+		Policy:        policy,
 		Backend:       Backend{Name: BackendUnavailable, Platform: runtime.GOOS},
 	})
 	plan, err := engine.BuildCommandPlan(CommandSpec{
@@ -984,7 +988,7 @@ func TestCommandSuppliedTokenOverrideFailsClosedOnBubblewrap(t *testing.T) {
 	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
 	workspace := t.TempDir()
 
-	baseline := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, nil)
+	baseline := permissionProfileFromPolicy(workspace, testPolicyWithSSHDirectoryDeny(t, home), nil, workspace, nil)
 	if len(baseline.FileSystem.ProcessTrustedDenyReadFiles) != 0 || len(baseline.FileSystem.CommandDenyReadFinalFiles) != 0 {
 		t.Fatalf("baseline profile should have no replaceable final files: %#v", baseline.FileSystem)
 	}
@@ -999,7 +1003,7 @@ func TestCommandSuppliedTokenOverrideFailsClosedOnBubblewrap(t *testing.T) {
 	}
 
 	commandToken := filepath.Join(tempDirOutsideDefaultTemp(t), "command-store", "tokens.json")
-	profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace,
+	profile := permissionProfileFromPolicy(workspace, testPolicyWithSSHDirectoryDeny(t, home), nil, workspace,
 		[]string{"ZERO_OAUTH_TOKENS_PATH=" + commandToken})
 	fs := profile.FileSystem
 	if !stringSliceContains(fs.CommandDenyReadFinalFiles, normalizeProfilePath(commandToken)) {
@@ -1044,9 +1048,10 @@ func TestKeyringOAuthOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
 	tokenPath := filepath.Join(tempDirOutsideDefaultTemp(t), "tokens.json")
 
 	t.Run("process environment", func(t *testing.T) {
+		policy := testPolicyWithSSHDirectoryDeny(t, home)
 		t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
 		t.Setenv("ZERO_OAUTH_STORAGE", "keyring")
-		profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, nil)
+		profile := permissionProfileFromPolicy(workspace, policy, nil, workspace, nil)
 		fs := profile.FileSystem
 		if !stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(tokenPath)) {
 			t.Fatalf("DenyReadIfExists = %#v, want keyring override retained in ordinary deny baseline", fs.DenyReadIfExists)
@@ -1073,7 +1078,7 @@ func TestKeyringOAuthOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
 	t.Run("command environment", func(t *testing.T) {
 		t.Setenv("ZERO_OAUTH_TOKENS_PATH", "")
 		t.Setenv("ZERO_OAUTH_STORAGE", "")
-		profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, []string{
+		profile := permissionProfileFromPolicy(workspace, testPolicyWithSSHDirectoryDeny(t, home), nil, workspace, []string{
 			"ZERO_OAUTH_TOKENS_PATH=" + tokenPath,
 			"ZERO_OAUTH_STORAGE=keyring",
 		})
@@ -1108,7 +1113,7 @@ func TestCommandCredentialDirectoriesFailClosedWithoutHostMutation(t *testing.T)
 	workspace := t.TempDir()
 	commandConfig := filepath.Join(tempDirOutsideDefaultTemp(t), "missing-command-config")
 	commandZero := filepath.Join(commandConfig, "zero")
-	profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, []string{
+	profile := permissionProfileFromPolicy(workspace, testPolicyWithSSHDirectoryDeny(t, home, filepath.Dir(commandConfig)), nil, workspace, []string{
 		"HOME=" + filepath.Dir(commandConfig),
 		"XDG_CONFIG_HOME=" + commandConfig,
 	})
@@ -1234,10 +1239,11 @@ func TestKeyringExceptionKeepsFileBackedTokenStoresFailClosed(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			policy := testPolicyWithSSHDirectoryDeny(t, home)
 			for key, value := range test.processEnv {
 				t.Setenv(key, value)
 			}
-			profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, test.commandEnv)
+			profile := permissionProfileFromPolicy(workspace, policy, nil, workspace, test.commandEnv)
 			markers := profile.FileSystem.ProcessTrustedDenyReadFiles
 			if test.commandMarker {
 				markers = profile.FileSystem.CommandDenyReadFinalFiles
@@ -1279,8 +1285,9 @@ func TestLegacyMCPOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			policy := testPolicyWithSSHDirectoryDeny(t, home)
 			t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", test.processMCP)
-			profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, test.commandEnv)
+			profile := permissionProfileFromPolicy(workspace, policy, nil, workspace, test.commandEnv)
 			fs := profile.FileSystem
 			for _, want := range []string{legacy, legacy + ".migrated"} {
 				if !stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(want)) {
@@ -1337,9 +1344,10 @@ func TestOAuthOverridesInsideCredentialCarveoutsRemainFailClosedOnBubblewrap(t *
 
 	for _, name := range []string{"plugins", "specialists", "commands"} {
 		t.Run(name, func(t *testing.T) {
+			policy := testPolicyWithSSHDirectoryDeny(t, home)
 			token := filepath.Join(configDir, "zero", name, "tokens.json")
 			t.Setenv("ZERO_OAUTH_TOKENS_PATH", token)
-			profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, nil)
+			profile := permissionProfileFromPolicy(workspace, policy, nil, workspace, nil)
 			for _, want := range []string{token, token + ".secret"} {
 				if !stringSliceContains(profile.FileSystem.ProcessTrustedDenyReadFiles, normalizeCredentialFinalPath(want)) {
 					t.Fatalf("ProcessTrustedDenyReadFiles = %#v, carveout must retain final-file marker %q", profile.FileSystem.ProcessTrustedDenyReadFiles, want)
@@ -1476,9 +1484,9 @@ func TestProcessTrustedExactAllowReadDoesNotIncludeSecret(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
 	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
-	policy := DefaultPolicy()
+	policy := testPolicyWithSSHDirectoryDeny(t, home)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
 	policy.AllowRead = []string{tokenPath}
 
 	profile := PermissionProfileFromPolicy(t.TempDir(), policy, nil)
@@ -1528,16 +1536,17 @@ func TestEngineBuildCommandPlanValidatesBwrapBeforeCreatingRuntime(t *testing.T)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
 	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
 	oldUserCacheDir := sandboxUserCacheDir
 	sandboxUserCacheDir = func() (string, error) { return runtimeCache, nil }
 	t.Cleanup(func() { sandboxUserCacheDir = oldUserCacheDir })
 
 	workspace := t.TempDir()
+	policy := testPolicyWithSSHDirectoryDeny(t, home)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
-		Policy:        DefaultPolicy(),
+		Policy:        policy,
 		Backend: Backend{
 			Name: BackendLinuxBwrap, Available: true, Platform: "linux",
 			Executable: "/usr/bin/zero-linux-sandbox",

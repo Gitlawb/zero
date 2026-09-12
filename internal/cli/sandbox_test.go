@@ -561,14 +561,22 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 	profile, _ := plan["permissionProfile"].(map[string]any)
 	fileSystem, _ := profile["fileSystem"].(map[string]any)
 	wantDenyRead := []string(nil)
-	credentialHome := emptyHome
+	wantSSHFiles := []string(nil)
 	if runtime.GOOS != "windows" {
+		credentialHome := emptyHome
 		if resolved, err := filepath.EvalSymlinks(emptyHome); err == nil {
 			credentialHome = resolved
 		}
 		wantDenyRead = []string{
 			filepath.Join(credentialHome, ".aws"),
 			filepath.Join(credentialHome, ".azure"),
+			filepath.Join(credentialHome, ".gnupg"),
+			filepath.Join(credentialHome, ".ssh", "id_rsa"),
+			filepath.Join(credentialHome, ".ssh", "id_dsa"),
+			filepath.Join(credentialHome, ".ssh", "id_ecdsa"),
+			filepath.Join(credentialHome, ".ssh", "id_ed25519"),
+			filepath.Join(credentialHome, ".ssh", "id_ecdsa_sk"),
+			filepath.Join(credentialHome, ".ssh", "id_ed25519_sk"),
 			// git's cleartext credential stores, in both the home and XDG
 			// layouts (#816). Listed here so the exported policy JSON is what
 			// catches a regression: this baseline is the contract a user reads
@@ -583,6 +591,25 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 			filepath.Join(credentialHome, ".config", "gcloud"),
 			filepath.Join(credentialHome, ".config", "zero"),
 		}
+		for _, path := range wantDenyRead {
+			if filepath.Dir(path) == filepath.Join(credentialHome, ".ssh") {
+				wantSSHFiles = append(wantSSHFiles, path)
+			}
+		}
+		if emptyHome != credentialHome {
+			for _, rel := range []string{
+				".git-credentials",
+				".gnupg",
+				filepath.Join(".ssh", "id_rsa"),
+				filepath.Join(".ssh", "id_dsa"),
+				filepath.Join(".ssh", "id_ecdsa"),
+				filepath.Join(".ssh", "id_ed25519"),
+				filepath.Join(".ssh", "id_ecdsa_sk"),
+				filepath.Join(".ssh", "id_ed25519_sk"),
+			} {
+				wantDenyRead = append(wantDenyRead, filepath.Join(emptyHome, rel))
+			}
+		}
 	}
 	gotDenyRead := jsonStringSlice(fileSystem["denyReadIfExists"])
 	sort.Strings(gotDenyRead)
@@ -590,9 +617,19 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 	if !reflect.DeepEqual(gotDenyRead, wantDenyRead) {
 		t.Fatalf("manager credential deny baseline = %#v, want %#v", gotDenyRead, wantDenyRead)
 	}
+	gotSSHFiles := jsonStringSlice(fileSystem["sshDenyReadFiles"])
+	sort.Strings(gotSSHFiles)
+	sort.Strings(wantSSHFiles)
+	if !reflect.DeepEqual(gotSSHFiles, wantSSHFiles) {
+		t.Fatalf("manager absent SSH key protection = %#v, want %#v", gotSSHFiles, wantSSHFiles)
+	}
 	wantCarveouts := []string(nil)
 	wantEnsureDirs := []string(nil)
 	if runtime.GOOS != "windows" {
+		credentialHome := emptyHome
+		if resolved, err := filepath.EvalSymlinks(emptyHome); err == nil {
+			credentialHome = resolved
+		}
 		zeroDir := filepath.Join(credentialHome, ".config", "zero")
 		wantCarveouts = []string{
 			filepath.Join(zeroDir, "plugins"),
@@ -601,13 +638,20 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 		}
 		wantEnsureDirs = []string{zeroDir}
 	}
-	if gotCarveouts := jsonStringSlice(fileSystem["denyReadCarveouts"]); !reflect.DeepEqual(gotCarveouts, wantCarveouts) {
+	gotCarveouts := jsonStringSlice(fileSystem["denyReadCarveouts"])
+	sort.Strings(gotCarveouts)
+	sort.Strings(wantCarveouts)
+	if !reflect.DeepEqual(gotCarveouts, wantCarveouts) {
 		t.Fatalf("manager credential carveouts = %#v, want %#v", gotCarveouts, wantCarveouts)
 	}
-	if gotEnsureDirs := jsonStringSlice(fileSystem["ensureDenyReadDirs"]); !reflect.DeepEqual(gotEnsureDirs, wantEnsureDirs) {
+	gotEnsureDirs := jsonStringSlice(fileSystem["ensureDenyReadDirs"])
+	sort.Strings(gotEnsureDirs)
+	sort.Strings(wantEnsureDirs)
+	if !reflect.DeepEqual(gotEnsureDirs, wantEnsureDirs) {
 		t.Fatalf("manager credential ensure dirs = %#v, want %#v", gotEnsureDirs, wantEnsureDirs)
 	}
 	delete(fileSystem, "denyReadIfExists")
+	delete(fileSystem, "sshDenyReadFiles")
 	delete(fileSystem, "denyReadCarveouts")
 	delete(fileSystem, "ensureDenyReadDirs")
 	fileSystem["readRoots"] = filterJSONStringRoots(fileSystem["readRoots"], tempRoots)
