@@ -328,15 +328,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
-	// A headless run has no interactive user to continue past the shared
-	// interactive turn default, so an unconfigured budget starts at the
-	// documented ceiling instead of truncating mid-task. Explicit sources
-	// (--max-turns, mode presets, ZERO_MAX_TURNS, config files) resolved as
-	// MaxTurnsSet and keep their value; an exec-profile budget still wins via
-	// applyProfileTurnBudget below.
-	if !resolved.MaxTurnsSet {
-		resolved.MaxTurns = defaultExecMaxTurns
-	}
+	resolved.MaxTurns = execTurnBudget(resolved)
 	var displacedMaxTurns int
 	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
 	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
@@ -1237,6 +1229,20 @@ func applyExecProfile(options *execOptions) (execprofile.Profile, bool, error) {
 // there: escalation must never clear an effort the user pinned by hand.
 func specProfileEffortFilled(effortFilled bool, specReasoningEffort string) bool {
 	return effortFilled && strings.TrimSpace(specReasoningEffort) == ""
+}
+
+// execTurnBudget applies the headless default to the resolved turn budget: an
+// interactive run can be continued past the shared default by the user, but an
+// exec run has nobody to unstick it, so an unconfigured budget starts at the
+// documented ceiling instead of truncating mid-task. Explicit sources
+// (--max-turns, mode presets, ZERO_MAX_TURNS, config files) resolve as
+// MaxTurnsSet and pass through; an exec-profile budget still wins via
+// applyProfileTurnBudget afterward.
+func execTurnBudget(resolved config.ResolvedConfig) int {
+	if resolved.MaxTurnsSet {
+		return resolved.MaxTurns
+	}
+	return defaultExecMaxTurns
 }
 
 // applyProfileTurnBudget decides the run's turn budget once config is resolved.
