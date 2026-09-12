@@ -199,13 +199,19 @@ func indexCodexTranscript(agent string, root string, path string) (ForeignSessio
 }
 
 func translateCodex(file readSeekStater, options ReadOptions) ([]sessions.AppendEventInput, error) {
+	return translateCodexWithByteLimit(file, options, importByteLimit)
+}
+
+// translateCodexWithByteLimit keeps the production cap fixed while allowing a
+// regression test to exercise tail truncation without allocating 32 MiB.
+func translateCodexWithByteLimit(file readSeekStater, options ReadOptions, maxBytes int) ([]sessions.AppendEventInput, error) {
 	events := newEventTail(effectiveMaxEvents(options.MaxEvents))
 	toolNames := map[string]string{}
 	identities := &importCallIdentities{}
 	activity := newActivityLog(options.Cwd)
 
 	omitted := 0
-	prefixOmitted, err := streamTailLines(file, importLineLimit, importByteLimit, func(line []byte, truncated bool) bool {
+	prefixOmitted, err := streamTailLines(file, importLineLimit, maxBytes, func(line []byte, truncated bool) bool {
 		// A RECORD TOO LONG EVEN FOR THE IMPORT CAP IS REPORTED, NOT DROPPED.
 		// Skipping it silently produced a transcript that looked complete: a
 		// question, no answer, then the follow-up. The marker is the honest

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -70,17 +71,6 @@ func redact(value string) string {
 	value = redaction.RedactString(value, redaction.Options{})
 	normalized, boundaries := stripControlWithBoundaries(value)
 	return redactAtRemovedBoundaries(normalized, boundaries)
-}
-
-// stripControl removes terminal control bytes from imported text. A foreign
-// transcript is untrusted input (invariant #8): an ESC or NUL a title or
-// message carries repaints or corrupts the terminal once it lands in a picker
-// row or a transcript line — the class shipped in #835 (a forged row) and #876
-// (a NUL that panicked the TUI). Tab and newline are kept because a transcript
-// legitimately carries them; every other C0 byte, DEL, and C1 byte is dropped.
-func stripControl(value string) string {
-	stripped, _ := stripControlWithBoundaries(value)
-	return stripped
 }
 
 func stripControlWithBoundaries(value string) (string, []int) {
@@ -150,30 +140,54 @@ type byteSpan struct {
 // It also remaps the remaining removed-control boundaries. Their byte offsets
 // feed redactAtRemovedBoundaries, so leaving offsets from before a replacement
 // could redact unrelated text later in the field.
-func redactDisplaySpaceSplits(value string, boundaries, spaceBoundaries []int) (string, []int) {
+func redactDisplaySpaceSplits(value string, boundaries []int) (string, []int) {
 	const boundaryHint = "\ue000"
-	spans := make([]byteSpan, 0, len(spaceBoundaries))
-	for _, position := range spaceBoundaries {
-		if position < 0 || position >= len(value) || value[position] != ' ' {
+	type fragment struct{ start, end int }
+	fragments := []fragment{}
+	for index := 0; index < len(value); {
+		if !isTextSecretByte(value[index]) {
+			index++
 			continue
 		}
-		left := position
-		for left > 0 && isTextSecretByte(value[left-1]) {
-			left--
+		start := index
+		for index < len(value) && isTextSecretByte(value[index]) {
+			index++
 		}
-		right := position + 1
-		for right < len(value) && isTextSecretByte(value[right]) {
-			right++
+		fragments = append(fragments, fragment{start: start, end: index})
+	}
+
+	spans := []byteSpan{}
+	for start := 0; start < len(fragments); start++ {
+		var candidate strings.Builder
+		for end := start; end < len(fragments); end++ {
+			if end > start {
+				gap := value[fragments[end-1].end:fragments[end].start]
+				if strings.Trim(gap, " ") != "" {
+					break
+				}
+			}
+			candidate.WriteString(value[fragments[end].start:fragments[end].end])
+			probe := redaction.RedactString(boundaryHint+candidate.String(), redaction.Options{})
+			if !strings.Contains(probe, redaction.RedactedSecret) {
+				continue
+			}
+
+			// Once a secret-shaped prefix is recognized, consume following long
+			// fragments separated only by layout. Leaving those fragments visible
+			// recreates the split-key leak; a short prose word after the key remains
+			// readable and cannot expose the eight-byte run this boundary protects.
+			last := end
+			for next := end + 1; next < len(fragments); next++ {
+				gap := value[fragments[next-1].end:fragments[next].start]
+				if strings.Trim(gap, " ") != "" || fragments[next].end-fragments[next].start < 8 {
+					break
+				}
+				last = next
+			}
+			spans = append(spans, byteSpan{start: fragments[start].start, end: fragments[last].end})
+			start = last
+			break
 		}
-		if left == position || right == position+1 {
-			continue
-		}
-		candidate := value[left:position] + value[position+1:right]
-		probe := redaction.RedactString(boundaryHint+candidate, redaction.Options{})
-		if !strings.Contains(probe, redaction.RedactedSecret) {
-			continue
-		}
-		spans = append(spans, byteSpan{start: left, end: right})
 	}
 	if len(spans) == 0 {
 		return value, boundaries
@@ -220,6 +234,38 @@ func isTextSecretByte(value byte) bool {
 		value >= 'A' && value <= 'Z' ||
 		value >= '0' && value <= '9' ||
 		value == '_' || value == '-' || value == '.'
+}
+
+// displayEscapeEnd returns the first byte after one ANSI CSI or OSC sequence.
+// A foreign title can contain a real escape such as ESC[31m; deleting only ESC
+// leaves the printable "[31m" bytes between credential fragments and defeats
+// the post-normalization matcher. Other ESC spellings retain their printable
+// byte and only lose the introducer, matching the prior behavior.
+func displayEscapeEnd(value string, start int) int {
+	if start+1 >= len(value) {
+		return start + 1
+	}
+	switch value[start+1] {
+	case '[':
+		for index := start + 2; index < len(value); index++ {
+			if value[index] >= 0x40 && value[index] <= 0x7e {
+				return index + 1
+			}
+		}
+		return len(value)
+	case ']':
+		for index := start + 2; index < len(value); index++ {
+			if value[index] == '\a' {
+				return index + 1
+			}
+			if value[index] == 0x1b && index+1 < len(value) && value[index+1] == '\\' {
+				return index + 2
+			}
+		}
+		return len(value)
+	default:
+		return start + 1
+	}
 }
 
 // Every event a translation produces carries sessions.ImportedEventKey. The
@@ -795,11 +841,16 @@ func DisplayField(value string) string {
 	var b strings.Builder
 	b.Grow(len(value))
 	boundaries := []int{}
-	spaceBoundaries := []int{}
-	for _, r := range value {
+	for index := 0; index < len(value); {
+		if value[index] == 0x1b {
+			boundaries = appendBoundary(boundaries, b.Len())
+			index = displayEscapeEnd(value, index)
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(value[index:])
+		index += size
 		if r == '\t' || r == '\n' || r == '\r' {
 			boundaries = appendBoundary(boundaries, b.Len())
-			spaceBoundaries = appendBoundary(spaceBoundaries, b.Len())
 			b.WriteRune(' ')
 			continue
 		}
@@ -811,6 +862,6 @@ func DisplayField(value string) string {
 		}
 		b.WriteRune(r)
 	}
-	normalized, boundaries := redactDisplaySpaceSplits(b.String(), boundaries, spaceBoundaries)
+	normalized, boundaries := redactDisplaySpaceSplits(b.String(), boundaries)
 	return strings.TrimSpace(redactAtRemovedBoundaries(normalized, boundaries))
 }

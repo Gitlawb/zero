@@ -127,12 +127,10 @@ func discoverFamily1(
 		return nil, nil
 	}
 
-	// findTranscript resolves an id against globSessionDirs, which Lstat-skips a
-	// symlinked project directory (following one could descend into a credential
-	// tree). The slug fast path must narrow WITHIN that same set, not join
-	// root/slug on its own: joining independently would glob through a symlinked
-	// candidate that findTranscript then skips, so Discover would list a session
-	// Read refuses to import — list-then-refuse.
+	// Discovery and the later selected-source open both rely on the directories
+	// returned by globSessionDirs, which Lstat-skips a symlinked project directory
+	// (following one could descend into a credential tree). The slug fast path
+	// must narrow WITHIN that same set, not join root/slug on its own.
 	sessionDirs := globSessionDirs(root)
 	dirs := []string{}
 	if strings.TrimSpace(cwd) != "" {
@@ -288,23 +286,6 @@ func family1Text(raw json.RawMessage) string {
 		}
 	}
 	return strings.Join(parts, "\n")
-}
-
-// findTranscript resolves an id to a file by comparing base names against the
-// glob results, never by joining the id onto a root. See transcriptID.
-func findTranscript(root string, id string) (string, error) {
-	wanted := strings.TrimSpace(id)
-	if wanted == "" || strings.TrimSpace(root) == "" {
-		return "", errors.New("agentsessions: no such session: " + id)
-	}
-	for _, dir := range globSessionDirs(root) {
-		for _, path := range globTranscripts(root, filepath.Join(dir, "*"+transcriptExt)) {
-			if transcriptID(path) == wanted {
-				return path, nil
-			}
-		}
-	}
-	return "", errors.New("agentsessions: no such session: " + id)
 }
 
 func sortByRecency(items []ForeignSession) {

@@ -135,13 +135,13 @@ func TestTheImportNoteSanitizesTheForeignIdAndCwd(t *testing.T) {
 	}
 	// Exact text, so a note that simply dropped the id would not pass. The
 	// sanitizer deletes the escape and keeps the rest of the name legible.
-	wantPrefix := "Imported claude-code session abc[2Kdef into Zero as " + zeroID
+	wantPrefix := "Imported claude-code session abcdef into Zero as " + zeroID
 	if !strings.HasPrefix(note, wantPrefix) {
 		t.Errorf("note = %q, want it to start %q", note, wantPrefix)
 	}
 	// And the second sentence, which names the recorded workspace. The temp cwd
 	// above is never /elsewhere, so this branch always runs.
-	const wantCwd = "\nIt ran in /elsewhere/[31mred/proj, so paths it mentions refer to that tree."
+	const wantCwd = "\nIt ran in /elsewhere/red/proj, so paths it mentions refer to that tree."
 	if !strings.HasSuffix(note, wantCwd) {
 		t.Errorf("note = %q, want it to end %q", note, wantCwd)
 	}
@@ -242,8 +242,8 @@ func TestTheImportNoteCleansAStoredCwdItDidNotWrite(t *testing.T) {
 		},
 	}
 	got := importedSessionNote(result, t.TempDir())
-	const want = "Imported claude-code session abc[2Kdef into Zero as zero_1 (2 events).\n" +
-		"It ran in /elsewhere/[31mred[0m/proj, so paths it mentions refer to that tree."
+	const want = "Imported claude-code session abcdef into Zero as zero_1 (2 events).\n" +
+		"It ran in /elsewhere/red/proj, so paths it mentions refer to that tree."
 	if got != want {
 		t.Errorf("note = %q, want %q", got, want)
 	}

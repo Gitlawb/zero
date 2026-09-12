@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // headLimit bounds a discovery-time read of a transcript.
@@ -69,18 +68,6 @@ type countingReader struct {
 func (reader *countingReader) Read(buffer []byte) (int, error) {
 	read, err := reader.inner.Read(buffer)
 	reader.count += int64(read)
-	return read, err
-}
-
-// scanHead calls visit with each of the first few lines of path, stopping early
-// when visit returns false. It returns the number of bytes read from disk.
-//
-// Lines are handed over whole up to MaxLineBytes and truncated beyond it. A
-// truncated line will not parse as JSON and is simply skipped by the caller,
-// which is the right outcome: a record too large to fit the head budget is a
-// giant tool result, never the small metadata record discovery is looking for.
-func scanHead(root string, path string, limit headLimit, visit func(line []byte, truncated bool) bool) (int64, error) {
-	read, _, err := scanHeadSnapshot(root, path, limit, visit)
 	return read, err
 }
 
@@ -158,39 +145,6 @@ func openContained(root string, path string) (*os.File, error) {
 	}
 	defer handle.Close()
 	return handle.Open(relative)
-}
-
-// streamLines calls visit with every line of path, without bounding the total.
-// This is the full-read path used once a specific session has been named, where
-// the user has asked for the contents and truncating them silently would be a
-// lie. Individual lines are still capped: a record larger than maxLineBytes is
-// truncated rather than buffered whole, so one 200 MB tool result cannot
-// exhaust memory.
-func streamLines(root string, path string, maxLineBytes int, visit func(line []byte, truncated bool) bool) error {
-	// CONTAINED FOR THE SAME REASON scanHead IS, and with more at stake. This is
-	// the path that reads a transcript's actual CONTENT and writes it into a Zero
-	// session, so a swapped symlink here does not merely mislead an index — it
-	// copies whatever it points at into the user's own store. Hardening the index
-	// and leaving this open would have fixed the instance and not the class.
-	file, err := openContained(root, path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	reader := bufio.NewReaderSize(file, 64<<10)
-	for {
-		content, truncated, err := readBoundedLineTruncated(reader, maxLineBytes)
-		if (len(content) > 0 || truncated) && !visit(content, truncated) {
-			return nil
-		}
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-	}
 }
 
 // streamTailLines visits complete records from at most the final maxBytes of a
@@ -311,31 +265,6 @@ func terminatorBytes(chunk []byte) int {
 		return 2
 	}
 	return 1
-}
-
-// fileModTime is the transcript's last-write time, used as the session's
-// last-activity stamp. Reading the final record would be more precise and would
-// cost a seek plus a read at the end of a file that may be 73 MB — the mtime is
-// the same answer for free.
-//
-// CONTAINED FOR THE SAME REASON scanHead AND streamLines ARE, and it was the
-// third site of the one class. os.Stat resolves the path itself and follows a
-// symlink straight out of the store, so an entry swapped after globTranscripts
-// took its verdict reported the mtime of whatever the link pointed at — which
-// decides where the session sorts in the picker and what "last active" claims.
-// Stat on the handle openContained returned describes the file that was
-// actually opened inside the root, so there is no window between check and use.
-func fileModTime(root string, path string) time.Time {
-	file, err := openContained(root, path)
-	if err != nil {
-		return time.Time{}
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return time.Time{}
-	}
-	return info.ModTime()
 }
 
 // readSeekStater is what a bounded transcript read needs from its handle. It is

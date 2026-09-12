@@ -17,12 +17,16 @@ func translateFamily1At(root string, path string, options ReadOptions) ([]sessio
 }
 
 func translateCodexAt(root string, path string, options ReadOptions) ([]sessions.AppendEventInput, error) {
+	return translateCodexAtWithByteLimit(root, path, options, importByteLimit)
+}
+
+func translateCodexAtWithByteLimit(root string, path string, options ReadOptions, maxBytes int) ([]sessions.AppendEventInput, error) {
 	file, err := openContained(root, path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	return translateCodex(file, options)
+	return translateCodexWithByteLimit(file, options, maxBytes)
 }
 
 func streamTailLinesAt(root string, path string, maxLineBytes int, maxBytes int, visit func(line []byte, truncated bool) bool) (bool, error) {

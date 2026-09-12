@@ -57,10 +57,10 @@ func TestSessionListSanitizesPersistedModelMetadata(t *testing.T) {
 	if strings.Contains(line, "\x1b") || strings.Contains(line, secret) {
 		t.Fatalf("unsafe model metadata reached the session list: %q", line)
 	}
-	if !strings.Contains(line, "model=claude[2K-opus [REDACTED]") {
+	if !strings.Contains(line, "model=claude-opus [REDACTED]") {
 		t.Fatalf("session list lost safe model text: %q", line)
 	}
-	if !strings.Contains(line, "tag=imported:codex:filename[2K [REDACTED]") {
+	if !strings.Contains(line, "tag=imported:codex:filename [REDACTED]") {
 		t.Fatalf("session list did not sanitize the raw imported provenance tag: %q", line)
 	}
 }
@@ -96,7 +96,7 @@ func TestImportSummarySanitizesTheTitleAndCwdItPrints(t *testing.T) {
 	// fields entirely, and the point is that they stay readable.
 	for _, want := range []string{
 		"  title:        rotate the key [REDACTED]\n",
-		"  cwd:          /w/[2Kmoved/proj\n",
+		"  cwd:          /w/moved/proj\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("import summary is missing %q:\n%s", want, out)
@@ -116,7 +116,7 @@ func TestImportSummarySanitizesTheTitleAndCwdItPrints(t *testing.T) {
 // itself and cannot be satisfied by an earlier guard declining the input.
 func TestImportWorkspaceWarningSanitizesTheRecordedPath(t *testing.T) {
 	warning := importWorkspaceWarning("/elsewhere/\x1b[31mred\x1b[0m/proj")
-	const want = "Note: this session ran in /elsewhere/[31mred[0m/proj, not the current directory.\n" +
+	const want = "Note: this session ran in /elsewhere/red/proj, not the current directory.\n" +
 		"      Paths mentioned in it refer to that tree."
 	if warning != want {
 		t.Errorf("warning = %q, want %q", warning, want)
@@ -300,11 +300,11 @@ func TestTheImportSummaryCleansAStoredTitleAndCwdItDidNotWrite(t *testing.T) {
 	}
 	got := importSummaryLines(result)
 	want := []string{
-		"Imported claude-code session abc[2Kdef",
+		"Imported claude-code session abcdef",
 		"",
 		"  zero session: zero_1",
 		"  title:        rotate the key [REDACTED]",
-		"  cwd:          /w/[2Kmoved/proj",
+		"  cwd:          /w/moved/proj",
 		"  events:       3",
 	}
 	if len(got) != len(want) {

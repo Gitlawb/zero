@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestScanHeadReadsFarLessThanTheWholeFile is the test that keeps `sessions
@@ -36,7 +35,7 @@ func TestScanHeadReadsFarLessThanTheWholeFile(t *testing.T) {
 		t.Fatalf("fixture is only %d bytes; it must dwarf the head budget to prove anything", fileSize)
 	}
 
-	read, err := scanHead("", path, defaultHeadLimit, func([]byte, bool) bool { return true })
+	read, _, err := scanHeadSnapshot("", path, defaultHeadLimit, func([]byte, bool) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +100,7 @@ func TestScanHeadStopsWhenTheVisitorIsDone(t *testing.T) {
 	writeFile(t, path, strings.Join(lines, "\n")+"\n")
 
 	seen := 0
-	read, err := scanHead("", path, defaultHeadLimit, func([]byte, bool) bool {
+	read, _, err := scanHeadSnapshot("", path, defaultHeadLimit, func([]byte, bool) bool {
 		seen++
 		return seen < 2
 	})
@@ -125,7 +124,7 @@ func TestScanHeadHonoursItsLineBudget(t *testing.T) {
 	writeFile(t, path, strings.Join(lines, "\n")+"\n")
 
 	seen := 0
-	if _, err := scanHead("", path, defaultHeadLimit, func([]byte, bool) bool { seen++; return true }); err != nil {
+	if _, _, err := scanHeadSnapshot("", path, defaultHeadLimit, func([]byte, bool) bool { seen++; return true }); err != nil {
 		t.Fatal(err)
 	}
 	if seen != defaultHeadLimit.MaxLines {
@@ -136,12 +135,12 @@ func TestScanHeadHonoursItsLineBudget(t *testing.T) {
 func TestScanHeadOnAMissingFileIsAnError(t *testing.T) {
 	// Unlike globbing, an unreadable file that discovery has already decided
 	// exists is worth reporting to the caller, which drops that one entry.
-	if _, err := scanHead("", filepath.Join(t.TempDir(), "absent.jsonl"), defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
+	if _, _, err := scanHeadSnapshot("", filepath.Join(t.TempDir(), "absent.jsonl"), defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
 		t.Error("scanHead on a missing file returned no error")
 	}
 }
 
-func TestStreamLinesReadsEverything(t *testing.T) {
+func TestStreamTailLinesReadsEverythingWithinItsBudget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "all.jsonl")
 	lines := make([]string, 0, 300)
 	for i := 0; i < 300; i++ {
@@ -150,23 +149,22 @@ func TestStreamLinesReadsEverything(t *testing.T) {
 	writeFile(t, path, strings.Join(lines, "\n")+"\n")
 
 	seen := 0
-	if err := streamLines("", path, 64<<10, func([]byte, bool) bool { seen++; return true }); err != nil {
+	if _, err := streamTailLinesAt("", path, 64<<10, importByteLimit, func([]byte, bool) bool { seen++; return true }); err != nil {
 		t.Fatal(err)
 	}
 	if seen != 300 {
-		t.Errorf("streamLines visited %d lines, want all 300 — a full read must not "+
-			"inherit the head budget", seen)
+		t.Errorf("streamTailLinesAt visited %d lines, want all 300 within the byte budget", seen)
 	}
 }
 
-func TestStreamLinesToleratesAMissingTrailingNewline(t *testing.T) {
+func TestStreamTailLinesToleratesAMissingTrailingNewline(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "no-newline.jsonl")
 	// A live transcript is appended to constantly; the last record frequently
 	// has no terminator yet.
 	writeFile(t, path, `{"type":"a"}`+"\n"+`{"type":"b"}`)
 
 	seen := 0
-	if err := streamLines("", path, 64<<10, func([]byte, bool) bool { seen++; return true }); err != nil {
+	if _, err := streamTailLinesAt("", path, 64<<10, importByteLimit, func([]byte, bool) bool { seen++; return true }); err != nil {
 		t.Fatal(err)
 	}
 	if seen != 2 {
@@ -245,7 +243,7 @@ func TestARecordThatExactlyFillsTheCapIsNotTruncated(t *testing.T) {
 				t.Fatal(err)
 			}
 			var truncated bool
-			if err := streamLines("", path, keep, func(_ []byte, wasTruncated bool) bool {
+			if _, err := streamTailLinesAt("", path, keep, importByteLimit, func(_ []byte, wasTruncated bool) bool {
 				truncated = truncated || wasTruncated
 				return true
 			}); err != nil {
@@ -263,11 +261,11 @@ func TestARecordThatExactlyFillsTheCapIsNotTruncated(t *testing.T) {
 // I/O failure was indistinguishable from one indexed off a whole file.
 func TestScanHeadReportsAReadFailure(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := scanHead("", filepath.Join(dir, "gone.jsonl"), defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
+	if _, _, err := scanHeadSnapshot("", filepath.Join(dir, "gone.jsonl"), defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
 		t.Error("scanning a missing transcript reported success")
 	}
 	// A directory opens but cannot be read as a file: a read error that is not EOF.
-	if _, err := scanHead("", dir, defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
+	if _, _, err := scanHeadSnapshot("", dir, defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
 		t.Error("scanning a directory reported success; a non-EOF read error was swallowed")
 	}
 }
@@ -282,7 +280,7 @@ func TestScanHeadRefusesAPathOutsideTheRoot(t *testing.T) {
 	if err := os.WriteFile(outside, []byte(`{"type":"user","cwd":"/w"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scanHead(root, outside, defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
+	if _, _, err := scanHeadSnapshot(root, outside, defaultHeadLimit, func([]byte, bool) bool { return true }); err == nil {
 		t.Errorf("scanHead read %q from outside the store root %q", outside, root)
 	}
 }
@@ -291,63 +289,19 @@ func TestScanHeadRefusesAPathOutsideTheRoot(t *testing.T) {
 // scanHead only builds a picker row; this path reads a transcript's actual
 // content and writes it into the user's own Zero session, so a symlink swapped
 // in after the glob would copy whatever it points at into their store.
-func TestStreamLinesRefusesAPathOutsideTheRoot(t *testing.T) {
+func TestStreamTailLinesRefusesAPathOutsideTheRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "elsewhere.jsonl")
 	if err := os.WriteFile(outside, []byte(`{"type":"user"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	seen := 0
-	err := streamLines(root, outside, 1<<20, func([]byte, bool) bool { seen++; return true })
+	_, err := streamTailLinesAt(root, outside, 1<<20, importByteLimit, func([]byte, bool) bool { seen++; return true })
 	if err == nil {
-		t.Errorf("streamLines read %q from outside the store root %q", outside, root)
+		t.Errorf("streamTailLinesAt read %q from outside the store root %q", outside, root)
 	}
 	if seen != 0 {
-		t.Errorf("streamLines handed the caller %d lines from outside the root", seen)
-	}
-}
-
-// THE LAST-ACTIVITY STAMP IS CONTAINED TOO — the third site of the same class,
-// and the one that is easiest to miss because it never reads a byte of content.
-// os.Stat resolves the path itself, so an entry swapped for a symlink after
-// globTranscripts took its verdict reported the mtime of whatever the link
-// pointed at. That stamp is what "last active" claims and what the picker sorts
-// on, so a session could be pushed to the top of the list by a file the user
-// never opened.
-func TestFileModTimeRefusesASymlinkOutOfTheRoot(t *testing.T) {
-	root := t.TempDir()
-	transcript := filepath.Join(root, "session.jsonl")
-	writeFile(t, transcript, `{"type":"user","cwd":"/w"}`+"\n")
-
-	// The control arm. Without it a fileModTime that always returned the zero
-	// time would satisfy the escape assertion below for the wrong reason.
-	inside := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
-	if err := os.Chtimes(transcript, inside, inside); err != nil {
-		t.Fatal(err)
-	}
-	if got := fileModTime(root, transcript); !got.UTC().Equal(inside) {
-		t.Fatalf("fileModTime on a contained transcript = %v, want %v", got.UTC(), inside)
-	}
-
-	outside := filepath.Join(t.TempDir(), "secret.jsonl")
-	writeFile(t, outside, `{"type":"user","cwd":"/w"}`+"\n")
-	elsewhere := time.Date(1999, 12, 31, 23, 59, 58, 0, time.UTC)
-	if err := os.Chtimes(outside, elsewhere, elsewhere); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(transcript); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, transcript); err != nil {
-		t.Skipf("this platform cannot create symlinks: %v", err)
-	}
-
-	got := fileModTime(root, transcript)
-	if got.UTC().Equal(elsewhere) {
-		t.Errorf("fileModTime followed the symlink out of %q and reported %v", root, got.UTC())
-	}
-	if !got.IsZero() {
-		t.Errorf("fileModTime = %v, want the zero time for a path it must not open", got.UTC())
+		t.Errorf("streamTailLinesAt handed the caller %d lines from outside the root", seen)
 	}
 }
 
