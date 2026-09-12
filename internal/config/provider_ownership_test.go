@@ -1,6 +1,64 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestProviderRowOwnershipAtDistinguishesMissingFromBlockedPaths(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		for _, blocked := range []bool{false, true} {
+			name := "missing"
+			if blocked {
+				name = "blocked"
+			}
+			if nested {
+				name += " ancestor"
+			}
+			t.Run(name, func(t *testing.T) {
+				parent := filepath.Join(t.TempDir(), "config-root")
+				const original = "not a directory"
+				if blocked {
+					if err := os.WriteFile(parent, []byte(original), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if !nested {
+					if err := os.Mkdir(parent, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				path := filepath.Join(parent, "config.json")
+				if nested {
+					path = filepath.Join(parent, "missing", "nested", "config.json")
+				}
+				// Exercise Windows' path-not-found classification on every host,
+				// even where the native read returns ENOTDIR instead.
+				missingErr := &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
+				if err := persistedProviderReadError(path, missingErr); (err != nil) != blocked {
+					t.Fatalf("path-not-found classification error = %v, blocked = %t", err, blocked)
+				}
+				owner, err := ProviderRowOwnershipAt(path, []string{"work"}, "work")
+				if blocked {
+					if err == nil {
+						t.Fatal("blocked config path was treated as an absent provider")
+					}
+					after, readErr := os.ReadFile(parent)
+					if readErr != nil || string(after) != original {
+						t.Fatalf("ownership lookup changed blocking file: %v", readErr)
+					}
+				} else {
+					if err != nil || owner.UserBacked || owner.Lookup != ProviderNameNotFound {
+						t.Fatalf("missing config ownership = %+v, error = %v", owner, err)
+					}
+					if _, err := os.Stat(path); !os.IsNotExist(err) {
+						t.Fatalf("read-only lookup created config directory: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
 
 // The ownership matrix. Every row is a shape the resolver can validly produce,
 // and the answer decides whether a user-config or credential-store mutator may
