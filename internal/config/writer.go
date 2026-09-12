@@ -551,11 +551,8 @@ func persistedProviders(path string) ([]ProviderProfile, error) {
 
 func persistedFileConfig(path string) (FileConfig, error) {
 	data, err := os.ReadFile(strings.TrimSpace(path))
-	if os.IsNotExist(err) {
-		return FileConfig{}, nil
-	}
 	if err != nil {
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+		return FileConfig{}, persistedProviderReadError(strings.TrimSpace(path), err)
 	}
 	var cfg FileConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -806,6 +803,29 @@ func validateProviderWrite(cfg FileConfig, name string) error {
 		}
 	}
 	return nil
+}
+
+// Windows reports a regular-file ancestor as path-not-found too. Only treat
+// missing config as an empty provider list when its nearest existing ancestor
+// is a directory; otherwise callers must report the persistence failure rather
+// than silently treating a saved provider as session-only. This is diagnostic,
+// not a containment check: writers still acquire their lock and open the path.
+func persistedProviderReadError(path string, readErr error) error {
+	if os.IsNotExist(readErr) {
+		for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
+			info, err := os.Stat(parent)
+			if err == nil {
+				if !info.IsDir() {
+					return fmt.Errorf("read config %s: ancestor %s is not a directory", path, parent)
+				}
+				return nil
+			}
+			if !os.IsNotExist(err) || filepath.Dir(parent) == parent {
+				return fmt.Errorf("read config %s: inspect ancestor %s: %w", path, parent, err)
+			}
+		}
+	}
+	return fmt.Errorf("read config %s: %w", path, readErr)
 }
 
 func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileConfig, error) {
