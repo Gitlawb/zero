@@ -206,9 +206,9 @@ func TestAnImportedSessionStoresADisplaySafeTitleAndCwd(t *testing.T) {
 	if result.Session.Title != wantTitle {
 		t.Errorf("stored title = %q, want %q", result.Session.Title, wantTitle)
 	}
-	// The escape is gone entirely and the return left a space behind it, so the
-	// stored path is one line and still legible.
-	const wantCwd = "/w/[2Kmoved hidden/proj"
+	// The complete ANSI erase-line sequence is gone and the return left a space
+	// behind it, so the stored path is one line and still legible.
+	const wantCwd = "/w/moved hidden/proj"
 	if result.Session.Cwd != wantCwd {
 		t.Errorf("stored cwd = %q, want %q", result.Session.Cwd, wantCwd)
 	}
@@ -216,7 +216,7 @@ func TestAnImportedSessionStoresADisplaySafeTitleAndCwd(t *testing.T) {
 	if result.Session.WorkspaceKey != filepath.Clean(wantWorkspaceKey) {
 		t.Errorf("workspace key = %q, want %q", result.Session.WorkspaceKey, filepath.Clean(wantWorkspaceKey))
 	}
-	const wantModel = "claude[2K-opus [REDACTED]"
+	const wantModel = "claude-opus [REDACTED]"
 	if result.Session.ModelID != "" || result.Session.SourceModelID != wantModel {
 		t.Errorf("stored operational/source model = %q / %q, want empty / %q", result.Session.ModelID, result.Session.SourceModelID, wantModel)
 	}

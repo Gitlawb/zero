@@ -137,7 +137,8 @@ func TestABidiOverrideIsStrippedFromTitlesAndToolNames(t *testing.T) {
 			t.Errorf("a format character %q survived DisplayField: %q", hidden, got)
 		}
 		toolName := "read" + hidden + "_file"
-		if got := stripControl(toolName); strings.Contains(got, hidden) {
+		got, _ := stripControlWithBoundaries(toolName)
+		if strings.Contains(got, hidden) {
 			t.Errorf("a format character %q survived stripControl: %q", hidden, got)
 		}
 	}
@@ -147,7 +148,8 @@ func TestABidiOverrideIsStrippedFromTitlesAndToolNames(t *testing.T) {
 	}
 	// And a newline in a transcript body is still legitimate content, so
 	// stripControl must not have widened into it.
-	if got := stripControl("line one\nline two"); !strings.Contains(got, "\n") {
+	got, _ := stripControlWithBoundaries("line one\nline two")
+	if !strings.Contains(got, "\n") {
 		t.Errorf("stripControl removed a legitimate newline: %q", got)
 	}
 }
@@ -261,6 +263,11 @@ func TestDisplayFieldDoesNotLeakCredentialFragmentsAcrossNormalizedSeparators(t 
 		{name: "right-to-left override", value: "\u202e"},
 		{name: "carriage return", value: "\r"},
 		{name: "tab", value: "\t"},
+		{name: "CRLF", value: "\r\n"},
+		{name: "space", value: " "},
+		{name: "two spaces", value: "  "},
+		{name: "CSI color", value: "\x1b[31m"},
+		{name: "OSC title", value: "\x1b]0;title\a"},
 	}
 
 	for _, separator := range separators {
@@ -271,6 +278,28 @@ func TestDisplayFieldDoesNotLeakCredentialFragmentsAcrossNormalizedSeparators(t 
 				t.Fatalf("DisplayField did not retain readable context and a redaction marker: %q", got)
 			}
 		})
+	}
+
+	got := DisplayField("problem " + key[:13] + "\x1b[31m" + key[13:] + " end")
+	assertNoCredentialRun(t, got, key, 8)
+	if !strings.Contains(got, "problem") || !strings.Contains(got, "end") || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("DisplayField did not retain context for an early CSI split: %q", got)
+	}
+
+	for _, splitPoints := range [][]int{{20, 60}, {10, 20, 30, 40, 50, 60, 70, 80, 90}} {
+		var split strings.Builder
+		start := 0
+		for _, end := range splitPoints {
+			split.WriteString(key[start:end])
+			split.WriteByte('\t')
+			start = end
+		}
+		split.WriteString(key[start:])
+		got := DisplayField("problem " + split.String() + " end")
+		assertNoCredentialRun(t, got, key, 8)
+		if !strings.Contains(got, "problem") || !strings.Contains(got, "end") || !strings.Contains(got, "[REDACTED]") {
+			t.Fatalf("DisplayField did not retain context for split points %v: %q", splitPoints, got)
+		}
 	}
 }
 

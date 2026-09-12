@@ -57,7 +57,8 @@ func TestImportedControlBytesAreStripped(t *testing.T) {
 // TestStripControlKeepsTabAndNewline guards the one carve-out: transcripts
 // legitimately carry tab and newline, and dropping them would mangle real text.
 func TestStripControlKeepsTabAndNewline(t *testing.T) {
-	if got := stripControl("a\tb\nc\rd\x1be\x00f"); got != "a\tb\ncdef" {
+	got, _ := stripControlWithBoundaries("a\tb\nc\rd\x1be\x00f")
+	if got != "a\tb\ncdef" {
 		t.Errorf("stripControl = %q, want tab and newline kept and ESC/NUL dropped", got)
 	}
 }

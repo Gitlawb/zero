@@ -155,7 +155,8 @@ func TestCodexUnknownToolOutcomePreservesOutputWithoutClaimingAFileChange(t *tes
 }
 
 func TestCodexByteTailDropsOrphanResultButKeepsLaterPairAndDisclosure(t *testing.T) {
-	padding := strings.Repeat("x", importByteLimit)
+	const testByteLimit = 4 << 10
+	padding := strings.Repeat("x", testByteLimit)
 	_, path := writeCodexStore(t,
 		`{"type":"session_meta","timestamp":"2026-08-01T10:00:00.000Z","payload":{"session_id":"s","cwd":"/w"}}`,
 		`{"type":"response_item","payload":{"type":"function_call","name":"old_call","call_id":"old","arguments":"{}"}}`,
@@ -164,7 +165,7 @@ func TestCodexByteTailDropsOrphanResultButKeepsLaterPairAndDisclosure(t *testing
 		`{"type":"response_item","payload":{"type":"function_call","name":"new_call","call_id":"new","arguments":"{}"}}`,
 		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"new","output":"kept output"}}`,
 	)
-	events, err := translateCodexAt("", path, ReadOptions{})
+	events, err := translateCodexAtWithByteLimit("", path, ReadOptions{}, testByteLimit)
 	if err != nil {
 		t.Fatal(err)
 	}

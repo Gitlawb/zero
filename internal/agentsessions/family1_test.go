@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/sessions"
 )
 
 // The fixtures below are hand-written to the shapes observed in a real
@@ -178,9 +180,9 @@ func TestSessionsAreListedMostRecentFirst(t *testing.T) {
 	}
 }
 
-// TestFindTranscriptCannotBeTalkedIntoOpeningAnArbitraryPath is why ids are
-// matched against glob results instead of being joined onto a root.
-func TestFindTranscriptCannotBeTalkedIntoOpeningAnArbitraryPath(t *testing.T) {
+// Import resolves ids only from discovery results; it never joins caller text
+// onto the foreign store root.
+func TestImportCannotBeTalkedIntoOpeningAnArbitraryPath(t *testing.T) {
 	root := writeClaudeStore(t, map[string][]string{
 		"-Users-someone-proj/aaa.jsonl": {
 			`{"type":"user","cwd":"/Users/someone/proj","sessionId":"aaa","message":{"role":"user","content":"x"}}`,
@@ -190,6 +192,8 @@ func TestFindTranscriptCannotBeTalkedIntoOpeningAnArbitraryPath(t *testing.T) {
 	// agent ships one.
 	secret := filepath.Join(filepath.Dir(root), "auth.json")
 	writeFile(t, secret, `{"access_token":"tok_MUST_NEVER_BE_READ"}`)
+	adapter := family1{name: "claude-code", root: root}
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(t.TempDir(), "sessions")})
 
 	for _, hostile := range []string{
 		"../auth",
@@ -199,13 +203,13 @@ func TestFindTranscriptCannotBeTalkedIntoOpeningAnArbitraryPath(t *testing.T) {
 		strings.TrimSuffix(secret, ".json"),
 		"/etc/passwd",
 	} {
-		if path, err := findTranscript(root, hostile); err == nil {
-			t.Errorf("findTranscript(%q) resolved to %q, want an error", hostile, path)
+		if _, err := Import(store, adapter, hostile, ReadOptions{}); err == nil {
+			t.Errorf("Import(%q) succeeded, want an error", hostile)
 		}
 	}
 
-	if path, err := findTranscript(root, "aaa"); err != nil || filepath.Base(path) != "aaa.jsonl" {
-		t.Errorf("findTranscript(\"aaa\") = (%q, %v), want the real transcript", path, err)
+	if _, err := Import(store, adapter, "aaa", ReadOptions{}); err != nil {
+		t.Errorf("Import(\"aaa\") = %v, want the discovered transcript", err)
 	}
 }
 
@@ -303,9 +307,9 @@ func ids(items []ForeignSession) []string {
 
 // TestASymlinkedSlugDirectoryIsNotListedThenRefused pins the fix for the
 // list-then-refuse divergence. The slug fast path used to glob straight through
-// a symlinked project directory, while findTranscript (via globSessionDirs)
-// Lstat-skips one — so Discover listed a session Import could not resolve. Both
-// must agree; here, by both declining to follow the symlink.
+// a symlinked project directory, while selected-source resolution skips it — so
+// Discover listed a session Import could not resolve. Both must agree; here, by
+// both declining to follow the symlink.
 func TestASymlinkedSlugDirectoryIsNotListedThenRefused(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "projects")
 	if err := os.MkdirAll(root, 0o755); err != nil {

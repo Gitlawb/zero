@@ -66,7 +66,7 @@ func TestPiSessionsImportTheirRealToolSchema(t *testing.T) {
 	calls := map[string]call{}
 	results := map[string]outcome{}
 	var texts []string
-	summary := ""
+	var summaries []string
 	for _, event := range events {
 		var payload map[string]any
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -80,7 +80,7 @@ func TestPiSessionsImportTheirRealToolSchema(t *testing.T) {
 			results[get("toolCallId")] = outcome{status: get("status"), output: get("output")}
 		case sessions.EventMessage:
 			if NoteEventIsSummary(payload) {
-				summary = get("content")
+				summaries = append(summaries, get("content"))
 				continue
 			}
 			texts = append(texts, get("role")+": "+get("content"))
@@ -114,6 +114,7 @@ func TestPiSessionsImportTheirRealToolSchema(t *testing.T) {
 	if strings.Contains(joined, "private chain") {
 		t.Errorf("reasoning was imported without being asked for:\n%s", joined)
 	}
+	summary := strings.Join(summaries, "\n")
 	// Only the confirmed failure is a factual claim; the failed write must not
 	// be reported as a change to parser.go.
 	if !strings.Contains(summary, "permission denied") {
