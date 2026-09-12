@@ -256,11 +256,8 @@ func (m model) sessionPickerCmd() (model, tea.Cmd) {
 		now:              m.now,
 	}
 	return m, func() tea.Msg {
-		picker, localErr := snapshot.buildSessionPicker()
-		warning := ""
-		if localErr != nil {
-			warning = "Sessions\nWarning: could not read local Zero sessions; showing external sessions only: " + agentsessions.DisplayField(localErr.Error())
-		}
+		picker, foreignProblems, localErr := snapshot.buildSessionPicker()
+		warning := sessionPickerWarning(localErr, foreignProblems)
 		msg := sessionPickerLoadedMsg{originSession: originSession, generation: generation}
 		if picker != nil {
 			msg.picker, msg.text = picker, warning
@@ -273,6 +270,28 @@ func (m model) sessionPickerCmd() (model, tea.Cmd) {
 		msg.text = snapshot.resumeText()
 		return msg
 	}
+}
+
+// sessionPickerWarning keeps partial discovery failures visible without
+// turning them into a failed picker. Errors may contain paths or transcript
+// identifiers from foreign stores, so this is also the single display
+// boundary that sanitizes every local and foreign problem before it reaches
+// the terminal transcript.
+func sessionPickerWarning(localErr error, foreignProblems []error) string {
+	warnings := []string{}
+	if localErr != nil {
+		warnings = append(warnings, "Warning: could not read local Zero sessions; showing external sessions only: "+agentsessions.DisplayField(localErr.Error()))
+	}
+	for _, problem := range foreignProblems {
+		if problem == nil {
+			continue
+		}
+		warnings = append(warnings, "Warning: could not read some external sessions: "+agentsessions.DisplayField(problem.Error()))
+	}
+	if len(warnings) == 0 {
+		return ""
+	}
+	return "Sessions\n" + strings.Join(warnings, "\n")
 }
 
 // sessionPickerResultIsCurrent reports whether a discovery result still
@@ -495,16 +514,17 @@ func sessionWhenTime(parsed time.Time, now time.Time) string {
 // one row per resumable session — title (Label) + id and relative age (Meta). Returns
 // nil when there are no resumable sessions so the caller falls back to the text path.
 func (m model) newSessionPicker() *commandPicker {
-	picker, _ := m.buildSessionPicker()
+	picker, _, _ := m.buildSessionPicker()
 	return picker
 }
 
 // buildSessionPicker keeps the local and external sources independent. A local
-// store failure removes only local rows; callers receive the error separately
-// so they can warn without hiding discoverable external work.
-func (m model) buildSessionPicker() (*commandPicker, error) {
+// store failure removes only local rows; callers receive local and foreign
+// problems separately so they can warn without hiding discoverable work from
+// the sources that did succeed.
+func (m model) buildSessionPicker() (*commandPicker, []error, error) {
 	if m.sessionStore == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// A FAILED READ IS THE ONLY REASON TO GIVE UP HERE. An EMPTY local history is
 	// not: foreign sessions are discovered independently of the store, and the
@@ -555,7 +575,8 @@ func (m model) buildSessionPicker() (*commandPicker, error) {
 			Tab:  agent,
 		})
 	}
-	return pickerFromParts(items, m.foreignSessionItems(metas, now)), err
+	foreign, problems := m.foreignSessionItems(metas, now)
+	return pickerFromParts(items, foreign), problems, err
 }
 
 // pickerFromParts assembles the picker from the two independent sources, and
@@ -674,8 +695,9 @@ func importedSessionNote(result agentsessions.ImportResult, workspace string) st
 //
 // Reading these is a bounded index of each transcript's head, never the whole
 // file (see internal/agentsessions). A store that is missing or has changed
-// shape contributes nothing rather than failing the picker — /resume must still
-// open on a machine where one vendor shipped a new format this morning.
+// shape contributes a caller-visible problem rather than failing the picker —
+// /resume must still open on a machine where one vendor shipped a new format
+// this morning, without pretending the partial index is complete.
 // importedSourceRefs is the set of foreign sessions that have actually been
 // imported, so the picker can skip offering them a second time — listing a
 // session twice, once as itself and once as its copy, is worse than not offering
@@ -700,17 +722,17 @@ func importedSourceRefs(existing []sessions.Metadata) map[string]bool {
 		if meta.EventCount == 0 {
 			continue
 		}
-		if agent, sourceID, ok := agentsessions.ParseImportTag(meta.Tag); ok {
-			imported[agent+":"+sourceID] = true
+		if ref, ok := agentsessions.ForeignSourceRefFromTag(meta.Tag); ok {
+			imported[ref] = true
 		}
 	}
 	return imported
 }
 
-func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) []pickerItem {
+func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) ([]pickerItem, []error) {
 	imported := importedSourceRefs(existing)
 
-	found, _ := agentsessions.DiscoverAllCached(m.agentSessionsEnv, m.cwd)
+	found, problems := agentsessions.DiscoverAllCached(m.agentSessionsEnv, m.cwd)
 	items := make([]pickerItem, 0, len(found))
 	for _, session := range found {
 		ref := session.Agent + ":" + session.ID
@@ -736,7 +758,7 @@ func (m model) foreignSessionItems(existing []sessions.Metadata, now time.Time) 
 			ForeignSource: &source,
 		})
 	}
-	return items
+	return items, problems
 }
 
 // sessionAgentName is the agent a session came from, for the picker's tab strip.

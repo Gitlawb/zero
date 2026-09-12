@@ -75,7 +75,7 @@ func TestForeignResumeCanRetryAnEmptyTranslationWithoutCreatingSessions(t *testi
 	}
 
 	agentsessions.InvalidateDiscovery()
-	items := m.foreignSessionItems(nil, time.Now())
+	items, _ := m.foreignSessionItems(nil, time.Now())
 	if len(items) != 1 || items[0].Value != "claude-code:empty" {
 		t.Fatalf("retryable foreign source disappeared from the picker: %+v", items)
 	}

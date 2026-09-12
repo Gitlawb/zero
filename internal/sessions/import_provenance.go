@@ -43,3 +43,17 @@ func IsImportedSession(metadata Metadata) bool {
 	_, _, ok := ParseImportedSessionTag(metadata.Tag)
 	return ok
 }
+
+// resolveImportedModelFields applies the imported-session model policy shared
+// by every lineage operation. Older imports stored the foreign model in the
+// operational ModelID field. Unless Zero has explicitly selected that model,
+// descendants retain it as provenance only.
+func resolveImportedModelFields(parent Metadata) (modelID, sourceModelID string) {
+	modelID = parent.ModelID
+	sourceModelID = parent.SourceModelID
+	if IsImportedSession(parent) && sourceModelID == "" && !parent.ModelSelectedLocally {
+		sourceModelID = modelID
+		modelID = ""
+	}
+	return modelID, sourceModelID
+}
