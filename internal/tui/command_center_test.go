@@ -67,7 +67,7 @@ func TestModelPersistenceUsesResolvedPersistedSpelling(t *testing.T) {
 		})
 
 		// "openai" is the picker row's owner spelling, not the persisted one.
-		if _, status, ok, _ := m.switchProviderModel("openai", "gpt-5.5"); !ok {
+		if _, status, ok, _, err := m.switchProviderModel("openai", "gpt-5.5"); !ok || err != nil {
 			t.Fatalf("switch to a case-variant provider spelling failed: %s", status)
 		}
 		cfg := readTUIConfigFixture(t, configPath)
@@ -112,8 +112,8 @@ func TestModelSwitchSyncsSavedProviders(t *testing.T) {
 		m := newSession(t)
 		// "openai" is the picker row's owner spelling, not the persisted one:
 		// the mirror must land on the row SetProviderModel actually wrote.
-		next, status, ok, _ := m.switchProviderModel("openai", "gpt-5.5")
-		if !ok {
+		next, status, ok, _, err := m.switchProviderModel("openai", "gpt-5.5")
+		if !ok || err != nil {
 			t.Fatalf("switch failed: %s", status)
 		}
 		if next.savedProviders[0].Model != "gpt-5.5" {
@@ -134,9 +134,9 @@ func TestModelSwitchSyncsSavedProviders(t *testing.T) {
 		// beside persisted OpenAI is project/env-derived, not a session alias.
 		m.savedProviders[0].Name = "openai"
 
-		next, status, ok, _ := m.switchProviderModel("openai", "gpt-5.5")
-		if !ok {
-			t.Fatalf("switch failed: %s", status)
+		next, status, ok, _, err := m.switchProviderModel("openai", "gpt-5.5")
+		if !ok || err != nil {
+			t.Fatalf("switch failed: %s (err=%v)", status, err)
 		}
 		if next.providerProfile.Model != "gpt-5.5" || !strings.Contains(status, "session only") {
 			t.Fatalf("expected a session-only model switch, status=%q", status)
@@ -155,7 +155,10 @@ func TestModelSwitchSyncsSavedProviders(t *testing.T) {
 		m.providerName = "openai"
 		m.providerProfile = m.savedProviders[0]
 		m.modelName = m.providerProfile.Model
-		next, status := m.handleModelCommand("gpt-4.1-mini")
+		next, status, err := m.handleModelCommand("gpt-4.1-mini")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if next.savedProviders[0].Model != "gpt-4.1-mini" {
 			t.Fatalf("savedProviders model = %q, want gpt-4.1-mini; status=%q", next.savedProviders[0].Model, status)
 		}
@@ -194,7 +197,10 @@ func TestSwitchProviderModelReportsPersistenceFailures(t *testing.T) {
 
 	t.Run("unreadable config", func(t *testing.T) {
 		m := newSwitchModel(t, `{"providers":[`) // invalid JSON
-		next, status, ok, _ := m.switchProviderModel("OpenAI", "gpt-5.5")
+		next, status, ok, _, err := m.switchProviderModel("OpenAI", "gpt-5.5")
+		if err == nil {
+			t.Fatal("unreadable config must return a persistence error")
+		}
 		if !ok {
 			t.Fatalf("the in-session switch must still succeed: %s", status)
 		}
@@ -211,7 +217,10 @@ func TestSwitchProviderModelReportsPersistenceFailures(t *testing.T) {
 		// Duplicate case variants pass the persisted gate but make the write
 		// itself unresolvable.
 		m := newSwitchModel(t, `{"providers":[{"name":"OpenAI"},{"name":"openai"}]}`)
-		_, status, ok, _ := m.switchProviderModel("OpenAI", "gpt-5.5")
+		_, status, ok, _, err := m.switchProviderModel("OpenAI", "gpt-5.5")
+		if err == nil {
+			t.Fatal("invalid config must return a persistence error")
+		}
 		if !ok {
 			t.Fatalf("the in-session switch must still succeed: %s", status)
 		}
@@ -223,8 +232,8 @@ func TestSwitchProviderModelReportsPersistenceFailures(t *testing.T) {
 	t.Run("env-derived provider stays silent", func(t *testing.T) {
 		// No row to update is not a failure, so it must not produce a note.
 		m := newSwitchModel(t, `{"providers":[{"name":"ollama","model":"m1"}]}`)
-		_, status, ok, _ := m.switchProviderModel("OpenAI", "gpt-5.5")
-		if !ok {
+		_, status, ok, _, err := m.switchProviderModel("OpenAI", "gpt-5.5")
+		if !ok || err != nil {
 			t.Fatalf("switch failed: %s", status)
 		}
 		if strings.Contains(status, "Note:") {

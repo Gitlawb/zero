@@ -120,8 +120,10 @@ func PublishProviderCredential(path string, exactName string, key string) error 
 	return err
 }
 
-// ForgetProviderKey removes a provider's stored API key from the credential store,
-// reporting whether one existed. Used by the lifecycle "remove key" / auth logout.
+// ForgetProviderKey removes a provider's stored API key and publishes the default
+// user config with every apiKeyStored marker sharing its normalized credential
+// identity cleared, in one transaction. It reports whether a credential existed.
+// A missing config or invalid persisted provider names skip config publication.
 func ForgetProviderKey(provider string) (bool, error) {
 	path, err := DefaultUserConfigPath()
 	if err != nil {
@@ -145,7 +147,7 @@ func StoreProviderCredential(path, provider, key string) error {
 // config at path, so credential checks no longer claim a stored key after one is
 // removed. No-op when path/provider is empty, the config is absent, or the marker
 // is already unset.
-func ClearProviderKeyStored(path, provider string) (bool, error) {
+func ClearProviderKeyStored(path, provider string) (cleared bool, err error) {
 	path = strings.TrimSpace(path)
 	provider = strings.TrimSpace(provider)
 	if path == "" || provider == "" {
@@ -245,6 +247,11 @@ func RevokeProviderCredentials(path, addressedName string, revokeOAuth func(stri
 		return false, fmt.Errorf("credentials not revoked: %w", err)
 	}
 	defer func() { err = errors.Join(err, release()) }()
+	unlockConfig, err := lockConfigFileFn(path)
+	if err != nil {
+		return false, fmt.Errorf("credentials not revoked: %w", err)
+	}
+	defer func() { err = errors.Join(err, unlockConfig()) }()
 	cfg, readErr := persistedFileConfig(path)
 	candidates := []string{addressedName}
 	keyCandidates := candidates
@@ -338,11 +345,22 @@ func (op *providerProfileOperation) deleteProviderCredentials(candidates []strin
 // leaves the plaintext key in place and never strands a credential. Returns how
 // many keys were migrated; a no-op (0, nil) when path is empty/absent or nothing
 // needs migrating. Safe to run on every startup (idempotent).
-func MigratePlaintextProviderKeys(path string, store APIKeySetter) (int, error) {
+func MigratePlaintextProviderKeys(path string, store APIKeySetter) (count int, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" || store == nil {
 		return 0, nil
 	}
+	// This runs on every startup, so it is the most likely writer to be racing
+	// an interactive mutation in another Zero process.
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return 0, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

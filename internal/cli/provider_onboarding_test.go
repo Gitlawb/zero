@@ -273,6 +273,7 @@ func TestProviderMutationsResolvePersistedIdentity(t *testing.T) {
 // by a third spelling identifies no single row, so a mutation must fail instead
 // of picking the one that happens to come first and deleting its credential.
 func TestProviderRemoveRejectsAmbiguousFoldedName(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
 		ActiveProvider: "work",
@@ -288,6 +289,9 @@ func TestProviderRemoveRejectsAmbiguousFoldedName(t *testing.T) {
 	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if store.Backend() != "encrypted-file" {
+		t.Fatalf("credential backend = %q, want isolated encrypted-file store", store.Backend())
 	}
 	if err := store.Set("work", "sk-lower"); err != nil {
 		t.Fatal(err)
