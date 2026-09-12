@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -131,9 +132,12 @@ func TestFormatOnWriteSkipsUnknownExtensions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	content := maybeFormatWrittenFile(context.Background(), root, "notes.xyz", filepath.Join(dir, "notes.xyz"), dir, "raw   text", 0o644)
-	if content != "raw   text" {
-		t.Fatalf("unknown extension must pass through: %q", content)
+	formatting := maybeFormatWrittenFile(context.Background(), root, "notes.xyz", filepath.Join(dir, "notes.xyz"), dir, "raw   text", 0o644)
+	if formatting.Content != "raw   text" {
+		t.Fatalf("unknown extension must pass through: %q", formatting.Content)
+	}
+	if notice := formatting.notice("notes.xyz"); notice != "" {
+		t.Fatalf("an extension with no formatter is not a miss worth reporting, got %q", notice)
 	}
 }
 
@@ -150,23 +154,27 @@ func TestFormatOnWriteFormatterLookupFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	content := maybeFormatWrittenFile(context.Background(), root, filepath.Base(targetPath), targetPath, filepath.Dir(targetPath), uglyContent, 0o644)
-	if content != uglyContent {
-		t.Fatalf("missing formatter must return written content, got %q", content)
+	formatting := maybeFormatWrittenFile(context.Background(), root, filepath.Base(targetPath), targetPath, filepath.Dir(targetPath), uglyContent, 0o644)
+	if formatting.Content != uglyContent {
+		t.Fatalf("missing formatter must return written content, got %q", formatting.Content)
+	}
+	if notice := formatting.notice("a.go"); notice != "" {
+		t.Fatalf("an uninstalled formatter is a standing fact, not a miss worth reporting, got %q", notice)
 	}
 }
 
-func TestFormatOnWriteUsesDetachedFileAndScrubsSensitiveEnvironment(t *testing.T) {
+func TestFormatOnWriteUsesStdinAndScrubsSensitiveEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX formatter fixture")
 	}
 	dir := t.TempDir()
 	formatter := filepath.Join(dir, "zero-test-formatter")
 	script := `#!/bin/sh
-[ "$1" != "$FORMATTER_ORIGINAL_TARGET" ] || exit 20
+[ "$#" -eq 0 ] || exit 20
 if [ -n "$ZERO_DAEMON_REMOTE_TOKEN" ] || [ -n "$ZERO_DAEMON_REMOTE_TOKEN_FILE" ] || [ -n "$ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED" ] || [ -n "$ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_IDENTITY" ]; then exit 21; fi
 [ "$FORMATTER_POSITIVE_CONTROL" = visible ] || exit 22
-printf 'formatted\n' > "$1"
+[ "$(cat)" = raw ] || exit 23
+printf 'formatted\n'
 `
 	if err := os.WriteFile(formatter, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -196,17 +204,87 @@ printf 'formatted\n' > "$1"
 		t.Fatal(err)
 	}
 	defer root.Close()
-	got := maybeFormatWrittenFile(context.Background(), root, "target.mock", target, dir, "raw\n", 0o644)
-	if got != "formatted\n" {
-		t.Fatalf("detached scrubbed formatter result = %q, want formatted content", got)
+	formatting := maybeFormatWrittenFile(context.Background(), root, "target.mock", target, dir, "raw\n", 0o644)
+	if formatting.Content != "formatted\n" {
+		t.Fatalf("stdin formatter result = %q, want formatted content", formatting.Content)
 	}
 	onDisk, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(onDisk) != got {
-		t.Fatalf("published content = %q, want %q", onDisk, got)
+	if string(onDisk) != formatting.Content {
+		t.Fatalf("published content = %q, want %q", onDisk, formatting.Content)
 	}
+}
+
+func TestFormatOnWriteUsesDestinationForProjectConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	sourceDir := filepath.Join(dir, "src")
+	if err := os.Mkdir(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".clang-format"), []byte("IndentWidth: 8\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	previous := formatterCommands[".c"]
+	formatterCommands[".c"] = []string{os.Args[0], "-test.run=^TestFormatOnWriteProjectConfigHelper$", "--", "--assume-filename=" + formatterPathPlaceholder}
+	t.Cleanup(func() { formatterCommands[".c"] = previous })
+	t.Setenv("ZERO_FORMATTER_CONFIG_HELPER", "1")
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+
+	result := NewScopedWriteFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "src/main.c", "content": "int main() {\n  return 0;\n}\n",
+	}, RunOptions{})
+	if result.Status != StatusOK {
+		t.Fatalf("write failed: %q", result.Output)
+	}
+	content, err := os.ReadFile(filepath.Join(sourceDir, "main.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "\n        return 0;") {
+		t.Fatalf("formatter did not discover project config from destination hint: %q", content)
+	}
+}
+
+func TestFormatOnWriteProjectConfigHelper(t *testing.T) {
+	if os.Getenv("ZERO_FORMATTER_CONFIG_HELPER") != "1" {
+		return
+	}
+	separator := -1
+	for index, argument := range os.Args {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator+1 >= len(os.Args) {
+		os.Exit(2)
+	}
+	filename := strings.TrimPrefix(os.Args[separator+1], "--assume-filename=")
+	configured := false
+	for directory := filepath.Dir(filename); ; directory = filepath.Dir(directory) {
+		if data, err := os.ReadFile(filepath.Join(directory, ".clang-format")); err == nil && strings.Contains(string(data), "IndentWidth: 8") {
+			configured = true
+			break
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			break
+		}
+	}
+	if !configured {
+		os.Exit(3)
+	}
+	content, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(4)
+	}
+	formatted := strings.ReplaceAll(string(content), "\n  return", "\n        return")
+	if _, err := io.WriteString(os.Stdout, formatted); err != nil {
+		os.Exit(5)
+	}
+	os.Exit(0)
 }
 
 func TestFormatOnWriteRejectsDestinationSwapDuringFormatter(t *testing.T) {
@@ -229,7 +307,8 @@ case "$3" in
 symlink) rm "$1"; ln -s "$2" "$1";;
 hardlink) rm "$1"; ln "$2" "$1";;
 esac
-printf formatted > "$4"
+cat >/dev/null
+printf formatted
 `
 			if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
@@ -253,7 +332,7 @@ printf formatted > "$4"
 				t.Fatal(err)
 			}
 			defer root.Close()
-			got := maybeFormatWrittenFile(context.Background(), root, "ordinary.mock", target, dir, "raw", 0o600)
+			formatting := maybeFormatWrittenFile(context.Background(), root, "ordinary.mock", target, dir, "raw", 0o600)
 			want := "raw"
 			if kind == "control" {
 				want = "formatted"
@@ -262,8 +341,8 @@ printf formatted > "$4"
 			} else if tokenInfo, err := os.Stat(token); err != nil || !os.SameFile(targetInfo, tokenInfo) {
 				t.Fatalf("formatter did not exercise alias swap: %v", err)
 			}
-			if got != want {
-				t.Fatalf("formatter result = %q, want %q", got, want)
+			if formatting.Content != want {
+				t.Fatalf("formatter result = %q, want %q", formatting.Content, want)
 			}
 			if data, err := os.ReadFile(token); err != nil || string(data) != "secret" {
 				t.Fatalf("formatter changed token: %q, %v", data, err)
@@ -308,7 +387,7 @@ func TestPostWriteFormatterSwapCannotPublishOrObserveToken(t *testing.T) {
 					return secret
 				}}
 				var result Result
-				formatter := func(_ context.Context, _ *os.Root, _, _, _, written string, _ os.FileMode) string {
+				formatter := func(_ context.Context, _ *os.Root, _, _, _, written string, _ os.FileMode) formatOnWriteResult {
 					// The injected formatter boundary is entered only after the rooted
 					// write and returns immediately before publication/post-write read.
 					if err := os.Remove(target); err != nil {
@@ -323,7 +402,7 @@ func TestPostWriteFormatterSwapCannotPublishOrObserveToken(t *testing.T) {
 					if err != nil {
 						t.Skipf("%s unavailable: %v", aliasKind, err)
 					}
-					return written
+					return formatOnWriteResult{Content: written}
 				}
 				if toolName == "write" {
 					tool := NewScopedWriteFileTool(dir, nil).(writeFileTool)

@@ -118,10 +118,10 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	}
 
 	// Fuzzy fallback: when the exact string (and its CRLF translation) is absent,
-	// run a cascade of tolerant matchers (trimmed lines, block anchors, collapsed
-	// whitespace, indentation drift, escape normalization) to locate the span the
-	// model intended. Only a span that occurs literally in the file is accepted,
-	// so the replacement applied below is still exact.
+	// run a cascade of tolerant matchers (trimmed lines, collapsed whitespace,
+	// indentation drift, escape normalization) to locate the span the model
+	// intended. These transformations must preserve non-whitespace content; a
+	// merely similar interior is not safe to replace.
 	if occurrences == 0 {
 		findOld, findNew := oldString, newString
 		if strings.Contains(content, "\r\n") && !strings.Contains(findOld, "\r\n") {
@@ -176,7 +176,10 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
-	tool.formatter(ctx, root, target.relative, absolutePath, tool.workspaceRoot, updated, readInfo.Mode())
+	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
+	// FileTracker re-baseline: recording pre-format content would make the very
+	// next edit look like an external modification and trip the conflict guard.
+	formatting := tool.formatter(ctx, root, target.relative, absolutePath, tool.workspaceRoot, updated, readInfo.Mode())
 	updated, err = readPublishedContent(root, target.relative, absolutePath, tool.workspaceRoot)
 	if err != nil {
 		return errorResult("Error reading written file " + relativePath + ": " + err.Error())
@@ -213,6 +216,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		suffix = "s"
 	}
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
+	summary += formatting.notice(relativePath)
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}

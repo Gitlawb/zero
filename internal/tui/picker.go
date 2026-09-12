@@ -945,6 +945,23 @@ func (m model) persistFavoriteModels() error {
 // of the session. Returns the receiver unchanged (no re-normalization, no
 // write) when every pair has a blank model id.
 func (m model) recordRecentModels(pairs ...config.RecentModelEntry) model {
+	m, changed := m.updateRecentModels(pairs...)
+	if !changed {
+		return m
+	}
+	if path := strings.TrimSpace(m.userConfigPath); path != "" {
+		if _, err := config.SetRecentModels(path, m.recentModels); err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "recent model save error: " + err.Error()})
+		}
+	}
+	return m
+}
+
+// updateRecentModels performs recordRecentModels' in-memory half. A model
+// switch whose selection transaction failed still belongs in this session's
+// picker history, but must not make another blocking persistence attempt while
+// the same config lock is unavailable.
+func (m model) updateRecentModels(pairs ...config.RecentModelEntry) (model, bool) {
 	entries := append([]config.RecentModelEntry{}, m.recentModels...)
 	changed := false
 	for _, pair := range pairs {
@@ -956,15 +973,10 @@ func (m model) recordRecentModels(pairs ...config.RecentModelEntry) model {
 		entries = append([]config.RecentModelEntry{{Provider: strings.TrimSpace(pair.Provider), Model: modelID}}, entries...)
 	}
 	if !changed {
-		return m
+		return m, false
 	}
 	m.recentModels = normalizeRecentModelEntries(entries)
-	if path := strings.TrimSpace(m.userConfigPath); path != "" {
-		if _, err := config.SetRecentModels(path, m.recentModels); err != nil {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "recent model save error: " + err.Error()})
-		}
-	}
-	return m
+	return m, true
 }
 
 // normalizeRecentModelEntries trims, drops entries with no model id,

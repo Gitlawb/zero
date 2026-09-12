@@ -115,7 +115,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
-	tool.formatter(ctx, root, target.relative, absolutePath, tool.workspaceRoot, content, writeMode)
+	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
+	// FileTracker baseline: recording pre-format content would make the very
+	// next edit look like an external modification and trip the conflict guard.
+	formatting := tool.formatter(ctx, root, target.relative, absolutePath, tool.workspaceRoot, content, writeMode)
 	content, err = readPublishedContent(root, target.relative, absolutePath, tool.workspaceRoot)
 	if err != nil {
 		return errorResult("Error reading written file " + relativePath + ": " + err.Error())
@@ -142,6 +145,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		lines++
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
+	summary += formatting.notice(relativePath)
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
