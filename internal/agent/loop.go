@@ -1527,6 +1527,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Images:          result.Images,
 		Redacted:        result.Redacted,
 		ChangedFiles:    result.ChangedFiles,
+		FileDiffs:       result.FileDiffs,
 		ChangeSummaries: result.ChangeSummaries,
 		Display:         result.HumanDisplay(),
 		Outcome:         result.Outcome,
@@ -1833,6 +1834,10 @@ func runToolForUnsandboxedRetry(ctx context.Context, registry *tools.Registry, n
 }
 
 func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolResult {
+	// PrePermissionRejecter runs before Registry.RunWithOptions, so it must
+	// explicitly cross the same transcript/redaction boundary before its result
+	// can be forwarded through ACP.
+	result = tools.ScrubResultSecrets(result)
 	output, outputRedacted := scrubInterceptedOutput(result.Output)
 	display := result.Display
 	summary, summaryRedacted := scrubInterceptedOutput(display.Summary)
@@ -1860,6 +1865,7 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 		Meta:            meta,
 		Redacted:        result.Redacted || outputRedacted || summaryRedacted || metaRedacted,
 		ChangedFiles:    result.ChangedFiles,
+		FileDiffs:       result.FileDiffs,
 		ChangeSummaries: result.ChangeSummaries,
 		Display:         display,
 		LoadedTools:     loadedToolsFromResult(meta),
@@ -2153,6 +2159,7 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			Meta:            result.Meta,
 			Redacted:        result.Redacted,
 			ChangedFiles:    result.ChangedFiles,
+			FileDiffs:       result.FileDiffs,
 			ChangeSummaries: result.ChangeSummaries,
 			Display:         result.HumanDisplay(),
 			Outcome:         result.Outcome,
