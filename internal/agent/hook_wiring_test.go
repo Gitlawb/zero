@@ -89,7 +89,51 @@ func TestDispatchHelpersAreNoopWithoutDispatcher(t *testing.T) {
 	if _, blocked := dispatchBeforeTool(context.Background(), options, ToolCall{Name: "bash"}, nil); blocked {
 		t.Fatal("a nil dispatcher must never block a tool")
 	}
-	if feedback := dispatchAfterTool(context.Background(), options, ToolCall{Name: "bash"}, nil, tools.Result{}); feedback != "" {
-		t.Fatalf("a nil dispatcher must yield no feedback, got %q", feedback)
+	if feedback, notices := dispatchAfterTool(context.Background(), options, ToolCall{Name: "bash"}, nil, tools.Result{}); feedback != "" || notices != nil {
+		t.Fatalf("a nil dispatcher must yield no feedback and no notices, got %q and %v", feedback, notices)
+	}
+}
+
+// A SUCCESSFUL beforeTool HOOK'S NOTICE MUST STAY TYPED.
+//
+// executeToolCall used to read the beforeTool outcome only when Blocked was true,
+// so a hook that ran fine and produced an enforcement notice — for instance that
+// it ran under the weakened DenyRead token — put that notice in the audit record
+// and nowhere anybody could see it. The first fix delivered it as prose appended
+// to the result output, which reached the model and no interactive surface,
+// because those build their enforcement furniture from the typed slice.
+//
+// So the delivery is the typed field, and this pins the merge: the hook's notice
+// first, the tool's own after it, each exactly once, blanks contributing nothing.
+func TestBeforeToolNoticesMergeIntoTheTypedField(t *testing.T) {
+	const notice = "hook ran without WRITE_RESTRICTED because denyRead is configured"
+	const toolOwned = "the sandbox dropped the network capability for this call"
+
+	result := withAppliedHookNotices(ToolResult{Output: "ok"}, []string{notice}, nil)
+	if len(result.EnforcementNotices) != 1 || result.EnforcementNotices[0] != notice {
+		t.Fatalf("a successful beforeTool notice did not reach the typed field: %v", result.EnforcementNotices)
+	}
+	// AND NOT THE OUTPUT AS WELL, or every surface that renders the slice shows
+	// the disclosure twice.
+	if strings.Contains(result.Output, notice) {
+		t.Errorf("the notice was written into the output as well as the typed field: %q", result.Output)
+	}
+
+	// Both arrive, hook first, when the tool carries its own.
+	result = withAppliedHookNotices(ToolResult{EnforcementNotices: []string{toolOwned}}, []string{notice}, nil)
+	if len(result.EnforcementNotices) != 2 || result.EnforcementNotices[0] != notice || result.EnforcementNotices[1] != toolOwned {
+		t.Fatalf("the hook and tool notices did not merge in order: %v", result.EnforcementNotices)
+	}
+
+	// The same disclosure from both sides is carried once.
+	result = withAppliedHookNotices(ToolResult{EnforcementNotices: []string{notice}}, []string{notice}, nil)
+	if len(result.EnforcementNotices) != 1 {
+		t.Errorf("one disclosure reported by both the hook and the tool was carried %d times: %v", len(result.EnforcementNotices), result.EnforcementNotices)
+	}
+
+	// Blank notices contribute nothing, so a run with no hook output stays silent.
+	result = withAppliedHookNotices(ToolResult{}, []string{"", "   "}, nil)
+	if len(result.EnforcementNotices) != 0 {
+		t.Errorf("blank hook notices produced %v, want nothing", result.EnforcementNotices)
 	}
 }
