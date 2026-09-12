@@ -395,7 +395,10 @@ func (m model) newSessionPicker() *commandPicker {
 		// Lead with a fixed-width timestamp so titles form one scannable column.
 		// The raw id remains the selection/search value but stays out of the row:
 		// rendering it consumed half the picker and truncated the useful title.
-		label := displayValue(meta.Title, "untitled")
+		// Session metadata is persisted, user-controlled text — a title from
+		// --session-title or /rename can legally contain newlines, which would
+		// break the picker's fixed row geometry.
+		label := displayValue(sanitizeCardField(meta.Title), "untitled")
 		if when := relativeAge(meta.UpdatedAt, now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
@@ -440,7 +443,7 @@ func (m model) sessionPickerDetail(meta sessions.Metadata) string {
 	if status := sessionPickerStatus(meta); status != "" {
 		parts = append(parts, status)
 	}
-	return strings.Join(parts, " · ")
+	return sanitizeCardField(strings.Join(parts, " · "))
 }
 
 // sessionPickerStatus is the concise status chip for a /resume row: an

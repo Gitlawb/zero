@@ -1370,3 +1370,63 @@ func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
 		t.Fatalf("filter by model should keep only the matching session, got %#v", next.picker.items)
 	}
 }
+
+func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
+	// Persisted session metadata is user-controlled: a title or model id can
+	// legally contain newlines, which must not break the picker's fixed
+	// one-or-two-line row geometry (a stray line shifts every row below it and
+	// misaligns mouse hit-testing).
+	store := testSessionStore(t)
+	sess, err := store.Create(sessions.CreateInput{
+		Title:   "alpha\nbravo",
+		ModelID: "gpt\n5",
+		Cwd:     "/repo",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": "assistant", "content": "hi"},
+	}); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: "/repo"})
+	m.input.SetValue("/resume")
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if next.picker == nil || len(next.picker.items) != 1 {
+		t.Fatalf("expected one picker item, got %#v", next.picker)
+	}
+	item := next.picker.items[0]
+	if strings.ContainsAny(item.Label+item.Detail, "\n\r") {
+		t.Fatalf("picker row must be single-line, got label=%q detail=%q", item.Label, item.Detail)
+	}
+}
+
+func TestGenericPickerMouseSelectsItemFromDetailLine(t *testing.T) {
+	m := mouseTestModel()
+	m.width = 120
+	m.picker = &commandPicker{
+		kind: pickerSession,
+		items: []pickerItem{
+			{Label: "one", Value: "s1", Detail: "meta one"},
+			{Label: "two", Value: "s2", Detail: "meta two"},
+		},
+	}
+	m.picker.allItems = append([]pickerItem{}, m.picker.items...)
+
+	width := chatWidth(m.width)
+	overlay := m.pickerOverlay(width)
+	rect := m.overlayMouseRect(len(viewLines(overlay)), width)
+	// Rows begin at y=3 inside the overlay; item 1's detail line is y=6.
+	// Click near the horizontal middle so the point lands inside the
+	// centered overlay block.
+	target, ok := m.selectGenericPickerAtMouse(testMouseClick(tea.MouseLeft, width/2, rect.y+6))
+	if !ok {
+		t.Fatal("click on a detail line should select its item")
+	}
+	if target.Value != "s2" {
+		t.Fatalf("detail-line click selected %q, want s2", target.Value)
+	}
+}
