@@ -365,13 +365,15 @@ func (defaultModelSwitchCompactionPolicy) BeforeModelSwitch(request modelSwitchC
 
 var modelSwitchCompactionGuard modelSwitchCompactionPolicy = defaultModelSwitchCompactionPolicy{}
 
-// sanitizeCardField strips the card protocol's separator bytes from
-// user-controlled values (titles can legally contain anything --session-title
-// was given), so a hostile or accidental \x1f / newline cannot shift fields
+// sanitizeCardField strips the card protocol's separator bytes and
+// line-breaking controls from user-controlled values (titles can legally
+// contain anything --session-title was given), so a hostile or accidental
+// \x1f / newline / carriage return cannot shift fields, corrupt row geometry,
 // or leak control characters into the transcript.
 func sanitizeCardField(value string) string {
 	value = strings.ReplaceAll(value, sessionsCardFieldSep, " ")
 	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.ReplaceAll(value, "\r", " ")
 	return strings.ReplaceAll(value, "\x00", "")
 }
 

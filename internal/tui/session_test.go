@@ -1379,7 +1379,7 @@ func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
 	store := testSessionStore(t)
 	sess, err := store.Create(sessions.CreateInput{
 		Title:   "alpha\nbravo",
-		ModelID: "gpt\n5",
+		ModelID: "gpt\r5",
 		Cwd:     "/repo",
 	})
 	if err != nil {
