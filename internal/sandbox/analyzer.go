@@ -216,6 +216,26 @@ func resolveASTCommandNetwork(words []*syntax.Word, depth int) commandResolution
 		return commandUnresolved
 	}
 	textArgs := wordTexts(args)
+	if child, status, delegated := delegatedCommand(program, textArgs); delegated {
+		if status != commandKnownLocal {
+			return status
+		}
+		// Require literal launcher options and executable selection before
+		// trusting the suffix boundary. Preserve all remaining AST words so
+		// another wrapper or interpreter can inspect its own source operands.
+		start := len(args) - len(child)
+		selectionEnd := len(words) - len(child)
+		if len(child) > 0 {
+			selectionEnd++
+		}
+		if _, literal := literalCallFields(words[:selectionEnd]); !literal {
+			return commandUnresolved
+		}
+		if len(child) == 0 {
+			return commandKnownLocal
+		}
+		return resolveASTCommandNetwork(args[start:], depth+1)
+	}
 	resolution := resolveCommandArgv(append([]string{program}, textArgs...), depth)
 	switch {
 	case shellPrograms[program]:
@@ -239,10 +259,6 @@ func resolveASTCommandNetwork(words []*syntax.Word, depth int) commandResolution
 		if cmdLauncherUsesNetwork(program, args, depth) {
 			return commandKnownNetwork
 		}
-	case program == "busybox" && busyboxSourceDynamic(args):
-		return commandUnresolved
-	case program == "strace" && straceSourceDynamic(args):
-		return commandUnresolved
 	case program == "git" && resolution == commandKnownLocal:
 		if gitSelectionDynamic(textArgs, func(index int) bool { return !isLiteralWord(args[index]) }) {
 			return commandUnresolved
@@ -694,38 +710,6 @@ func envSplitSourceDynamic(args []*syntax.Word) bool {
 		return false
 	}
 	return false
-}
-
-// busyboxSourceDynamic reports whether a BusyBox invocation's applet-name
-// operand — the token busyboxCommandArgs treats as the delegated child
-// executable — comes from a word this scan cannot resolve statically.
-//
-// busyboxCommandArgs runs on wordTexts, which silently drops expansions:
-// `APPLET=curl; busybox "$APPLET" https://…` would otherwise resolve the
-// applet position to an empty string, which is neither a recognized BusyBox
-// flag nor the executable this scan can name, and the invocation reads as an
-// ordinary unrecognized command rather than as "unknown, assume network."
-func busyboxSourceDynamic(args []*syntax.Word) bool {
-	if len(args) == 0 {
-		return false
-	}
-	return !isLiteralWord(args[0])
-}
-
-// straceSourceDynamic reports whether the delegated argv loses information in
-// the literal reconstruction passed to resolveCommandArgv. This includes both a
-// dynamic child executable and dynamic env -S source below a literal env child.
-// straceChildIndex is shared with straceCommandArgs so this check walks strace's
-// option grammar exactly once rather than duplicating it.
-func straceSourceDynamic(args []*syntax.Word) bool {
-	index, ok := straceChildIndex(wordTexts(args))
-	if !ok || index >= len(args) {
-		return false
-	}
-	if !isLiteralWord(args[index]) {
-		return true
-	}
-	return envSplitSourceDynamic(args[index:])
 }
 
 // envArgumentStart returns the index just past an `env` program token, allowing

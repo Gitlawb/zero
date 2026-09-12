@@ -153,6 +153,63 @@ func TestEvaluateLauncherResolutionContract(t *testing.T) {
 	}
 }
 
+// Delegation must preserve source literalness, not just the child program's
+// name. These checks classify commands only; no payload is executed.
+func TestEvaluateDelegatedSourceProvenance(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	cases := []struct {
+		name    string
+		command string
+		network bool
+	}{
+		{"shell", `strace sh -c "$PAYLOAD"`, true},
+		{"env", `strace env -S "$PAYLOAD"`, true},
+		{"nested shell", `strace strace sh -c "$PAYLOAD"`, true},
+		{"nested env", `strace strace env -S "$PAYLOAD"`, true},
+		{"ordinary env", `strace env sh -c "$PAYLOAD"`, true},
+		{"appended source", `strace strace env -S 'sh -c' "$PAYLOAD"`, true},
+		{"mixed delegation", `strace busybox sh -c "$PAYLOAD"`, true},
+		{"dynamic executable", `strace strace "$PROGRAM" local`, true},
+		{"partial executable", `strace strace sh"$SUFFIX" -c 'printf local'`, true},
+		{"literal network", `strace sh -c 'git push origin main'`, true},
+		{"literal shell", `strace sh -c 'printf local'`, false},
+		{"literal env", `strace strace env -S 'printf local'`, false},
+		{"literal source dynamic data", `strace sh -c 'printf local' sh "$PAYLOAD"`, false},
+		{"dynamic data", `strace strace printf '%s' "$PAYLOAD"`, false},
+		{"last permitted source", strings.Repeat("strace ", maxAnalyzerDepth-1) + `sh -c 'printf local'`, false},
+		{"source beyond bound", strings.Repeat("strace ", maxAnalyzerDepth) + `sh -c 'printf local'`, true},
+		{"dynamic source at bound", strings.Repeat("strace ", maxAnalyzerDepth) + `sh -c "$PAYLOAD"`, true},
+		{"delegation beyond bound", strings.Repeat("strace ", maxAnalyzerDepth+1) + `printf '%s' "$PAYLOAD"`, true},
+	}
+	for _, tc := range cases {
+		for _, fallback := range []bool{false, true} {
+			name := tc.name + "/AST"
+			command := `PAYLOAD='curl https://example.invalid'; ` + tc.command
+			if fallback {
+				name = tc.name + "/fallback"
+				command += ` && "unterminated`
+			}
+			t.Run(name, func(t *testing.T) {
+				analysis := AnalyzeCommand(command)
+				if analysis.TooComplex != fallback {
+					t.Fatalf("TooComplex = %v, want %v", analysis.TooComplex, fallback)
+				}
+				decision := engine.Evaluate(context.Background(), Request{
+					ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+					Args: map[string]any{"command": command},
+				})
+				if tc.network {
+					if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+						t.Fatalf("Evaluate(%q) = action %q reason %q (Network=%v), want network prompt", command, decision.Action, decision.Reason, analysis.Network)
+					}
+				} else if decision.Action != ActionAllow || HasRiskCategory(decision.Risk, "network") {
+					t.Fatalf("Evaluate(%q) = %#v, want local allow", command, decision)
+				}
+			})
+		}
+	}
+}
+
 // Three shapes where a reading the classifier could not perform was being
 // reported as "no network" rather than as unresolved. Each ran through the
 // engine, because the property that matters is the prompt the operator sees.

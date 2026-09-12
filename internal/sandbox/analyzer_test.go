@@ -197,9 +197,8 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "strace output named curl", script: `strace -o curl true`, network: false},
 		{name: "strace invalid option is unresolved", script: `strace --definitely-invalid curl https://x.test`, network: true},
 		// The traced command comes from a shell expansion this scan cannot read
-		// statically; straceSourceDynamic must fail closed the same way
-		// busyboxSourceDynamic does above, rather than reading the blanked token
-		// as a clean unknown command.
+		// statically; shared delegation must retain the original AST words,
+		// rather than reading the blanked token as a clean unknown command.
 		{name: "strace dynamic child fails closed", script: `APPLET=curl; strace "$APPLET" https://x.test`, network: true},
 		{name: "strace literal child stays classified on content", script: `strace true "not a program" https://x.test`, network: false},
 		{name: "strace ordinary env wrapper", script: `strace env curl https://x.test`, network: true},
