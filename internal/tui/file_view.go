@@ -16,6 +16,7 @@ package tui
 import (
 	"bufio"
 	"container/list"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -38,8 +39,13 @@ const (
 	fileViewMaxBytes               = 1 << 20 // 1 MiB total read budget per file
 	fileViewMaxLineBytes           = 4096    // 4 KiB max line length budget
 	defaultFileViewCacheMaxEntries = 64
-	fileViewMaxRenderVariants      = 4 // max rendered variants (width/fingerprint) per cached file entry
-	fileViewLoadingPlaceholder     = "Loading…"
+	// defaultFileViewCacheMaxBytes bounds the total retained bytes of the file
+	// view cache so wide renders of large files cannot grow without limit
+	// (measured at tens to hundreds of MiB before this cap). It counts the stable
+	// source+display payload plus every rendered variant.
+	defaultFileViewCacheMaxBytes = 8 << 20 // 8 MiB
+	fileViewMaxRenderVariants    = 4       // max rendered variants (width/fingerprint) per cached file entry
+	fileViewLoadingPlaceholder   = "Loading…"
 )
 
 const (
@@ -85,13 +91,14 @@ func nextFileViewLifetimeToken() [16]byte {
 
 // fileViewCacheStats tracks disk I/O, Chroma highlighting, and cache hits/misses.
 type fileViewCacheStats struct {
-	DiskReads       int
-	HighlightCalls  int
-	CacheHits       int
-	CacheMisses     int
-	Evictions       int
-	ThemeClears     int
-	RenderEvictions int
+	DiskReads        int
+	HighlightCalls   int
+	CacheHits        int
+	CacheMisses      int
+	Evictions        int
+	ThemeClears      int
+	RenderEvictions  int
+	SkippedOversized int
 }
 
 type fileViewCachedEntry struct {
@@ -100,6 +107,8 @@ type fileViewCachedEntry struct {
 	modTime      time.Time
 	size         int64
 	sourceRev    uint64
+	sourceHash   [sha256.Size]byte
+	sourceBytes  int
 	lines        []string
 	display      []string
 	truncated    bool
@@ -108,6 +117,36 @@ type fileViewCachedEntry struct {
 	rendersMu  sync.RWMutex
 	renderKeys []string          // LRU order: oldest at index 0, most recent at end
 	renders    map[string]string // key: "width:changedLinesFingerprint" -> formatted ANSI string
+}
+
+// byteSize is the total retained payload for the entry: the stable source and
+// display lines plus every rendered variant. The reader uses it to enforce the
+// cache-wide byte budget.
+func (e *fileViewCachedEntry) byteSize() int {
+	n := e.sourceBytes
+	e.rendersMu.RLock()
+	for k, v := range e.renders {
+		n += len(k) + len(v)
+	}
+	e.rendersMu.RUnlock()
+	return n
+}
+
+// fileViewSourceHash fingerprints the bounded source lines so a metadata-only
+// change (cp -p, rsync -t, tar -xp restoring mtime and size) cannot serve a
+// stale entry. Lines are joined with a separator the reader never emits inside
+// a line, so shifted boundaries cannot collide.
+func fileViewSourceHash(lines []string) [sha256.Size]byte {
+	h := sha256.New()
+	for i, line := range lines {
+		if i > 0 {
+			h.Write([]byte{'\n'})
+		}
+		h.Write([]byte(line))
+	}
+	var out [sha256.Size]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }
 
 func (e *fileViewCachedEntry) getRender(key string) (string, bool) {
@@ -128,20 +167,28 @@ func (e *fileViewCachedEntry) getRender(key string) (string, bool) {
 	return val, true
 }
 
-func (e *fileViewCachedEntry) putRender(key string, val string) {
+// putRender stores a formatted variant and returns the change in retained
+// bytes (positive on growth, negative when an old variant is dropped or
+// replaced). The caller folds the delta into the cache-wide budget.
+func (e *fileViewCachedEntry) putRender(key string, val string) int {
 	e.rendersMu.Lock()
 	defer e.rendersMu.Unlock()
 	if e.renders == nil {
 		e.renders = make(map[string]string)
 	}
-	if _, ok := e.renders[key]; !ok {
+	delta := 0
+	if prev, ok := e.renders[key]; ok {
+		delta -= len(prev)
+	} else {
 		for len(e.renders) >= fileViewMaxRenderVariants {
 			if len(e.renderKeys) > 0 {
 				oldKey := e.renderKeys[0]
 				e.renderKeys = e.renderKeys[1:]
+				delta -= len(oldKey) + len(e.renders[oldKey])
 				delete(e.renders, oldKey)
 			} else {
-				for k := range e.renders {
+				for k, v := range e.renders {
+					delta -= len(k) + len(v)
 					delete(e.renders, k)
 					break
 				}
@@ -150,11 +197,15 @@ func (e *fileViewCachedEntry) putRender(key string, val string) {
 		e.renderKeys = append(e.renderKeys, key)
 	}
 	e.renders[key] = val
+	delta += len(key) + len(val)
+	return delta
 }
 
 type fileViewRenderCache struct {
 	mu            sync.Mutex
 	maxEntries    int
+	maxBytes      int
+	retained      int
 	items         map[string]*list.Element // targetPath -> *list.Element containing *fileViewCachedEntry
 	lru           *list.List
 	gen           int
@@ -162,11 +213,12 @@ type fileViewRenderCache struct {
 	statsData     fileViewCacheStats
 }
 
-var defaultFileViewCache = newFileViewRenderCache(defaultFileViewCacheMaxEntries)
+var defaultFileViewCache = newFileViewRenderCache(defaultFileViewCacheMaxEntries, defaultFileViewCacheMaxBytes)
 
-func newFileViewRenderCache(maxEntries int) *fileViewRenderCache {
+func newFileViewRenderCache(maxEntries int, maxBytes int) *fileViewRenderCache {
 	return &fileViewRenderCache{
 		maxEntries:    maxEntries,
+		maxBytes:      maxBytes,
 		items:         make(map[string]*list.Element),
 		lru:           list.New(),
 		pathRevisions: make(map[string]uint64),
@@ -178,10 +230,7 @@ func (c *fileViewRenderCache) invalidatePath(targetPath string) uint64 {
 	defer c.mu.Unlock()
 	c.pathRevisions[targetPath]++
 	rev := c.pathRevisions[targetPath]
-	if elem, ok := c.items[targetPath]; ok {
-		c.lru.Remove(elem)
-		delete(c.items, targetPath)
-	}
+	c.removeItemLocked(targetPath)
 	return rev
 }
 
@@ -191,13 +240,59 @@ func (c *fileViewRenderCache) requiredRevision(targetPath string) uint64 {
 	return c.pathRevisions[targetPath]
 }
 
+// removeItemLocked drops targetPath from the LRU and folds its bytes back out
+// of retained. It intentionally leaves pathRevisions alone: an invalidated path
+// stays dirty until its entry is evicted by capacity or the cache is purged.
+func (c *fileViewRenderCache) removeItemLocked(targetPath string) {
+	elem, ok := c.items[targetPath]
+	if !ok {
+		return
+	}
+	c.retained -= elem.Value.(*fileViewCachedEntry).byteSize()
+	c.lru.Remove(elem)
+	delete(c.items, targetPath)
+}
+
+// evictOverflowLocked trims the LRU until both the entry count and the retained
+// byte budget fit. Evicting an entry also drops its path revision: the path is no
+// longer cached, so keeping the revision would only leak one key per file.
+func (c *fileViewRenderCache) evictOverflowLocked() {
+	for len(c.items) > c.maxEntries || (c.maxBytes > 0 && c.retained > c.maxBytes) {
+		back := c.lru.Back()
+		if back == nil {
+			c.retained = 0
+			return
+		}
+		backEntry := back.Value.(*fileViewCachedEntry)
+		c.retained -= backEntry.byteSize()
+		delete(c.items, backEntry.targetPath)
+		c.lru.Remove(back)
+		delete(c.pathRevisions, backEntry.targetPath)
+		c.statsData.Evictions++
+	}
+}
+
+// commitRenderPut applies a variant's byte delta and re-trims the cache.
+func (c *fileViewRenderCache) commitRenderPut(entry *fileViewCachedEntry, key string, val string) {
+	delta := entry.putRender(key, val)
+	c.mu.Lock()
+	c.retained += delta
+	c.evictOverflowLocked()
+	c.mu.Unlock()
+}
+
+func (c *fileViewRenderCache) evictPath(targetPath string) {
+	c.mu.Lock()
+	c.removeItemLocked(targetPath)
+	c.mu.Unlock()
+}
+
 func (c *fileViewRenderCache) purgeLocked() {
 	c.gen++
 	c.items = make(map[string]*list.Element)
 	c.lru.Init()
-	for k := range c.pathRevisions {
-		c.pathRevisions[k]++
-	}
+	c.retained = 0
+	c.pathRevisions = make(map[string]uint64)
 }
 
 func (c *fileViewRenderCache) clear() {
@@ -498,9 +593,13 @@ func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, chang
 	return entry.getRender(renderKey)
 }
 
-// loadAndRender performs the bounded read, Chroma highlighting, and formatting
-// on a cache miss (or re-formats for a new width variant on a cache hit). It is
-// intended to be executed from a tea.Cmd / background worker, off the View path.
+// loadAndRender performs the bounded read, Chroma highlighting, and formatting.
+// The bounded source is always read: mtime/size are kept only as a hint because
+// `cp -p`, `rsync -t` and `tar -xp` can restore matching metadata over different
+// bytes, so the content hash decides freshness. On a matching metadata+hash pair
+// the highlight/format work is reused (re-formatting only for a new width
+// variant). It is intended to run from a tea.Cmd / background worker, off the
+// View path.
 var errFileViewSuperseded = errors.New("file view request superseded")
 
 var (
@@ -532,22 +631,12 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 	stat, err := os.Stat(targetPath)
 	if err != nil {
-		c.mu.Lock()
-		if elem, ok := c.items[targetPath]; ok {
-			c.lru.Remove(elem)
-			delete(c.items, targetPath)
-		}
-		c.mu.Unlock()
+		c.evictPath(targetPath)
 		rendered := theme.faint.Render("Could not read file: " + err.Error())
 		return rendered, err
 	}
 	if !stat.Mode().IsRegular() {
-		c.mu.Lock()
-		if elem, ok := c.items[targetPath]; ok {
-			c.lru.Remove(elem)
-			delete(c.items, targetPath)
-		}
-		c.mu.Unlock()
+		c.evictPath(targetPath)
 		readErr := fmt.Errorf("cannot display non-regular file %s (mode %s)", displayPath, stat.Mode().String())
 		rendered := theme.faint.Render("Could not read file: " + readErr.Error())
 		return rendered, readErr
@@ -562,6 +651,29 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		c.mu.Unlock()
 		return "", errors.New("request superseded by cache invalidation")
 	}
+	c.statsData.DiskReads++
+	c.mu.Unlock()
+
+	if fileViewBeforeDiskRead != nil {
+		fileViewBeforeDiskRead()
+	}
+	if fileViewSuperseded(liveSeq, seq) {
+		return "", errFileViewSuperseded
+	}
+
+	readRes := readFileViewBoundedCancellable(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes, liveSeq, seq)
+	if readRes.err != nil && len(readRes.lines) == 0 {
+		c.evictPath(targetPath)
+		rendered := theme.faint.Render("Could not read file: " + readRes.err.Error())
+		return rendered, readRes.err
+	}
+	sourceHash := fileViewSourceHash(readRes.lines)
+
+	c.mu.Lock()
+	if c.gen != reqGen {
+		c.mu.Unlock()
+		return "", errors.New("request superseded by cache invalidation")
+	}
 
 	curRequiredRev := c.pathRevisions[targetPath]
 	if reqSourceRev < curRequiredRev {
@@ -570,8 +682,12 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 
 	if elem, ok := c.items[targetPath]; ok {
 		entry := elem.Value.(*fileViewCachedEntry)
-		forceReload := (entry.sourceRev < reqSourceRev)
-		if !forceReload && entry.modTime.Equal(modTime) && entry.size == size && entry.displayPath == displayPath {
+		forceReload := entry.sourceRev < reqSourceRev
+		if !forceReload &&
+			entry.modTime.Equal(modTime) &&
+			entry.size == size &&
+			entry.displayPath == displayPath &&
+			entry.sourceHash == sourceHash {
 			if fileViewSuperseded(liveSeq, seq) {
 				c.mu.Unlock()
 				return "", errFileViewSuperseded
@@ -599,7 +715,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 			if fileViewSuperseded(liveSeq, seq) {
 				return "", errFileViewSuperseded
 			}
-			entry.putRender(renderKey, rendered)
+			c.commitRenderPut(entry, renderKey, rendered)
 			return rendered, nil
 		}
 	}
@@ -610,27 +726,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	}
 
 	c.statsData.CacheMisses++
-	c.statsData.DiskReads++
 	c.mu.Unlock()
-
-	if fileViewBeforeDiskRead != nil {
-		fileViewBeforeDiskRead()
-	}
-	if fileViewSuperseded(liveSeq, seq) {
-		return "", errFileViewSuperseded
-	}
-
-	readRes := readFileViewBoundedCancellable(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes, liveSeq, seq)
-	if readRes.err != nil && len(readRes.lines) == 0 {
-		c.mu.Lock()
-		if elem, ok := c.items[targetPath]; ok {
-			c.lru.Remove(elem)
-			delete(c.items, targetPath)
-		}
-		c.mu.Unlock()
-		rendered := theme.faint.Render("Could not read file: " + readRes.err.Error())
-		return rendered, readRes.err
-	}
 
 	cleanLines := make([]string, len(readRes.lines))
 	for i, l := range readRes.lines {
@@ -684,12 +780,22 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		return "", errFileViewSuperseded
 	}
 
+	sourceBytes := 0
+	for _, l := range cleanLines {
+		sourceBytes += len(l)
+	}
+	for _, d := range display {
+		sourceBytes += len(d)
+	}
+
 	entry := &fileViewCachedEntry{
 		targetPath:   targetPath,
 		displayPath:  displayPath,
 		modTime:      readRes.modTime,
 		size:         readRes.size,
 		sourceRev:    reqSourceRev,
+		sourceHash:   sourceHash,
+		sourceBytes:  sourceBytes,
 		lines:        cleanLines,
 		display:      display,
 		truncated:    readRes.truncated,
@@ -707,6 +813,11 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		c.mu.Unlock()
 		return "", errFileViewSuperseded
 	}
+	if c.maxEntries <= 0 || c.maxBytes <= 0 || entry.byteSize() > c.maxBytes {
+		c.statsData.SkippedOversized++
+		c.mu.Unlock()
+		return rendered, nil
+	}
 
 	if elem, ok := c.items[targetPath]; ok {
 		existing := elem.Value.(*fileViewCachedEntry)
@@ -714,22 +825,11 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 			c.mu.Unlock()
 			return rendered, nil
 		}
-		c.lru.Remove(elem)
-		delete(c.items, targetPath)
+		c.removeItemLocked(targetPath)
 	}
-	elem := c.lru.PushFront(entry)
-	c.items[targetPath] = elem
-
-	for len(c.items) > c.maxEntries {
-		back := c.lru.Back()
-		if back == nil {
-			break
-		}
-		backEntry := back.Value.(*fileViewCachedEntry)
-		delete(c.items, backEntry.targetPath)
-		c.lru.Remove(back)
-		c.statsData.Evictions++
-	}
+	c.items[targetPath] = c.lru.PushFront(entry)
+	c.retained += entry.byteSize()
+	c.evictOverflowLocked()
 	c.mu.Unlock()
 
 	return rendered, nil

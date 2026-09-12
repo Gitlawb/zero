@@ -2714,7 +2714,7 @@ func TestFileView_SupersededInsideDiskReadAndHighlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cache := newFileViewRenderCache(10)
+	cache := newFileViewRenderCache(10, defaultFileViewCacheMaxBytes)
 	theme := zeroTheme
 	var liveSeq atomic.Uint64
 	liveSeq.Store(1)
@@ -2924,5 +2924,192 @@ func TestFileView_CommandAndSweepCompletionOrders(t *testing.T) {
 	got = plainRender(t, m.renderFileViewFull(80))
 	if !strings.Contains(got, "package v3") {
 		t.Fatalf("expected package v3 after sweep->command order, got: %s", got)
+	}
+}
+
+// TestFileViewCacheByteBudget verifies the cache-wide byte cap: retained stays
+// within maxBytes, eviction fires before the budget is exceeded, and the named
+// default bound is pinned so a silent regression is caught.
+func TestFileViewCacheByteBudget(t *testing.T) {
+	if defaultFileViewCacheMaxBytes != 8<<20 {
+		t.Fatalf("defaultFileViewCacheMaxBytes = %d, want %d", defaultFileViewCacheMaxBytes, 8<<20)
+	}
+	defaultFileViewCache.mu.Lock()
+	pinned := defaultFileViewCache.maxBytes
+	defaultFileViewCache.mu.Unlock()
+	if pinned != defaultFileViewCacheMaxBytes {
+		t.Fatalf("default cache maxBytes = %d, want %d", pinned, defaultFileViewCacheMaxBytes)
+	}
+
+	dir := t.TempDir()
+	const maxBytes = 48 * 1024
+	cache := newFileViewRenderCache(64, maxBytes)
+
+	payload := strings.Repeat("abcdefghij\n", 400) // ~4 KiB per file
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("byte_cap_%d.txt", i)
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cache.loadAndRender(path, name, 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
+			t.Fatalf("load %d: %v", i, err)
+		}
+	}
+
+	cache.mu.Lock()
+	retained := cache.retained
+	entries := len(cache.items)
+	cache.mu.Unlock()
+	if retained > maxBytes {
+		t.Fatalf("retained %d exceeded maxBytes %d", retained, maxBytes)
+	}
+	if entries == 0 {
+		t.Fatal("expected at least one cached entry")
+	}
+	if evictions := cache.stats().Evictions; evictions == 0 {
+		t.Fatal("expected byte-budget eviction to fire")
+	}
+}
+
+// TestFileViewCacheRefusesOversizedEntry verifies a single entry larger than the
+// byte budget is returned to the caller but never retained.
+func TestFileViewCacheRefusesOversizedEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "oversized.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("z", 4096)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache := newFileViewRenderCache(64, 512)
+	rendered, err := cache.loadAndRender(path, "oversized.txt", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !strings.Contains(rendered, "zzz") {
+		t.Fatal("oversized entry must still be returned to the caller")
+	}
+	cache.mu.Lock()
+	entries := len(cache.items)
+	retained := cache.retained
+	cache.mu.Unlock()
+	if entries != 0 || retained != 0 {
+		t.Fatalf("oversized entry must not be cached: entries=%d retained=%d", entries, retained)
+	}
+	if stats := cache.stats(); stats.SkippedOversized != 1 {
+		t.Fatalf("SkippedOversized = %d, want 1", stats.SkippedOversized)
+	}
+}
+
+// TestFileViewCacheEvictionDropsPathRevision verifies that LRU eviction removes
+// the evicted path's revision key, so revisions cannot leak one key per file.
+func TestFileViewCacheEvictionDropsPathRevision(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "rev_a.txt")
+	b := filepath.Join(dir, "rev_b.txt")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("alpha\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := newFileViewRenderCache(1, defaultFileViewCacheMaxBytes)
+
+	// Give a a revision, then load it so the entry and its revision coexist.
+	cache.invalidatePath(a)
+	if _, err := cache.loadAndRender(a, "rev_a.txt", 80, nil, "", cache.generation(), zeroTheme, cache.requiredRevision(a), nil, 0); err != nil {
+		t.Fatalf("load a: %v", err)
+	}
+	cache.mu.Lock()
+	_, hasA := cache.pathRevisions[a]
+	cache.mu.Unlock()
+	if !hasA {
+		t.Fatal("expected revision key for a before eviction")
+	}
+
+	// Loading b with maxEntries=1 evicts a and must drop a's revision.
+	if _, err := cache.loadAndRender(b, "rev_b.txt", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
+		t.Fatalf("load b: %v", err)
+	}
+	cache.mu.Lock()
+	_, hasA = cache.pathRevisions[a]
+	orphans := len(cache.pathRevisions)
+	cache.mu.Unlock()
+	if hasA {
+		t.Fatal("evicted path a must not keep a revision key")
+	}
+	if orphans != 0 {
+		t.Fatalf("expected no orphan revision keys, got %d", orphans)
+	}
+}
+
+// TestFileViewCachePurgeResetsPathRevisions verifies clear() resets the revision
+// map instead of bumping dead keys forever, so /clear cannot leak one key per
+// abandoned tool result.
+func TestFileViewCachePurgeResetsPathRevisions(t *testing.T) {
+	cache := newFileViewRenderCache(8, defaultFileViewCacheMaxBytes)
+	cache.invalidatePath("one.go")
+	cache.invalidatePath("two.go")
+	cache.mu.Lock()
+	before := len(cache.pathRevisions)
+	cache.mu.Unlock()
+	if before != 2 {
+		t.Fatalf("expected 2 revision keys, got %d", before)
+	}
+
+	cache.clear()
+	cache.mu.Lock()
+	after := len(cache.pathRevisions)
+	cache.mu.Unlock()
+	if after != 0 {
+		t.Fatalf("clear() must drop revision keys, got %d", after)
+	}
+	if rev := cache.invalidatePath("one.go"); rev != 1 {
+		t.Fatalf("revision after purge = %d, want 1", rev)
+	}
+}
+
+// TestFileViewCacheFreshnessBySourceHash verifies that metadata (mtime+size) is
+// only a hint: when an overwrite restores the same metadata with different
+// bytes, the cached render must not be served.
+func TestFileViewCacheFreshnessBySourceHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fresh.go")
+	original := "package main\n// AAAA\n"
+	updated := "package main\n// BBBB\n"
+	if len(original) != len(updated) {
+		t.Fatal("test setup: contents must have equal length")
+	}
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Unix(1700000000, 0)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := newFileViewRenderCache(64, defaultFileViewCacheMaxBytes)
+	first, err := cache.loadAndRender(path, "fresh.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0)
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	if !strings.Contains(first, "AAAA") {
+		t.Fatalf("first render missing original content: %q", first)
+	}
+
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := cache.loadAndRender(path, "fresh.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0)
+	if err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	if strings.Contains(second, "AAAA") || !strings.Contains(second, "BBBB") {
+		t.Fatalf("stale render served after same-metadata overwrite: %q", second)
+	}
+	if stats := cache.stats(); stats.HighlightCalls != 2 {
+		t.Fatalf("HighlightCalls = %d, want 2 (hash mismatch must force a miss)", stats.HighlightCalls)
 	}
 }
