@@ -570,7 +570,7 @@ func TestACPLoadImportedSessionRestoresLaterLocalModelSelection(t *testing.T) {
 	meta, err := deps.Store.Create(sessions.CreateInput{
 		Title:         "modern imported session",
 		Cwd:           "/foreign/display",
-		WorkspaceKey:  "/foreign/exact",
+		WorkspaceKey:  clientCwd,
 		SourceModelID: "foreign-expensive-model",
 		Tag:           sessions.ImportedSessionTag("claude-code", "foreign-id"),
 	})
@@ -1197,8 +1197,8 @@ func TestACPSameConnectionReloadRefreshesRecoveredHistory(t *testing.T) {
 
 func TestACPLoadUsesOperationalWorkspaceKeyForPersistedIdentity(t *testing.T) {
 	deps := testDeps(t)
-	displayCwd := "/work/[REDACTED]/repo"
-	operationalCwd := "/work/sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA/repo"
+	displayCwd := filepath.Join(t.TempDir(), "[REDACTED]", "repo")
+	operationalCwd := t.TempDir()
 	meta, err := deps.Store.Create(sessions.CreateInput{
 		Title:        "imported session",
 		Cwd:          displayCwd,
