@@ -2183,6 +2183,10 @@ func toAgentAskUserQuestions(questions []tools.AskUserQuestion) []AskUserQuestio
 
 func sandboxRequest(toolName string, tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options) sandbox.Request {
 	safety := tool.Safety()
+	var patchPaths []string
+	if toolName == "apply_patch" {
+		patchPaths = tools.ApplyPatchPaths(args)
+	}
 	return sandbox.Request{
 		WorkspaceRoot:     "",
 		ToolName:          toolName,
@@ -2191,6 +2195,7 @@ func sandboxRequest(toolName string, tool tools.Tool, args map[string]any, permi
 		PermissionGranted: permissionGranted,
 		PermissionMode:    sandbox.PermissionMode(permissionMode),
 		Args:              args,
+		PatchPaths:        patchPaths,
 		Reason:            safety.Reason,
 	}
 }
