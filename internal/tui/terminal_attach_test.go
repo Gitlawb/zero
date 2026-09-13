@@ -96,6 +96,52 @@ func TestTerminalAttachForwardsPaste(t *testing.T) {
 	}
 }
 
+func TestTerminalAttachPasteKeepsBracketedFraming(t *testing.T) {
+	m, tool := attachedModel(t)
+	tool.sessions[0].RecentOutput = "\x1b[?2004h[sudo] password for me: "
+	next, _ := m.openTerminalAttach(7)
+
+	updated, _ := next.Update(testPaste("pw"))
+	next = updated.(model)
+	want := "\x1b[200~pw\x1b[201~"
+	if len(tool.writes) != 1 || string(tool.writes[0]) != want {
+		t.Fatalf("writes = %q, want [%q]", tool.writes, want)
+	}
+
+	// A disable sequence in later output turns framing back off once the
+	// refresh tick observes it.
+	tool.sessions[0].RecentOutput += "\x1b[?2004l"
+	updated, _ = next.Update(terminalAttachTickMsg{})
+	next = updated.(model)
+	_, _ = next.Update(testPaste("pw3"))
+	if last := string(tool.writes[len(tool.writes)-1]); last != "pw3" {
+		t.Fatalf("write after disable = %q, want raw pw3", last)
+	}
+}
+
+func TestBracketedPasteMode(t *testing.T) {
+	cases := []struct {
+		name    string
+		output  string
+		current bool
+		want    bool
+	}{
+		{name: "enable last", output: "\x1b[?2004h", want: true},
+		{name: "disable last", output: "\x1b[?2004l", current: true, want: false},
+		{name: "neither keeps current", output: "plain output", current: true, want: true},
+		{name: "neither stays off", output: "plain output", want: false},
+		{name: "enable after disable", output: "\x1b[?2004ltext\x1b[?2004h", want: true},
+		{name: "disable after enable", output: "\x1b[?2004htext\x1b[?2004l", current: true, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bracketedPasteMode(tc.output, tc.current); got != tc.want {
+				t.Fatalf("bracketedPasteMode(%q, %v) = %v, want %v", tc.output, tc.current, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTerminalAttachEscDetaches(t *testing.T) {
 	m, tool := attachedModel(t)
 	next, _ := m.openTerminalAttach(7)

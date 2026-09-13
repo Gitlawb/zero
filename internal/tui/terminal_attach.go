@@ -22,11 +22,12 @@ import (
 // never inspected, stored, or logged — the PTY's own line discipline (e.g.
 // sudo's no-echo prompt) handles masking.
 type terminalAttachState struct {
-	sessionID int
-	command   string
-	output    string
-	ptyCols   int
-	ptyRows   int
+	sessionID      int
+	command        string
+	output         string
+	ptyCols        int
+	ptyRows        int
+	bracketedPaste bool
 }
 
 const terminalAttachTickInterval = 100 * time.Millisecond
@@ -99,6 +100,7 @@ func (m model) openTerminalAttach(id int) (model, tea.Cmd) {
 		default:
 			state.command = snapshot.Command
 			state.output = snapshot.RecentOutput
+			state.bracketedPaste = bracketedPasteMode(snapshot.RecentOutput, false)
 		}
 	}
 	m.terminalAttach = state
@@ -156,6 +158,7 @@ func (m model) refreshTerminalAttach() (model, tea.Cmd) {
 		return m.showTransientNoticeInline(fmt.Sprintf("Terminal session %d ended.", state.sessionID), transientNoticeInfo), nil
 	}
 	state.output = snapshot.RecentOutput
+	state.bracketedPaste = bracketedPasteMode(snapshot.RecentOutput, state.bracketedPaste)
 	if snapshot.Status != "running" {
 		m.terminalAttach = nil
 		exitCode := 0
@@ -260,13 +263,35 @@ func (m model) handleTerminalAttachKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.writeTerminalAttachInput(state, data), nil
 }
 
-// handleTerminalAttachPaste forwards a bracketed paste verbatim to the PTY.
+// handleTerminalAttachPaste forwards a paste to the PTY. Bubble Tea strips
+// the outer terminal's bracketed-paste markers, so when the child enabled
+// bracketed paste itself the framing is re-added around the content.
 func (m model) handleTerminalAttachPaste(content string) (tea.Model, tea.Cmd) {
 	state := m.terminalAttach
 	if content == "" {
 		return m, nil
 	}
-	return m.writeTerminalAttachInput(state, []byte(content)), nil
+	data := []byte(content)
+	if state.bracketedPaste {
+		data = append(append([]byte("\x1b[200~"), data...), "\x1b[201~"...)
+	}
+	return m.writeTerminalAttachInput(state, data), nil
+}
+
+// bracketedPasteMode tracks the child's bracketed-paste mode from its output:
+// the last enable/disable sequence wins, and output without either keeps the
+// previous state since RecentOutput is a rolling window that can lose it.
+func bracketedPasteMode(output string, current bool) bool {
+	on := strings.LastIndex(output, "\x1b[?2004h")
+	off := strings.LastIndex(output, "\x1b[?2004l")
+	switch {
+	case on < 0 && off < 0:
+		return current
+	case on > off:
+		return true
+	default:
+		return false
+	}
 }
 
 // ptyInputBytes maps a keystroke to the byte sequence a terminal would send.
