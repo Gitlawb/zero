@@ -174,7 +174,8 @@ func gitMetadataWriteCarveoutSpecsWithLstat(root string, lstat func(string) (os.
 	// that nor a checkout git will use, so they keep the legacy child carveouts
 	// rather than being handed the stronger single-object protection on the
 	// strength of not being a directory.
-	if info, err := lstat(gitPath); err == nil && info.Mode().IsRegular() {
+	gitInfo, gitErr := lstat(gitPath)
+	if gitErr == nil && gitInfo.Mode().IsRegular() {
 		return []gitMetadataCarveout{{Path: gitPath, IsFile: true}}
 	}
 	// A MISSING .git IS NOT THE SAME AS "THIS WILL BECOME A REPOSITORY".
@@ -191,7 +192,24 @@ func gitMetadataWriteCarveoutSpecsWithLstat(root string, lstat func(string) (os.
 	// root, and the sandboxed principal has no inherited access to it, so it needs
 	// no carveout here. The non-materialized deny-delete on <root>/.git is emitted
 	// separately and still guards the name if a repository is ever created here.
-	if gitMetadataGovernedByAncestor(root) {
+	// ONLY WHEN THIS ROOT HAS NO .git OF ITS OWN.
+	//
+	// A workspace nested inside another repository can still own its own
+	// repository, and then the metadata below is ITS metadata, not the
+	// ancestor's. Asking the ancestor question unconditionally suppressed the
+	// hooks and config carveouts for such a workspace while
+	// workspaceGovernedByAncestorRepository, which answers the same question by
+	// testing for a local .git, reported it as not governed, so the refusal that
+	// would otherwise compensate never fired. The result was workspace write
+	// access over a live .git/config and .git/hooks, which is configuration that
+	// decides what git executes.
+	//
+	// Gating on the lstat error makes this literally the test that function
+	// applies. It cannot reintroduce the competing-control-directory problem the
+	// branch was written for: the carveouts are only materialized where .git
+	// already exists, so git's discovery walk already stops here. A permission
+	// failure on the lstat keeps today's behaviour.
+	if gitErr != nil && gitMetadataGovernedByAncestor(root) {
 		return nil
 	}
 	return []gitMetadataCarveout{
