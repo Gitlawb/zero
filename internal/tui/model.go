@@ -1584,15 +1584,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		known := map[int]bool{}
-		if controller, ok := m.execSessionController(); ok {
-			for _, session := range controller.ExecSessions() {
-				known[session.ID] = true
-			}
-		}
 		m.terminalAutoAttach = &terminalAutoAttachState{
 			runID:    msg.runID,
-			known:    known,
+			known:    msg.known,
 			deadline: m.now().Add(terminalAutoAttachTimeout),
 		}
 		return m, terminalAutoAttachTickCmd(msg.runID)
@@ -5820,7 +5814,13 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// with the process manager inside the tool's Run, so the update loop
 			// polls for it on a tick.
 			if call.Name == tools.ExecCommandToolName && execCallWantsTTY(call.Arguments) && m.runtimeMessageSink != nil {
-				m.runtimeMessageSink(interactiveExecStartMsg{runID: runID})
+				known := map[int]bool{}
+				if controller, ok := m.execSessionController(); ok {
+					for _, session := range controller.ExecSessions() {
+						known[session.ID] = true
+					}
+				}
+				m.runtimeMessageSink(interactiveExecStartMsg{runID: runID, known: known})
 			}
 			if call.Name == "Task" {
 				name, desc := parseTaskCallArgs(call.Arguments)

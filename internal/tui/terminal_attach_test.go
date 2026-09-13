@@ -348,7 +348,7 @@ func TestTerminalAutoAttachSkipsKnownSession(t *testing.T) {
 	m.pending = true
 
 	// Session 5 predates the tool call — it is not this call's session.
-	updated, _ := m.Update(interactiveExecStartMsg{runID: 3})
+	updated, _ := m.Update(interactiveExecStartMsg{runID: 3, known: map[int]bool{5: true}})
 	next := updated.(model)
 	updated, cmd := next.Update(terminalAutoAttachTickMsg{runID: 3})
 	next = updated.(model)
@@ -366,6 +366,33 @@ func TestTerminalAutoAttachSkipsKnownSession(t *testing.T) {
 	next = updated.(model)
 	if next.terminalAttach == nil || next.terminalAttach.sessionID != 6 {
 		t.Fatalf("watcher should attach to the new session 6: %#v", next.terminalAttach)
+	}
+}
+
+func TestInteractiveExecStartBaselinePredatesSessionRegistration(t *testing.T) {
+	// The baseline is captured when OnToolCall fires, before the tool's Run
+	// registers the session — a snapshot taken at Update time would already
+	// contain it and wrongly exclude it as pre-existing.
+	tool := &fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{
+			{ID: 5, TTY: true, Status: "running", Command: "top", StartedAt: time.Unix(100, 0)},
+		},
+	}
+	m := modelWithFakeExecSessions(tool, time.Unix(200, 0))
+	m.activeRunID = 3
+	m.pending = true
+
+	msg := interactiveExecStartMsg{runID: 3, known: map[int]bool{5: true}}
+	tool.sessions = append(tool.sessions, tools.ExecSessionSnapshot{
+		ID: 6, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(200, 0),
+	})
+
+	updated, _ := m.Update(msg)
+	next := updated.(model)
+	updated, _ = next.Update(terminalAutoAttachTickMsg{runID: 3})
+	next = updated.(model)
+	if next.terminalAttach == nil || next.terminalAttach.sessionID != 6 {
+		t.Fatalf("watcher should attach to the session registered after the baseline: %#v", next.terminalAttach)
 	}
 }
 

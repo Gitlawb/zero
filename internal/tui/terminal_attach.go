@@ -52,9 +52,12 @@ const terminalAutoAttachTimeout = 60 * time.Second
 
 // interactiveExecStartMsg signals that the active run just invoked exec_command
 // with tty:true; the session registers with the process manager moments later,
-// so the tick polls for it.
+// so the tick polls for it. The baseline session set is captured in OnToolCall,
+// before the tool runs: Program.Send only queues the message, so snapshotting
+// in Update could already see the new session and exclude it as pre-existing.
 type interactiveExecStartMsg struct {
 	runID int
+	known map[int]bool
 }
 
 // The tick carries the run it belongs to so the /btw router can deliver it to
