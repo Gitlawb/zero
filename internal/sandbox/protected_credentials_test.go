@@ -327,8 +327,20 @@ func TestProtectedCredentialFilenameWhitespaceReachesOSSandbox(t *testing.T) {
 	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
 		t.Fatalf("write token: %v", err)
 	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	for _, key := range []string{"CLOUDSDK_CONFIG", "NPM_CONFIG_USERCONFIG", "npm_config_userconfig", "GH_CONFIG_DIR", "NETRC", "DOCKER_CONFIG", "KUBECONFIG", "GOOGLE_APPLICATION_CREDENTIALS", "ZERO_OAUTH_TOKENS_PATH", "ZERO_OAUTH_STORAGE", "ZERO_MCP_OAUTH_TOKENS_PATH"} {
+		t.Setenv(key, "")
+	}
 	t.Setenv(daemonRemoteTokenEnv, "")
 	t.Setenv(daemonRemoteTokenFileEnv, token)
+	t.Setenv(daemonRemoteTokenFileResolvedEnv, "")
+	t.Setenv(daemonRemoteTokenFileIdentityEnv, "")
 
 	profile := PermissionProfileFromPolicy(workspace, DefaultPolicy(), nil)
 	if !stringSliceContains(profile.FileSystem.DenyReadIfExists, token) {
@@ -530,6 +542,63 @@ func TestSandboxManagerAllowsLinuxTokenOnSeparateFilesystem(t *testing.T) {
 		ValidateExecution: true,
 	}); err == nil || !strings.Contains(err.Error(), "hard-link aliases") {
 		t.Fatalf("BuildCommandPlan same-filesystem error = %v, want hard-link alias refusal", err)
+	}
+}
+
+// This admission test deliberately has no writable roots, so linkability does
+// not reject the request before the startup-identity check is exercised.
+func TestLinuxShellAdmissionRejectsRotatedStartupToken(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux shell admission requires native filesystem identity")
+	}
+	workspace := t.TempDir()
+	dir := t.TempDir()
+	token := filepath.Join(dir, "bridge-token")
+	if err := os.WriteFile(token, []byte("startup-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := remotetoken.IdentityOfFile(file)
+	file.Close()
+	if !ok {
+		t.Fatal("stable file identity unavailable")
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, token)
+	t.Setenv(daemonRemoteTokenFileResolvedEnv, token)
+	t.Setenv(daemonRemoteTokenFileIdentityEnv, identity)
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, ReadRoots: []string{string(filepath.Separator)}},
+		Network:    NetworkPolicy{Mode: NetworkDeny},
+	}
+	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: Backend{Name: BackendLinuxBwrap, Available: true, Platform: "linux", NativeIsolation: true, CommandWrapping: true}})
+	request := SandboxManagerRequest{WorkspaceRoot: workspace, Policy: DefaultPolicy(), Profile: profile, Preference: SandboxPreferenceAuto, ValidateExecution: true}
+	if _, err := manager.BuildExecutionRequest(request); err != nil {
+		t.Fatalf("unrotated startup token rejected: %v", err)
+	}
+	if err := os.Rename(token, token+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(token, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BuildExecutionRequest(request); err == nil || !strings.Contains(err.Error(), "no longer names the token object") {
+		t.Fatalf("rotated startup token error = %v, want identity-drift refusal", err)
+	}
+	if err := os.Remove(token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BuildExecutionRequest(request); err == nil || !strings.Contains(err.Error(), "no longer names the token object") {
+		t.Fatalf("missing startup token error = %v, want identity-drift refusal", err)
+	}
+	if err := os.Rename(token+".old", token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BuildExecutionRequest(request); err != nil {
+		t.Fatalf("restored startup token rejected: %v", err)
 	}
 }
 

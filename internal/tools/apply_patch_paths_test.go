@@ -88,6 +88,28 @@ func TestApplyPatchPathsParseGitDefaultAndNoPrefixOutput(t *testing.T) {
 	}
 }
 
+func TestApplyPatchPathsAcceptNoPrefixSpacedRenameAndCopyWithHunks(t *testing.T) {
+	for _, operation := range []string{"rename", "copy"} {
+		t.Run(operation, func(t *testing.T) {
+			patch := "diff --git old name.txt new name.txt\n" +
+				"similarity index 75%\n" +
+				operation + " from old name.txt\n" +
+				operation + " to new name.txt\n" +
+				"--- old name.txt\n" +
+				"+++ new name.txt\n" +
+				"@@ -1 +1 @@\n" +
+				"-old\n" +
+				"+new\n"
+			paths := mustApplyPatchPaths(t, patch)
+			for _, want := range []string{"old name.txt", "new name.txt"} {
+				if !slices.Contains(paths, want) {
+					t.Fatalf("%s paths = %v, want %q", operation, paths, want)
+				}
+			}
+		})
+	}
+}
+
 func TestApplyPatchPathsRejectContradictoryRenameMetadata(t *testing.T) {
 	patch := "diff --git source.txt destination.txt\n" +
 		"similarity index 100%\n" +

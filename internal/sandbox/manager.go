@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
 
 // errWindowsSandboxNotInitialized is returned only to a caller that explicitly
@@ -249,6 +251,9 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		return SandboxExecutionRequest{}, errors.New("the Windows sandbox enforces writes through ACLs and has no filesystem deny-read rule, so it cannot keep a file-backed remote token out of a sandboxed shell; sandboxed shell commands require ZERO_DAEMON_REMOTE_TOKEN")
 	}
 	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "linux" {
+		if credential, changed := protectedCredentialStartupIdentityChanged(protectedCredentials); changed {
+			return SandboxExecutionRequest{}, fmt.Errorf("bubblewrap cannot protect the remote token file %q because it no longer names the token object opened at daemon startup; restart the daemon or restore the original token file", credential)
+		}
 		if credential, ok := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentials); ok {
 			return SandboxExecutionRequest{}, fmt.Errorf("bubblewrap cannot protect the remote token file %q from hard-link aliases in a shell-accessible root: a /dev/null bind covers one pathname, not the inode; use ZERO_DAEMON_REMOTE_TOKEN, place the file on a separate filesystem, or remove that root from the sandbox", credential)
 		}
@@ -323,6 +328,29 @@ func policyHasExplicitDeny(policy Policy) bool {
 // future inode alias, and a restart authorizes the configured pathname again.
 // BuildExecutionRequest therefore rejects shell execution whenever file-backed
 // remote authentication is selected. In-process tools remain protected.
+
+// protectedCredentialStartupIdentityChanged rejects sequential token rotation:
+// masking a replacement pathname does not hide the still-authorized startup
+// object after it has been renamed elsewhere. This is an admission check, not a
+// lock over concurrent rotation and sandbox startup.
+func protectedCredentialStartupIdentityChanged(protected []string) (string, bool) {
+	source, selected := remotetoken.SourceFromEnv()
+	if !selected || source.Identity == "" {
+		return "", false
+	}
+	for _, path := range protected {
+		file, err := os.Open(path)
+		if err != nil {
+			return path, true
+		}
+		identity, ok := remotetoken.IdentityOfFile(file)
+		closeErr := file.Close()
+		if !ok || closeErr != nil || identity != source.Identity {
+			return path, true
+		}
+	}
+	return "", false
+}
 
 // protectedCredentialLinkableIntoLinuxShellRoot reports a mandatory token that a
 // shell command could reach through a second directory entry for the same inode,

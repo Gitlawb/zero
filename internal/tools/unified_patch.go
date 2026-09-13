@@ -289,6 +289,9 @@ func parseUnifiedPatch(patch string) ([]structuredPatchOperation, error) {
 					// diff --git operands. Extended headers delimit those paths,
 					// allowing their exact concatenation to resolve the ambiguity.
 					matches = diffOperands == pendingFrom+" "+to
+					if matches {
+						diffOldPath, diffNewPath, diffPathsOK = pendingFrom, to, true
+					}
 				}
 				if !matches {
 					return nil, fmt.Errorf("invalid unified diff at line %d: %s paths disagree with diff --git paths from line %d", lineNumber, toHeader, diffHeaderLine)
