@@ -894,3 +894,18 @@ func TestTruncateExecOutputPreservesUTF8(t *testing.T) {
 		t.Fatalf("truncated output is not valid UTF-8: %q", truncated)
 	}
 }
+
+func TestFormatExecCommandOutputTTYAttachHint(t *testing.T) {
+	running := formatExecCommandOutput("", 1007, false, 0, false, true)
+	if !strings.Contains(running, "run /attach 1007 to type into it") {
+		t.Fatalf("tty running session should point at /attach: %q", running)
+	}
+	exited := formatExecCommandOutput("", 1007, true, 0, false, true)
+	if strings.Contains(exited, "/attach") {
+		t.Fatalf("exited session should not mention /attach: %q", exited)
+	}
+	pipes := formatExecCommandOutput("", 1007, false, 0, false, false)
+	if strings.Contains(pipes, "/attach") {
+		t.Fatalf("non-tty session should not mention /attach: %q", pipes)
+	}
+}

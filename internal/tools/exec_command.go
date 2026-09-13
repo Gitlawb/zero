@@ -97,7 +97,7 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 					},
 					"justification": {Type: "string", Description: "User-facing approval question for `require_escalated`; omit otherwise."},
 					"prefix_rule":   {Type: "array", Items: &PropertySchema{Type: "string"}, Description: "Reusable approval prefix for this command, only with `sandbox_permissions: \"require_escalated\"`; keep it narrow, for example [\"git\", \"pull\"]."},
-					"tty":           {Type: "boolean", Description: "True allocates a PTY for the command; false or omitted uses plain pipes.", Default: false},
+					"tty":           {Type: "boolean", Description: "True allocates a PTY for the command; false or omitted uses plain pipes. Use true for commands that may prompt for input (sudo, ssh, interactive installers): the user can then type into the session directly.", Default: false},
 				},
 				Required:             []string{"cmd"},
 				AdditionalProperties: false,
@@ -463,7 +463,7 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	if input.exited && input.exitCode != 0 && !input.interrupted {
 		status = StatusError
 	}
-	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
+	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted, input.tty)
 	if status == StatusError && input.exited && !input.interrupted {
 		if issue := detectShellOutputIssueForRuntime(output, detectShellRuntime(runtimeGOOS())); issue != nil {
 			meta["shell_issue"] = issue.Kind
@@ -585,7 +585,7 @@ func executionChangeSummaries(changes []execution.Change) []execution.Change {
 	return summaries
 }
 
-func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode int, interrupted bool) string {
+func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode int, interrupted bool, tty bool) string {
 	output = strings.TrimRight(output, "\r\n")
 	parts := []string{}
 	if output != "" {
@@ -609,6 +609,9 @@ func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode
 		}
 		parts = append(parts, fmt.Sprintf("session_id: %d", sessionID))
 		parts = append(parts, fmt.Sprintf("Use write_stdin with session_id %d and empty chars to poll; send chars \"\\u0003\" to interrupt/stop it.", sessionID))
+		if tty {
+			parts = append(parts, fmt.Sprintf("This session has a terminal. If it is waiting on the user (password or confirmation prompt), tell them to run /attach %d to type into it, then poll with write_stdin (empty chars, long yield_time_ms) until it continues. Never ask the user for a password in chat.", sessionID))
+		}
 	}
 	return strings.Join(parts, "\n")
 }
