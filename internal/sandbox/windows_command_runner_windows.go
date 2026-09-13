@@ -5,6 +5,8 @@ package sandbox
 import (
 	"fmt"
 	"io"
+
+	"golang.org/x/sys/windows"
 )
 
 func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writer) int {
@@ -13,6 +15,13 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// because it admits write grants outside WriteRoots. Reject on both the
 	// elevated and unelevated restricted-token tiers before setup or launch
 	// until access-time confinement exists (PR #640).
+	// Established BEFORE any child can exist, so a child created later inherits
+	// job membership at creation and a forcibly terminated helper cannot leave a
+	// suspended one behind. A failure here is not fatal: it costs the kill-on-close
+	// guarantee, not the sandbox, and the ordinary unwind paths still run.
+	if job, err := joinWindowsChildKillJob(); err == nil {
+		defer func() { _ = windows.CloseHandle(job) }()
+	}
 	if err := windowsDenyReadRestrictedTokenUnsupported(config); err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 		return 1
