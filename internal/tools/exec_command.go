@@ -187,8 +187,14 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if issue := detectShellCommandIssueForRuntime(commandText, detectShellRuntime(runtimeGOOS())); issue != nil && !msysGuardBypassed(issue, commandEngine) {
 		return shellIssueBlockResult(*issue)
 	}
-	if interactive := zeroSandbox.DetectInteractiveCommand(commandText, runtimeGOOS()); interactive.Interactive {
-		return interactiveBlockResult(interactive)
+	// tty:true exists exactly to run prompting commands, so the
+	// non-interactive guard steps aside and the PTY path gets the session.
+	if !ttyRequested {
+		if interactive := zeroSandbox.DetectInteractiveCommand(commandText, runtimeGOOS()); interactive.Interactive {
+			result := interactiveBlockResult(interactive)
+			result.Output += "\nRerun with tty:true if the user should interact with it."
+			return result
+		}
 	}
 	absoluteCwd, relativeCwd, err := resolveScopedPath(tool.workspaceRoot, tool.scope, workdir)
 	if err != nil {

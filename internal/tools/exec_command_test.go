@@ -910,6 +910,29 @@ func TestFormatExecCommandOutputTTYAttachHint(t *testing.T) {
 	}
 }
 
+func TestExecCommandInteractiveBlockSuggestsTTY(t *testing.T) {
+	tool := NewScopedExecCommandTool(t.TempDir(), nil, newExecSessionManager())
+	result := tool.Run(context.Background(), map[string]any{"cmd": "ssh host.example.com"})
+	if result.Status != StatusError || result.Meta["safety_block"] != "interactive_command" {
+		t.Fatalf("expected interactive safety block, got meta=%#v output=%q", result.Meta, result.Output)
+	}
+	if !strings.Contains(result.Output, "tty:true") {
+		t.Fatalf("block output should suggest tty:true: %q", result.Output)
+	}
+}
+
+func TestExecCommandTTYSkipsInteractiveBlock(t *testing.T) {
+	tool := NewScopedExecCommandTool(t.TempDir(), nil, newExecSessionManager())
+	// ssh to a bogus host fails fast on its own; the point is that the
+	// interactive guard must not fire ahead of the tty path.
+	result := tool.Run(context.Background(), map[string]any{
+		"cmd": "ssh host.example.com", "tty": true, "yield_time_ms": 250,
+	})
+	if result.Meta["safety_block"] == "interactive_command" {
+		t.Fatalf("tty:true should not hit the interactive block: %#v", result.Meta)
+	}
+}
+
 func TestFormatExecCommandOutputNoNewPrivilegesHint(t *testing.T) {
 	blocked := formatExecCommandOutput(`sudo: The "no new privileges" flag is set`, 1007, true, 1, false, true)
 	if !strings.Contains(blocked, `sandbox_permissions "require_escalated"`) {
