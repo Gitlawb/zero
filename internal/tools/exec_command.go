@@ -610,7 +610,7 @@ func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode
 		parts = append(parts, fmt.Sprintf("session_id: %d", sessionID))
 		parts = append(parts, fmt.Sprintf("Use write_stdin with session_id %d and empty chars to poll; send chars \"\\u0003\" to interrupt/stop it.", sessionID))
 		if tty {
-			parts = append(parts, fmt.Sprintf("This session has a terminal. If it is waiting on the user (password or confirmation prompt), tell them to run /attach %d to type into it, then poll with write_stdin (empty chars, long yield_time_ms) until it continues. Never ask the user for a password in chat.", sessionID))
+			parts = append(parts, fmt.Sprintf("This session has a terminal and the user can already type into it (it opened in their TUI; /attach %d reopens it). If it is waiting on a password or confirmation, say so in one line, then keep polling with write_stdin (empty chars, yield_time_ms 60000) until it exits. Do not end your turn while it is running, and never ask for the password in chat.", sessionID))
 		}
 	}
 	return strings.Join(parts, "\n")

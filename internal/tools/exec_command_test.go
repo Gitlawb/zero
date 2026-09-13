@@ -897,8 +897,8 @@ func TestTruncateExecOutputPreservesUTF8(t *testing.T) {
 
 func TestFormatExecCommandOutputTTYAttachHint(t *testing.T) {
 	running := formatExecCommandOutput("", 1007, false, 0, false, true)
-	if !strings.Contains(running, "run /attach 1007 to type into it") {
-		t.Fatalf("tty running session should point at /attach: %q", running)
+	if !strings.Contains(running, "/attach 1007 reopens it") || !strings.Contains(running, "Do not end your turn while it is running") {
+		t.Fatalf("tty running session should point at /attach and keep-poll guidance: %q", running)
 	}
 	exited := formatExecCommandOutput("", 1007, true, 0, false, true)
 	if strings.Contains(exited, "/attach") {
