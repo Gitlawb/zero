@@ -47,8 +47,10 @@ type ExecSessionSnapshot = execution.ProcessSnapshot
 
 type ExecSessionController interface {
 	ExecSessions() []ExecSessionSnapshot
+	ExecSession(id int) (ExecSessionSnapshot, bool)
 	StopExecSession(id int) bool
 	StopAllExecSessions() []int
+	WriteExecSessionInput(id int, data []byte) error
 }
 
 type execCommandTool struct {
@@ -131,12 +133,20 @@ func (tool execCommandTool) ExecSessions() []ExecSessionSnapshot {
 	return tool.manager.List()
 }
 
+func (tool execCommandTool) ExecSession(id int) (ExecSessionSnapshot, bool) {
+	return tool.manager.Snapshot(id)
+}
+
 func (tool execCommandTool) StopExecSession(id int) bool {
 	return tool.manager.Stop(id)
 }
 
 func (tool execCommandTool) StopAllExecSessions() []int {
 	return tool.manager.StopAll()
+}
+
+func (tool execCommandTool) WriteExecSessionInput(id int, data []byte) error {
+	return tool.manager.WriteInput(id, data)
 }
 
 func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine, directBudget bool) Result {

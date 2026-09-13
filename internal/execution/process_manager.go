@@ -224,6 +224,28 @@ func (manager *ProcessManager) Continue(ctx context.Context, input ProcessContin
 	return result, nil
 }
 
+// WriteInput writes bytes to a retained interactive process's stdin without
+// collecting output. Unlike Continue it never drains the pending output
+// buffer, so a concurrent write_stdin poll still sees everything the process
+// emitted; callers that only need the rolling tail use Snapshot instead.
+func (manager *ProcessManager) WriteInput(id int, data []byte) error {
+	process, ok := manager.get(id)
+	if !ok {
+		return ErrProcessNotFound
+	}
+	process.touch()
+	if len(data) == 0 {
+		return nil
+	}
+	if !process.tty || process.stdin == nil {
+		return ErrProcessStdinDisabled
+	}
+	if _, err := process.stdin.Write(data); err != nil && !process.doneClosed() {
+		return err
+	}
+	return nil
+}
+
 func clampInitialProcessWait(wait time.Duration) time.Duration {
 	return min(wait, maxInteractiveYield)
 }

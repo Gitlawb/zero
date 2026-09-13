@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -13,6 +14,7 @@ type fakeExecSessionTool struct {
 	sessions []tools.ExecSessionSnapshot
 	stopped  []int
 	stopAll  bool
+	writes   [][]byte
 }
 
 func (tool *fakeExecSessionTool) Name() string { return tools.ExecCommandToolName }
@@ -35,6 +37,15 @@ func (tool *fakeExecSessionTool) ExecSessions() []tools.ExecSessionSnapshot {
 	return append([]tools.ExecSessionSnapshot(nil), tool.sessions...)
 }
 
+func (tool *fakeExecSessionTool) ExecSession(id int) (tools.ExecSessionSnapshot, bool) {
+	for _, session := range tool.sessions {
+		if session.ID == id {
+			return session, true
+		}
+	}
+	return tools.ExecSessionSnapshot{}, false
+}
+
 func (tool *fakeExecSessionTool) StopExecSession(id int) bool {
 	for _, session := range tool.sessions {
 		if session.ID == id {
@@ -52,6 +63,20 @@ func (tool *fakeExecSessionTool) StopAllExecSessions() []int {
 		ids = append(ids, session.ID)
 	}
 	return ids
+}
+
+func (tool *fakeExecSessionTool) WriteExecSessionInput(id int, data []byte) error {
+	for _, session := range tool.sessions {
+		if session.ID != id {
+			continue
+		}
+		if !session.TTY {
+			return execution.ErrProcessStdinDisabled
+		}
+		tool.writes = append(tool.writes, append([]byte(nil), data...))
+		return nil
+	}
+	return execution.ErrProcessNotFound
 }
 
 func modelWithFakeExecSessions(tool *fakeExecSessionTool, now time.Time) model {
