@@ -278,7 +278,7 @@ func TestInteractiveExecStartAutoAttaches(t *testing.T) {
 	tool.sessions = append(tool.sessions, tools.ExecSessionSnapshot{
 		ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(100, 0),
 	})
-	updated, _ = next.Update(terminalAutoAttachTickMsg{})
+	updated, _ = next.Update(terminalAutoAttachTickMsg{runID: 3})
 	next = updated.(model)
 	if next.terminalAttach == nil || next.terminalAttach.sessionID != 7 {
 		t.Fatalf("auto-attach did not open on the new session: %#v", next.terminalAttach)
@@ -304,7 +304,7 @@ func TestTerminalAutoAttachSkipsKnownSession(t *testing.T) {
 	// Session 5 predates the tool call — it is not this call's session.
 	updated, _ := m.Update(interactiveExecStartMsg{runID: 3})
 	next := updated.(model)
-	updated, cmd := next.Update(terminalAutoAttachTickMsg{})
+	updated, cmd := next.Update(terminalAutoAttachTickMsg{runID: 3})
 	next = updated.(model)
 	if next.terminalAttach != nil {
 		t.Fatal("watcher must not attach to a session that was already running")
@@ -316,7 +316,7 @@ func TestTerminalAutoAttachSkipsKnownSession(t *testing.T) {
 	tool.sessions = append(tool.sessions, tools.ExecSessionSnapshot{
 		ID: 6, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(200, 0),
 	})
-	updated, _ = next.Update(terminalAutoAttachTickMsg{})
+	updated, _ = next.Update(terminalAutoAttachTickMsg{runID: 3})
 	next = updated.(model)
 	if next.terminalAttach == nil || next.terminalAttach.sessionID != 6 {
 		t.Fatalf("watcher should attach to the new session 6: %#v", next.terminalAttach)
@@ -336,13 +336,83 @@ func TestTerminalAutoAttachDoesNotReattachSeen(t *testing.T) {
 
 	updated, _ := m.Update(interactiveExecStartMsg{runID: 3})
 	next := updated.(model)
-	updated, cmd := next.Update(terminalAutoAttachTickMsg{})
+	updated, cmd := next.Update(terminalAutoAttachTickMsg{runID: 3})
 	next = updated.(model)
 	if next.terminalAttach != nil {
 		t.Fatal("watcher must not re-open a session the user detached")
 	}
 	if cmd == nil {
 		t.Fatal("watcher should keep ticking")
+	}
+}
+
+func TestTerminalAutoAttachTickIgnoresStaleRun(t *testing.T) {
+	tool := &fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{
+			{ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(100, 0)},
+		},
+	}
+	m := modelWithFakeExecSessions(tool, time.Unix(200, 0))
+	m.activeRunID = 3
+	m.pending = true
+	m.terminalAutoAttach = &terminalAutoAttachState{
+		runID: 3, known: map[int]bool{}, deadline: m.now().Add(terminalAutoAttachTimeout),
+	}
+
+	updated, cmd := m.Update(terminalAutoAttachTickMsg{runID: 9})
+	next := updated.(model)
+	if next.terminalAttach != nil {
+		t.Fatal("a stale tick must not attach")
+	}
+	if next.terminalAutoAttach == nil || cmd != nil {
+		t.Fatal("a stale tick should be dropped without touching the watcher")
+	}
+
+	updated, _ = next.Update(terminalAutoAttachTickMsg{runID: 3})
+	next = updated.(model)
+	if next.terminalAttach == nil || next.terminalAttach.sessionID != 7 {
+		t.Fatalf("the live tick should still attach: %#v", next.terminalAttach)
+	}
+}
+
+func TestBTWRoutesAutoAttachTickToHiddenParent(t *testing.T) {
+	tool := &fakeExecSessionTool{}
+	m := newBTWTestModel(t)
+	registry := tools.NewRegistry()
+	registry.Register(tool)
+	m.registry = registry
+	m.pending = true
+	m.runID = 7
+	m.activeRunID = 7
+
+	side, _ := m.handleBTWCommand("")
+	routed, _, ok := side.routeBTWParentMessage(interactiveExecStartMsg{runID: 7})
+	if !ok {
+		t.Fatal("interactiveExecStartMsg was not routed to the parent")
+	}
+	side = routed
+	if side.btw.parent == nil || side.btw.parent.terminalAutoAttach == nil {
+		t.Fatal("watcher was not armed on the hidden parent")
+	}
+
+	// A tick tagged for the side run must not reach the parent watcher.
+	if routed, _, ok := side.routeBTWParentMessage(terminalAutoAttachTickMsg{runID: side.btw.sideRunIDBase}); ok || routed.btw.parent.terminalAttach != nil {
+		t.Fatal("a side-run tick must not reach the parent watcher")
+	}
+
+	tool.sessions = append(tool.sessions, tools.ExecSessionSnapshot{
+		ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(100, 0),
+	})
+	routed, _, ok = side.routeBTWParentMessage(terminalAutoAttachTickMsg{runID: 7})
+	if !ok {
+		t.Fatal("parent-run tick was not routed to the parent")
+	}
+	side = routed
+	if side.btw.parent == nil || side.btw.parent.terminalAttach == nil || side.btw.parent.terminalAttach.sessionID != 7 {
+		t.Fatalf("parent overlay did not open: %#v", side.btw.parent)
+	}
+	if side.terminalAttach != nil {
+		t.Fatal("attach state leaked onto the side model")
 	}
 }
 
@@ -377,7 +447,7 @@ func TestTerminalAutoAttachWaitsForPermissionPrompt(t *testing.T) {
 	m.terminalAutoAttach = &terminalAutoAttachState{
 		runID: 3, known: map[int]bool{}, deadline: m.now().Add(terminalAutoAttachTimeout),
 	}
-	updated, cmd := m.Update(terminalAutoAttachTickMsg{})
+	updated, cmd := m.Update(terminalAutoAttachTickMsg{runID: 3})
 	next := updated.(model)
 	if next.terminalAttach != nil {
 		t.Fatal("overlay must not open over a permission prompt")
@@ -387,7 +457,7 @@ func TestTerminalAutoAttachWaitsForPermissionPrompt(t *testing.T) {
 	}
 
 	next.pendingPermission = nil
-	updated, _ = next.Update(terminalAutoAttachTickMsg{})
+	updated, _ = next.Update(terminalAutoAttachTickMsg{runID: 3})
 	next = updated.(model)
 	if next.terminalAttach == nil || next.terminalAttach.sessionID != 7 {
 		t.Fatalf("overlay should open once the modal clears: %#v", next.terminalAttach)

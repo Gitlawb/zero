@@ -1595,9 +1595,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			known:    known,
 			deadline: m.now().Add(terminalAutoAttachTimeout),
 		}
-		return m, terminalAutoAttachTickCmd()
+		return m, terminalAutoAttachTickCmd(msg.runID)
 	case terminalAutoAttachTickMsg:
-		return m.pollTerminalAutoAttach()
+		return m.pollTerminalAutoAttach(msg)
 	case tea.KeyPressMsg:
 		if m.petDragActive {
 			pixelDrag := m.petPixelDrag

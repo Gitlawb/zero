@@ -56,11 +56,15 @@ type interactiveExecStartMsg struct {
 	runID int
 }
 
-type terminalAutoAttachTickMsg struct{}
+// The tick carries the run it belongs to so the /btw router can deliver it to
+// the hidden parent model instead of dropping it on the visible side model.
+type terminalAutoAttachTickMsg struct {
+	runID int
+}
 
-func terminalAutoAttachTickCmd() tea.Cmd {
+func terminalAutoAttachTickCmd(runID int) tea.Cmd {
 	return tea.Tick(terminalAttachTickInterval, func(time.Time) tea.Msg {
-		return terminalAutoAttachTickMsg{}
+		return terminalAutoAttachTickMsg{runID: runID}
 	})
 }
 
@@ -166,9 +170,9 @@ func (m model) refreshTerminalAttach() (model, tea.Cmd) {
 // pollTerminalAutoAttach runs the auto-attach watcher: while the run is live it
 // looks for a new tty session and opens the overlay on it, giving up at the
 // deadline (a permission prompt can hold the session start for a while).
-func (m model) pollTerminalAutoAttach() (model, tea.Cmd) {
+func (m model) pollTerminalAutoAttach(msg terminalAutoAttachTickMsg) (model, tea.Cmd) {
 	state := m.terminalAutoAttach
-	if state == nil {
+	if state == nil || msg.runID != state.runID {
 		return m, nil
 	}
 	if m.activeRunID != state.runID || !m.pending || m.now().After(state.deadline) {
@@ -177,7 +181,7 @@ func (m model) pollTerminalAutoAttach() (model, tea.Cmd) {
 	}
 	controller, ok := m.execSessionController()
 	if !ok {
-		return m, terminalAutoAttachTickCmd()
+		return m, terminalAutoAttachTickCmd(state.runID)
 	}
 	for _, session := range controller.ExecSessions() {
 		if !session.TTY || session.Status != "running" || state.known[session.ID] || m.terminalAttachSeen[session.ID] {
@@ -186,12 +190,12 @@ func (m model) pollTerminalAutoAttach() (model, tea.Cmd) {
 		if !m.noBlockingModalExceptAttach() || m.terminalAttach != nil {
 			// A modal (permission prompt, picker, …) or an existing attach owns
 			// the viewport; keep watching so the overlay opens once it clears.
-			return m, terminalAutoAttachTickCmd()
+			return m, terminalAutoAttachTickCmd(state.runID)
 		}
 		m.terminalAutoAttach = nil
 		return m.openTerminalAttach(session.ID)
 	}
-	return m, terminalAutoAttachTickCmd()
+	return m, terminalAutoAttachTickCmd(state.runID)
 }
 
 // noBlockingModalExceptAttach is noBlockingModal without the attach overlay's
