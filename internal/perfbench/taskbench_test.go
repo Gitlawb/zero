@@ -498,6 +498,21 @@ exit 0
 	}
 }
 
+func TestNewExecRunnerNonzeroWaitDelayCannotReconcileRunEnd(t *testing.T) {
+	stub := writeExecStub(t, `sleep 3 &
+echo '{"type":"run_end","exitCode":4}'
+exit 4
+`)
+	runner := NewExecRunner(stub)
+	outcome := runner(context.Background(), BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+	if outcome.Err == nil || !errors.Is(outcome.Err, exec.ErrWaitDelay) {
+		t.Fatalf("nonzero inherited output pipe must retain its cleanup failure, got %#v", outcome)
+	}
+	if outcome.Passed {
+		t.Fatal("run_end must not reconcile a nonzero command with an output cleanup failure")
+	}
+}
+
 func TestNewExecRunnerLaunchFailureIsHarnessError(t *testing.T) {
 	// A binary that cannot be launched (no terminal event, process error) is a
 	// genuine harness error.

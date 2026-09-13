@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -654,6 +655,20 @@ exit 0
 	}
 	if outcome.Passed {
 		t.Fatal("run_end must not bypass an output cleanup failure")
+	}
+}
+
+func TestNewTurnExecRunnerNonzeroWaitDelayCannotReconcileRunEnd(t *testing.T) {
+	task := BenchTask{ID: "wait-delay-nonzero", Prompt: "p", WorkspaceFixture: t.TempDir()}
+	outcome := runTurnStub(t, task, `sleep 3 &
+echo '{"type":"run_end","exitCode":4}'
+exit 4
+`)
+	if outcome.Err == nil || !errors.Is(outcome.Err, exec.ErrWaitDelay) {
+		t.Fatalf("nonzero inherited output pipe must retain its cleanup failure, got %#v", outcome)
+	}
+	if outcome.Passed || outcome.VerifyErr != "" {
+		t.Fatalf("output cleanup failure must precede turn accounting, got %#v", outcome)
 	}
 }
 

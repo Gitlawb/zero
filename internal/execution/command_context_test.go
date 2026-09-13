@@ -89,6 +89,9 @@ func TestRunCommandKillsDescendantWhenWaitDelayExpires(t *testing.T) {
 			_ = child.Wait()
 			os.Exit(3)
 		}
+		if os.Getenv("ZERO_WAIT_DELAY_TREE_EXIT_CODE") == "7" {
+			os.Exit(7)
+		}
 		return
 	case "child":
 		waitForCommandTreeStop(os.Getenv("ZERO_WAIT_DELAY_TREE_STOP_FILE"), 30*time.Second)
@@ -116,6 +119,35 @@ func TestRunCommandKillsDescendantWhenWaitDelayExpires(t *testing.T) {
 	err := waitForRunCommand(t, result, 4*time.Second)
 	if !errors.Is(err, exec.ErrWaitDelay) {
 		t.Fatalf("RunCommand error = %v, want exec.ErrWaitDelay", err)
+	}
+	child.awaitExit(t)
+}
+
+func TestRunCommandPreservesWaitDelayAfterNonzeroRootExit(t *testing.T) {
+	root := t.TempDir()
+	pidFile := root + string(os.PathSeparator) + "child.pid"
+	stopFile := root + string(os.PathSeparator) + "stop"
+	child := ownHelperProcess(t, pidFile, stopFile)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCommandKillsDescendantWhenWaitDelayExpires$")
+	cmd.Env = append(os.Environ(),
+		"ZERO_WAIT_DELAY_TREE_HELPER=root",
+		"ZERO_WAIT_DELAY_TREE_PID_FILE="+pidFile,
+		"ZERO_WAIT_DELAY_TREE_STOP_FILE="+stopFile,
+		"ZERO_WAIT_DELAY_TREE_EXIT_CODE=7",
+	)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	result := runCommandAsync(context.Background(), cmd)
+	child.waitReady(t, 2*time.Second)
+	err := waitForRunCommand(t, result, 4*time.Second)
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("RunCommand error = %v, want exec.ErrWaitDelay", err)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+		t.Fatalf("RunCommand error = %v, want exit code 7", err)
 	}
 	child.awaitExit(t)
 }

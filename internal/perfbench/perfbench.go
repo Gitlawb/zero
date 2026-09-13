@@ -404,7 +404,7 @@ func median(sortedSamples []float64) float64 {
 }
 
 type timedBuffer struct {
-	bytes.Buffer
+	buffer       bytes.Buffer
 	onFirstWrite func()
 }
 
@@ -412,7 +412,11 @@ func (buffer *timedBuffer) Write(data []byte) (int, error) {
 	if len(data) > 0 {
 		buffer.onFirstWrite()
 	}
-	return buffer.Buffer.Write(data)
+	return buffer.buffer.Write(data)
+}
+
+func (buffer *timedBuffer) String() string {
+	return buffer.buffer.String()
 }
 
 func commandError(command []string, err error, stdout string, stderr string) error {
