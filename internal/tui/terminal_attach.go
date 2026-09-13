@@ -187,7 +187,7 @@ func (m model) pollTerminalAutoAttach(msg terminalAutoAttachTickMsg) (model, tea
 		if !session.TTY || session.Status != "running" || state.known[session.ID] || m.terminalAttachSeen[session.ID] {
 			continue
 		}
-		if !m.noBlockingModalExceptAttach() || m.terminalAttach != nil {
+		if !m.terminalAttachCanOpen() || m.terminalAttach != nil {
 			// A modal (permission prompt, picker, …) or an existing attach owns
 			// the viewport; keep watching so the overlay opens once it clears.
 			return m, terminalAutoAttachTickCmd(state.runID)
@@ -196,6 +196,18 @@ func (m model) pollTerminalAutoAttach(msg terminalAutoAttachTickMsg) (model, tea
 		return m.openTerminalAttach(session.ID)
 	}
 	return m, terminalAutoAttachTickCmd(state.runID)
+}
+
+// terminalAttachCanOpen reports whether the attach overlay would actually be
+// rendered right now: beyond the modal prompts, the subchat drill-in, file
+// view, setup wizard, help/run-details overlays, the detailed transcript, and
+// active suggestions each replace or cover the viewport it draws into, so
+// opening then would capture keys into an invisible overlay.
+func (m model) terminalAttachCanOpen() bool {
+	return m.noBlockingModalExceptAttach() &&
+		!m.helpOverlay && !m.leaderHelpOverlay && !m.runDetailsOpen &&
+		!m.subchat.active && !m.fileView.active && !m.setup.visible &&
+		!m.transcriptDetailed && !m.suggestionsActive()
 }
 
 // noBlockingModalExceptAttach is noBlockingModal without the attach overlay's

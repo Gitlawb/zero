@@ -416,6 +416,70 @@ func TestBTWRoutesAutoAttachTickToHiddenParent(t *testing.T) {
 	}
 }
 
+func TestTerminalAutoAttachDefersToOtherViews(t *testing.T) {
+	newWatchingModel := func(t *testing.T) (model, *fakeExecSessionTool) {
+		t.Helper()
+		tool := &fakeExecSessionTool{
+			sessions: []tools.ExecSessionSnapshot{
+				{ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(100, 0)},
+			},
+		}
+		m := modelWithFakeExecSessions(tool, time.Unix(200, 0))
+		m.activeRunID = 3
+		m.pending = true
+		m.terminalAutoAttach = &terminalAutoAttachState{
+			runID: 3, known: map[int]bool{}, deadline: m.now().Add(terminalAutoAttachTimeout),
+		}
+		return m, tool
+	}
+
+	m, _ := newWatchingModel(t)
+	m.helpOverlay = true
+	updated, cmd := m.Update(terminalAutoAttachTickMsg{runID: 3})
+	next := updated.(model)
+	if next.terminalAttach != nil {
+		t.Fatal("overlay must not open over the help overlay")
+	}
+	if cmd == nil || next.terminalAutoAttach == nil {
+		t.Fatal("watcher should keep ticking while help owns the viewport")
+	}
+	next.helpOverlay = false
+	updated, _ = next.Update(terminalAutoAttachTickMsg{runID: 3})
+	next = updated.(model)
+	if next.terminalAttach == nil {
+		t.Fatal("overlay should open once help closes")
+	}
+
+	m, _ = newWatchingModel(t)
+	m.subchat.active = true
+	updated, cmd = m.Update(terminalAutoAttachTickMsg{runID: 3})
+	next = updated.(model)
+	if next.terminalAttach != nil {
+		t.Fatal("overlay must not open inside the subchat view")
+	}
+	if cmd == nil || next.terminalAutoAttach == nil {
+		t.Fatal("watcher should keep ticking while subchat owns the viewport")
+	}
+}
+
+func TestAttachCommandRefusesWhileSubchatActive(t *testing.T) {
+	m, _ := attachedModel(t)
+	m.subchat.active = true
+
+	next, _ := m.attachTerminalCommand("7")
+	if next.terminalAttach != nil {
+		t.Fatal("/attach must not open the overlay inside the subchat view")
+	}
+	if !strings.Contains(next.transientNotice.text, "Leave the current view first") {
+		t.Fatalf("expected the leave-view notice, got %q", next.transientNotice.text)
+	}
+	next.subchat.active = false
+	next, _ = next.attachTerminalCommand("7")
+	if next.terminalAttach == nil {
+		t.Fatal("/attach should open once the subchat view is left")
+	}
+}
+
 func TestTerminalAutoAttachIgnoresWrongRun(t *testing.T) {
 	m, _ := attachedModel(t)
 	m.activeRunID = 3

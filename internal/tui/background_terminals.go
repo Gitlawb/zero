@@ -141,6 +141,12 @@ func (m model) attachTerminalCommand(input string) (model, tea.Cmd) {
 		})})
 		return m, nil
 	}
+	// The overlay composites into the main transcript viewport; in a view that
+	// replaces it (subchat, detailed transcript, another overlay) it would
+	// capture keystrokes while invisible, so refuse to open there.
+	if !m.terminalAttachCanOpen() {
+		return m.showTransientNoticeInline("Leave the current view first", transientNoticeInfo), nil
+	}
 	input = strings.TrimSpace(input)
 	if input != "" {
 		id, err := strconv.Atoi(input)
