@@ -116,6 +116,23 @@ func windowsPathCarriesGrant(path, trustee string, required windows.ACCESS_MASK)
 			if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 				continue
 			}
+			// AND PROPAGATION THAT STOPS AT THE IMMEDIATE CHILDREN IS NOT PROPAGATION.
+			//
+			// NO_PROPAGATE_INHERIT_ACE lets an ACE be inherited once and then stops:
+			// the children get it, their children do not. The flag test below reads
+			// only the two inherit bits, so OI|CI|NP satisfied it and the whole mask
+			// was credited, while the runtime tree's real consumers sit a level
+			// deeper - cache/npm, cache/go-build, data/go-mod, and the package files
+			// under them, which sandboxRuntimeEnvironment points npm_config_cache,
+			// GOCACHE and GOMODCACHE at. Attestation said the grant was adequate and
+			// the writes were refused. Reported by @jatmn.
+			//
+			// Gated on needInherit so a file entry, where inherit flags mean nothing,
+			// is unaffected. The apply path never sets NP for an AllowWrite entry, so
+			// this cannot make a grant Zero itself wrote look insufficient.
+			if needInherit != 0 && ace.Header.AceFlags&windows.NO_PROPAGATE_INHERIT_ACE != 0 {
+				continue
+			}
 			// And only ACEs that propagate count towards a directory's grant, since a
 			// non-inheriting one leaves descendants ungranted.
 			if ace.Header.AceFlags&needInherit != needInherit {

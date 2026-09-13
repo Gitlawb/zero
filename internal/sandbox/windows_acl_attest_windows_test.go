@@ -134,6 +134,11 @@ func TestPlanAttestationRejectsAWeakenedCapabilityACE(t *testing.T) {
 		// child is refused FILE_ADD_FILE on the runtime root while every inherit
 		// flag the check looks for is present.
 		{"granted to descendants but not to the directory", full, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT | windows.INHERIT_ONLY_ACE, false},
+		// NO_PROPAGATE lets the ACE be inherited exactly once. The immediate
+		// children are granted and their children are not, so the runtime tree's
+		// real consumers - cache/npm, cache/go-build, data/go-mod - sit past the
+		// end of the grant while both inherit bits the check reads are present.
+		{"propagates only to the immediate children", full, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT | windows.NO_PROPAGATE_INHERIT_ACE, false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "runtime")
