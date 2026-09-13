@@ -909,3 +909,18 @@ func TestFormatExecCommandOutputTTYAttachHint(t *testing.T) {
 		t.Fatalf("non-tty session should not mention /attach: %q", pipes)
 	}
 }
+
+func TestFormatExecCommandOutputNoNewPrivilegesHint(t *testing.T) {
+	blocked := formatExecCommandOutput(`sudo: The "no new privileges" flag is set`, 1007, true, 1, false, true)
+	if !strings.Contains(blocked, `sandbox_permissions "require_escalated"`) {
+		t.Fatalf("no_new_privs failure should hint at require_escalated: %q", blocked)
+	}
+	normal := formatExecCommandOutput("some other error", 1007, true, 1, false, true)
+	if strings.Contains(normal, "require_escalated") {
+		t.Fatalf("unrelated failure should not hint at require_escalated: %q", normal)
+	}
+	blockedOK := formatExecCommandOutput(`sudo: The "no new privileges" flag is set`, 1007, true, 0, false, true)
+	if strings.Contains(blockedOK, "require_escalated") {
+		t.Fatalf("zero-exit output should not hint at require_escalated: %q", blockedOK)
+	}
+}

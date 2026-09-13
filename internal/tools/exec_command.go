@@ -98,7 +98,7 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 					},
 					"justification": {Type: "string", Description: "User-facing approval question for `require_escalated`; omit otherwise."},
 					"prefix_rule":   {Type: "array", Items: &PropertySchema{Type: "string"}, Description: "Reusable approval prefix for this command, only with `sandbox_permissions: \"require_escalated\"`; keep it narrow, for example [\"git\", \"pull\"]."},
-					"tty":           {Type: "boolean", Description: "True allocates a PTY for the command; false or omitted uses plain pipes. Use true for commands that may prompt for input (sudo, ssh, interactive installers): the user can then type into the session directly.", Default: false},
+					"tty":           {Type: "boolean", Description: "True allocates a PTY for the command; false or omitted uses plain pipes. Use true for commands that may prompt for input (sudo, ssh, interactive installers): the user can then type into the session directly. Setuid tools such as sudo also need sandbox_permissions \"require_escalated\", since the sandbox blocks privilege escalation.", Default: false},
 				},
 				Required:             []string{"cmd"},
 				AdditionalProperties: false,
@@ -608,6 +608,9 @@ func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode
 			parts = append(parts, "interrupted: true")
 		}
 		parts = append(parts, fmt.Sprintf("exit_code: %d", exitCode))
+		if exitCode != 0 && strings.Contains(output, "no new privileges") {
+			parts = append(parts, `Hint: this command needs sandbox_permissions "require_escalated" (the sandbox blocks setuid); retry with it and tty:true if it prompts.`)
+		}
 	} else {
 		if output == "" {
 			parts = append(parts, "Command is still running.")
