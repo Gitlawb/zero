@@ -299,7 +299,7 @@ func (m model) wantsMouseCapture() bool {
 	if m.mouseReleased {
 		return false // user released the mouse for native text selection/copy
 	}
-	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive())
+	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.terminalAttach != nil || m.suggestionsActive())
 }
 
 func (m model) setupWantsMouseCapture() bool {

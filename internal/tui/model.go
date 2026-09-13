@@ -253,6 +253,7 @@ type model struct {
 	composerSelection      composerSelectionState
 	dictation              dictationController
 	sttKeyPrompt           *sttKeyPromptState
+	terminalAttach         *terminalAttachState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan            planPanelState
@@ -1245,7 +1246,7 @@ func (m *model) stopPRWatcher() {
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
 		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
-		m.sttKeyPrompt == nil && m.renamePrompt == nil
+		m.sttKeyPrompt == nil && m.renamePrompt == nil && m.terminalAttach == nil
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
@@ -1447,6 +1448,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
+		// Attached to a live terminal: the overlay owns the viewport, so mouse
+		// events go nowhere rather than hitting transcript selection below.
+		if m.terminalAttach != nil {
+			return m, nil
+		}
 		if m.setup.visible {
 			return m.handleSetupMouse(msg)
 		}
@@ -1533,6 +1539,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.attachClipboardImage(msg.data, msg.mediaType), nil
 	case tea.PasteMsg:
+		// While attached to a live terminal, a paste forwards verbatim to the
+		// PTY stdin — never into the composer or transcript.
+		if m.terminalAttach != nil {
+			return m.handleTerminalAttachPaste(msg.Content)
+		}
 		// A paste into the cloud-STT key prompt fills the key (the common way to
 		// enter an API key), not the composer.
 		if m.sttKeyPrompt != nil {
@@ -1565,6 +1576,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleVoiceCaptureRelease()
 		}
 		return m, nil
+	case terminalAttachTickMsg:
+		return m.refreshTerminalAttach()
 	case tea.KeyPressMsg:
 		if m.petDragActive {
 			pixelDrag := m.petPixelDrag
@@ -1603,6 +1616,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// input) until Enter saves or Esc cancels.
 		if m.sttKeyPrompt != nil {
 			return m.handleSTTKeyPromptKey(msg)
+		}
+		// Attached to a live terminal session: keystrokes (including Ctrl+C,
+		// which maps to 0x03 for the process) go to the PTY until Esc detaches.
+		if m.terminalAttach != nil {
+			return m.handleTerminalAttachKey(msg)
 		}
 		if m.renamePrompt != nil {
 			return m.handleSessionRenameKey(msg)
@@ -3135,8 +3153,11 @@ func (m model) transcriptView() string {
 	mcpOverlay := m.mcpManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
 	sttKeyOverlay := m.sttKeyPromptOverlay(width)
+	terminalAttachOverlay := m.terminalAttachOverlay(width)
 	viewportOverlay := ""
 	switch {
+	case terminalAttachOverlay != "":
+		viewportOverlay = terminalAttachOverlay
 	case sttKeyOverlay != "":
 		viewportOverlay = sttKeyOverlay
 	case helpOverlayContent != "":
