@@ -254,6 +254,8 @@ type model struct {
 	dictation              dictationController
 	sttKeyPrompt           *sttKeyPromptState
 	terminalAttach         *terminalAttachState
+	terminalAutoAttach     *terminalAutoAttachState
+	terminalAttachSeen     map[int]bool
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan            planPanelState
@@ -1578,6 +1580,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case terminalAttachTickMsg:
 		return m.refreshTerminalAttach()
+	case interactiveExecStartMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		known := map[int]bool{}
+		if controller, ok := m.execSessionController(); ok {
+			for _, session := range controller.ExecSessions() {
+				known[session.ID] = true
+			}
+		}
+		m.terminalAutoAttach = &terminalAutoAttachState{
+			runID:    msg.runID,
+			known:    known,
+			deadline: m.now().Add(terminalAutoAttachTimeout),
+		}
+		return m, terminalAutoAttachTickCmd()
+	case terminalAutoAttachTickMsg:
+		return m.pollTerminalAutoAttach()
 	case tea.KeyPressMsg:
 		if m.petDragActive {
 			pixelDrag := m.petPixelDrag
@@ -2650,6 +2670,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runCancel = nil
 		m.activeRunID = 0
+		m.terminalAutoAttach = nil
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
 		// A fully successful turn means the task is done. Weaker models often
 		// forget the final update_plan, leaving the panel stuck mid-progress;
@@ -5263,6 +5284,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	}
 	m.runID++
 	m.activeRunID = m.runID
+	m.terminalAutoAttach = nil
 	m.runCancel = cancel
 	m.pending = true
 	// Clear per-run tracking state so stale specialists and plans from the
@@ -5420,6 +5442,7 @@ func (m *model) cancelRun() {
 	m.pending = false
 	m.runCancel = nil
 	m.activeRunID = 0
+	m.terminalAutoAttach = nil
 	m.cancelConfirmActive = false // whatever path got here, there's nothing left to confirm cancelling
 	m.plan.frozenAt = m.now()     // freeze the plan clock while idle (no run in flight)
 	m.pendingPermission = nil
@@ -5783,6 +5806,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// live status. The child session ID is not known yet (it's created
 			// inside the executor), so we use the tool call ID as a temporary
 			// key and reconcile on the result.
+			// A tty exec_command wants the attach overlay: the session registers
+			// with the process manager inside the tool's Run, so the update loop
+			// polls for it on a tick.
+			if call.Name == tools.ExecCommandToolName && execCallWantsTTY(call.Arguments) && m.runtimeMessageSink != nil {
+				m.runtimeMessageSink(interactiveExecStartMsg{runID: runID})
+			}
 			if call.Name == "Task" {
 				name, desc := parseTaskCallArgs(call.Arguments)
 				if m.runtimeMessageSink != nil {

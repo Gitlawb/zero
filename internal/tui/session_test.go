@@ -300,7 +300,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 		// not one of the 4 semantic steps this test drives — process them so the
 		// model state advances, but don't count them toward the budget.
 		switch runtimeMsg.(type) {
-		case toolCallStreamStartMsg, toolCallStreamDeltaMsg:
+		case toolCallStreamStartMsg, toolCallStreamDeltaMsg, interactiveExecStartMsg:
 			continue
 		}
 		received++
@@ -407,7 +407,7 @@ func TestPermissionWaitDoesNotCountTowardTurnElapsed(t *testing.T) {
 		updated, _ = next.Update(runtimeMsg)
 		next = updated.(model)
 		switch runtimeMsg.(type) {
-		case toolCallStreamStartMsg, toolCallStreamDeltaMsg:
+		case toolCallStreamStartMsg, toolCallStreamDeltaMsg, interactiveExecStartMsg:
 			continue
 		case permissionRequestMsg:
 			clockNanos.Store(base.Add(92 * time.Second).UnixNano())

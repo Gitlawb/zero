@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -35,11 +36,14 @@ func TestOpenTerminalAttachSetsState(t *testing.T) {
 		t.Fatal("openTerminalAttach should schedule a refresh tick")
 	}
 	state := next.terminalAttach
-	if state == nil || state.sessionID != 7 || state.exited || state.missing {
+	if state == nil || state.sessionID != 7 {
 		t.Fatalf("state = %#v", state)
 	}
 	if state.command != "sudo apt install x" || state.output != "[sudo] password for me: " {
 		t.Fatalf("state did not pick up the snapshot: %#v", state)
+	}
+	if !next.terminalAttachSeen[7] {
+		t.Fatal("openTerminalAttach should mark the session as seen")
 	}
 }
 
@@ -107,7 +111,7 @@ func TestTerminalAttachEscDetaches(t *testing.T) {
 	}
 }
 
-func TestTerminalAttachTickMarksExited(t *testing.T) {
+func TestTerminalAttachTickAutoClosesOnExit(t *testing.T) {
 	tool := &fakeExecSessionTool{
 		sessions: []tools.ExecSessionSnapshot{{
 			ID: 7, TTY: true, Status: "running", Command: "sudo apt install x",
@@ -120,24 +124,17 @@ func TestTerminalAttachTickMarksExited(t *testing.T) {
 	exitCode := 1
 	tool.sessions[0].Status = "exited"
 	tool.sessions[0].ExitCode = &exitCode
-	updated, cmd := next.Update(terminalAttachTickMsg{})
-	next = updated.(model)
-	if cmd != nil {
-		t.Fatal("tick should not reschedule after exit")
-	}
-	if !next.terminalAttach.exited || next.terminalAttach.exitCode != 1 {
-		t.Fatalf("state = %#v, want exited code 1", next.terminalAttach)
-	}
-
-	// Any key closes an exited session's overlay.
-	updated, _ = next.Update(testKeyText("x"))
+	updated, _ := next.Update(terminalAttachTickMsg{})
 	next = updated.(model)
 	if next.terminalAttach != nil {
-		t.Fatal("key after exit should close the overlay")
+		t.Fatal("overlay should close itself when the session exits")
+	}
+	if !strings.Contains(next.transientNotice.text, "Terminal session 7 finished (exit 1).") {
+		t.Fatalf("notice = %q", next.transientNotice.text)
 	}
 }
 
-func TestTerminalAttachTickMarksMissing(t *testing.T) {
+func TestTerminalAttachTickAutoClosesOnMissing(t *testing.T) {
 	tool := &fakeExecSessionTool{
 		sessions: []tools.ExecSessionSnapshot{{
 			ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(100, 0),
@@ -149,8 +146,11 @@ func TestTerminalAttachTickMarksMissing(t *testing.T) {
 	tool.sessions = nil
 	updated, _ := next.Update(terminalAttachTickMsg{})
 	next = updated.(model)
-	if next.terminalAttach == nil || !next.terminalAttach.missing || !next.terminalAttach.exited {
-		t.Fatalf("state = %#v, want missing+exited", next.terminalAttach)
+	if next.terminalAttach != nil {
+		t.Fatal("overlay should close itself when the session disappears")
+	}
+	if !strings.Contains(next.transientNotice.text, "Terminal session 7 ended.") {
+		t.Fatalf("notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -166,15 +166,155 @@ func TestTerminalAttachOverlay(t *testing.T) {
 	}
 }
 
-func TestTerminalAttachOverlayExited(t *testing.T) {
-	m, _ := attachedModel(t)
-	next, _ := m.openTerminalAttach(7)
-	next.terminalAttach.exited = true
-	next.terminalAttach.exitCode = 1
+func TestExecCallWantsTTY(t *testing.T) {
+	cases := []struct {
+		name string
+		args string
+		want bool
+	}{
+		{"tty true", `{"cmd":"x","tty":true}`, true},
+		{"tty false", `{"cmd":"x","tty":false}`, false},
+		{"tty absent", `{"cmd":"x"}`, false},
+		{"garbage", `not json`, false},
+		{"empty", ``, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := execCallWantsTTY(tc.args); got != tc.want {
+				t.Fatalf("execCallWantsTTY(%q) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
 
-	overlay := next.terminalAttachOverlay(80)
-	if !strings.Contains(overlay, "exited with code 1") {
-		t.Fatalf("exited overlay footer missing:\n%s", overlay)
+func TestInteractiveExecStartAutoAttaches(t *testing.T) {
+	tool := &fakeExecSessionTool{}
+	m := modelWithFakeExecSessions(tool, time.Unix(200, 0))
+	m.activeRunID = 3
+	m.pending = true
+
+	updated, cmd := m.Update(interactiveExecStartMsg{runID: 3})
+	next := updated.(model)
+	if next.terminalAutoAttach == nil || cmd == nil {
+		t.Fatal("interactiveExecStartMsg should arm the watcher and a tick")
+	}
+
+	tool.sessions = append(tool.sessions, tools.ExecSessionSnapshot{
+		ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(100, 0),
+	})
+	updated, _ = next.Update(terminalAutoAttachTickMsg{})
+	next = updated.(model)
+	if next.terminalAttach == nil || next.terminalAttach.sessionID != 7 {
+		t.Fatalf("auto-attach did not open on the new session: %#v", next.terminalAttach)
+	}
+	if !next.terminalAttachSeen[7] {
+		t.Fatal("session 7 should be marked seen")
+	}
+	if next.terminalAutoAttach != nil {
+		t.Fatal("watcher should stop once it attached")
+	}
+}
+
+func TestTerminalAutoAttachSkipsKnownSession(t *testing.T) {
+	tool := &fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{
+			{ID: 5, TTY: true, Status: "running", Command: "top", StartedAt: time.Unix(100, 0)},
+		},
+	}
+	m := modelWithFakeExecSessions(tool, time.Unix(200, 0))
+	m.activeRunID = 3
+	m.pending = true
+
+	// Session 5 predates the tool call — it is not this call's session.
+	updated, _ := m.Update(interactiveExecStartMsg{runID: 3})
+	next := updated.(model)
+	updated, cmd := next.Update(terminalAutoAttachTickMsg{})
+	next = updated.(model)
+	if next.terminalAttach != nil {
+		t.Fatal("watcher must not attach to a session that was already running")
+	}
+	if cmd == nil || next.terminalAutoAttach == nil {
+		t.Fatal("watcher should keep ticking while nothing new appears")
+	}
+
+	tool.sessions = append(tool.sessions, tools.ExecSessionSnapshot{
+		ID: 6, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(200, 0),
+	})
+	updated, _ = next.Update(terminalAutoAttachTickMsg{})
+	next = updated.(model)
+	if next.terminalAttach == nil || next.terminalAttach.sessionID != 6 {
+		t.Fatalf("watcher should attach to the new session 6: %#v", next.terminalAttach)
+	}
+}
+
+func TestTerminalAutoAttachDoesNotReattachSeen(t *testing.T) {
+	tool := &fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{
+			{ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(100, 0)},
+		},
+	}
+	m := modelWithFakeExecSessions(tool, time.Unix(200, 0))
+	m.activeRunID = 3
+	m.pending = true
+	m.terminalAttachSeen = map[int]bool{7: true} // user already attached and detached
+
+	updated, _ := m.Update(interactiveExecStartMsg{runID: 3})
+	next := updated.(model)
+	updated, cmd := next.Update(terminalAutoAttachTickMsg{})
+	next = updated.(model)
+	if next.terminalAttach != nil {
+		t.Fatal("watcher must not re-open a session the user detached")
+	}
+	if cmd == nil {
+		t.Fatal("watcher should keep ticking")
+	}
+}
+
+func TestTerminalAutoAttachIgnoresWrongRun(t *testing.T) {
+	m, _ := attachedModel(t)
+	m.activeRunID = 3
+	m.pending = true
+
+	updated, cmd := m.Update(interactiveExecStartMsg{runID: 9})
+	next := updated.(model)
+	if next.terminalAutoAttach != nil || cmd != nil {
+		t.Fatal("a msg for another run must not arm the watcher")
+	}
+}
+
+func TestTerminalAutoAttachWaitsForPermissionPrompt(t *testing.T) {
+	tool := &fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{
+			{ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: time.Unix(100, 0)},
+		},
+	}
+	m := modelWithFakeExecSessions(tool, time.Unix(200, 0))
+	m.activeRunID = 3
+	m.pending = true
+	m.pendingPermission = &pendingPermissionPrompt{
+		request: agent.PermissionRequest{ToolName: "exec_command"},
+		decide:  func(agent.PermissionDecision) {},
+	}
+
+	// The watcher is armed before the session registers? Session already here —
+	// simplest equivalent: arm it directly and confirm the modal blocks opening.
+	m.terminalAutoAttach = &terminalAutoAttachState{
+		runID: 3, known: map[int]bool{}, deadline: m.now().Add(terminalAutoAttachTimeout),
+	}
+	updated, cmd := m.Update(terminalAutoAttachTickMsg{})
+	next := updated.(model)
+	if next.terminalAttach != nil {
+		t.Fatal("overlay must not open over a permission prompt")
+	}
+	if cmd == nil {
+		t.Fatal("watcher should keep ticking while the modal is up")
+	}
+
+	next.pendingPermission = nil
+	updated, _ = next.Update(terminalAutoAttachTickMsg{})
+	next = updated.(model)
+	if next.terminalAttach == nil || next.terminalAttach.sessionID != 7 {
+		t.Fatalf("overlay should open once the modal clears: %#v", next.terminalAttach)
 	}
 }
 

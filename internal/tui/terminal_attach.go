@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -24,10 +25,6 @@ type terminalAttachState struct {
 	sessionID int
 	command   string
 	output    string
-	exited    bool
-	exitCode  int
-	missing   bool
-	note      string
 }
 
 const terminalAttachTickInterval = 100 * time.Millisecond
@@ -40,60 +37,142 @@ func terminalAttachTickCmd() tea.Cmd {
 	})
 }
 
+// terminalAutoAttachState watches a run for a brand-new tty exec session so the
+// attach overlay can open on it without the user typing /attach.
+type terminalAutoAttachState struct {
+	runID    int
+	known    map[int]bool
+	deadline time.Time
+}
+
+const terminalAutoAttachTimeout = 60 * time.Second
+
+// interactiveExecStartMsg signals that the active run just invoked exec_command
+// with tty:true; the session registers with the process manager moments later,
+// so the tick polls for it.
+type interactiveExecStartMsg struct {
+	runID int
+}
+
+type terminalAutoAttachTickMsg struct{}
+
+func terminalAutoAttachTickCmd() tea.Cmd {
+	return tea.Tick(terminalAttachTickInterval, func(time.Time) tea.Msg {
+		return terminalAutoAttachTickMsg{}
+	})
+}
+
+// execCallWantsTTY reports whether an exec_command tool call's arguments JSON
+// requests a PTY. Malformed JSON means false.
+func execCallWantsTTY(arguments string) bool {
+	var args struct {
+		TTY bool `json:"tty"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return false
+	}
+	return args.TTY
+}
+
 // openTerminalAttach attaches to an interactive exec session. Callers check
-// TTY eligibility first; a missing snapshot still opens the overlay in its
-// ended state so the user sees what happened.
+// TTY eligibility first; a session that is already gone or exited surfaces as a
+// transient notice instead of an empty overlay.
 func (m model) openTerminalAttach(id int) (model, tea.Cmd) {
 	state := &terminalAttachState{sessionID: id}
 	if controller, ok := m.execSessionController(); ok {
-		if snapshot, found := controller.ExecSession(id); found {
+		snapshot, found := controller.ExecSession(id)
+		switch {
+		case !found:
+			return m.showTransientNoticeInline(fmt.Sprintf("Terminal session %d ended.", id), transientNoticeInfo), nil
+		case snapshot.Status != "running":
+			exitCode := 0
+			if snapshot.ExitCode != nil {
+				exitCode = *snapshot.ExitCode
+			}
+			return m.showTransientNoticeInline(fmt.Sprintf("Terminal session %d finished (exit %d).", id, exitCode), transientNoticeInfo), nil
+		default:
 			state.command = snapshot.Command
 			state.output = snapshot.RecentOutput
-			if snapshot.Status != "running" {
-				state.exited = true
-				if snapshot.ExitCode != nil {
-					state.exitCode = *snapshot.ExitCode
-				}
-			}
-		} else {
-			state.missing = true
-			state.exited = true
 		}
 	}
 	m.terminalAttach = state
+	if m.terminalAttachSeen == nil {
+		m.terminalAttachSeen = map[int]bool{}
+	}
+	m.terminalAttachSeen[id] = true
 	m.clearSuggestions()
 	return m, terminalAttachTickCmd()
 }
 
-// refreshTerminalAttach polls the session snapshot for the overlay tail. The
-// tick stops itself once the session ends; detaching also stops it because the
-// handler drops ticks while terminalAttach is nil.
+// refreshTerminalAttach polls the session snapshot for the overlay tail. When
+// the session exits or disappears the overlay closes itself with a notice;
+// detaching also stops the tick because the handler drops it while
+// terminalAttach is nil.
 func (m model) refreshTerminalAttach() (model, tea.Cmd) {
 	state := m.terminalAttach
-	if state == nil || state.exited {
+	if state == nil {
 		return m, nil
 	}
 	controller, ok := m.execSessionController()
 	if !ok {
-		state.missing = true
-		state.exited = true
+		m.terminalAttach = nil
 		return m, nil
 	}
 	snapshot, found := controller.ExecSession(state.sessionID)
 	if !found {
-		state.missing = true
-		state.exited = true
-		return m, nil
+		m.terminalAttach = nil
+		return m.showTransientNoticeInline(fmt.Sprintf("Terminal session %d ended.", state.sessionID), transientNoticeInfo), nil
 	}
 	state.output = snapshot.RecentOutput
 	if snapshot.Status != "running" {
-		state.exited = true
+		m.terminalAttach = nil
+		exitCode := 0
 		if snapshot.ExitCode != nil {
-			state.exitCode = *snapshot.ExitCode
+			exitCode = *snapshot.ExitCode
 		}
-		return m, nil
+		return m.showTransientNoticeInline(fmt.Sprintf("Terminal session %d finished (exit %d).", state.sessionID, exitCode), transientNoticeInfo), nil
 	}
 	return m, terminalAttachTickCmd()
+}
+
+// pollTerminalAutoAttach runs the auto-attach watcher: while the run is live it
+// looks for a new tty session and opens the overlay on it, giving up at the
+// deadline (a permission prompt can hold the session start for a while).
+func (m model) pollTerminalAutoAttach() (model, tea.Cmd) {
+	state := m.terminalAutoAttach
+	if state == nil {
+		return m, nil
+	}
+	if m.activeRunID != state.runID || !m.pending || m.now().After(state.deadline) {
+		m.terminalAutoAttach = nil
+		return m, nil
+	}
+	controller, ok := m.execSessionController()
+	if !ok {
+		return m, terminalAutoAttachTickCmd()
+	}
+	for _, session := range controller.ExecSessions() {
+		if !session.TTY || session.Status != "running" || state.known[session.ID] || m.terminalAttachSeen[session.ID] {
+			continue
+		}
+		if !m.noBlockingModalExceptAttach() || m.terminalAttach != nil {
+			// A modal (permission prompt, picker, …) or an existing attach owns
+			// the viewport; keep watching so the overlay opens once it clears.
+			return m, terminalAutoAttachTickCmd()
+		}
+		m.terminalAutoAttach = nil
+		return m.openTerminalAttach(session.ID)
+	}
+	return m, terminalAutoAttachTickCmd()
+}
+
+// noBlockingModalExceptAttach is noBlockingModal without the attach overlay's
+// own term, for the auto-attach watcher deciding whether another modal owns
+// the viewport.
+func (m model) noBlockingModalExceptAttach() bool {
+	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
+		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
+		m.sttKeyPrompt == nil && m.renamePrompt == nil
 }
 
 // writeTerminalAttachInput forwards bytes to the session stdin. The bytes are
@@ -102,19 +181,17 @@ func (m model) refreshTerminalAttach() (model, tea.Cmd) {
 func (m model) writeTerminalAttachInput(state *terminalAttachState, data []byte) model {
 	controller, ok := m.execSessionController()
 	if !ok {
-		state.missing = true
-		state.exited = true
+		m.terminalAttach = nil
 		return m
 	}
 	err := controller.WriteExecSessionInput(state.sessionID, data)
 	switch {
 	case errors.Is(err, execution.ErrProcessNotFound):
-		state.missing = true
-		state.exited = true
-		state.note = "session ended"
+		m.terminalAttach = nil
+		return m.showTransientNoticeInline(fmt.Sprintf("Terminal session %d ended.", state.sessionID), transientNoticeInfo)
 	case errors.Is(err, execution.ErrProcessStdinDisabled):
-		state.exited = true
-		state.note = "session no longer accepts input"
+		m.terminalAttach = nil
+		return m.showTransientNoticeInline(fmt.Sprintf("Terminal session %d no longer accepts input.", state.sessionID), transientNoticeWarning)
 	case err != nil:
 		return m.showTransientNoticeInline("Could not send input to session "+strconv.Itoa(state.sessionID)+".", transientNoticeWarning)
 	}
@@ -126,10 +203,6 @@ func (m model) writeTerminalAttachInput(state *terminalAttachState, data []byte)
 // it as 0x03 instead of triggering the TUI's own exit confirmation).
 func (m model) handleTerminalAttachKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	state := m.terminalAttach
-	if state.exited {
-		m.terminalAttach = nil
-		return m, nil
-	}
 	if keyIs(msg, tea.KeyEsc) {
 		m.terminalAttach = nil
 		return m.showTransientNoticeInline(
@@ -146,10 +219,6 @@ func (m model) handleTerminalAttachKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleTerminalAttachPaste forwards a bracketed paste verbatim to the PTY.
 func (m model) handleTerminalAttachPaste(content string) (tea.Model, tea.Cmd) {
 	state := m.terminalAttach
-	if state.exited {
-		m.terminalAttach = nil
-		return m, nil
-	}
 	if content == "" {
 		return m, nil
 	}
@@ -276,20 +345,10 @@ func (m model) terminalAttachOverlay(width int) string {
 	}
 	// Reserve one cell so the cursor never pushes a full line past the box edge.
 	tail := renderTerminalTail(state.output, innerWidth-1, terminalAttachRows(m.height))
-	if !state.exited && len(tail) > 0 {
+	if len(tail) > 0 {
 		tail[len(tail)-1] = tail[len(tail)-1] + zeroTheme.accent.Render("▌")
 	}
-	var footer string
-	switch {
-	case state.note != "":
-		footer = state.note + " · press any key to close"
-	case state.missing:
-		footer = "session ended · press any key to close"
-	case state.exited:
-		footer = fmt.Sprintf("exited with code %d · press any key to close", state.exitCode)
-	default:
-		footer = fmt.Sprintf("type to send · ⏎ Enter · Esc detach · Ctrl+C goes to the process · /stop %d to kill", state.sessionID)
-	}
+	footer := fmt.Sprintf("type to send · ⏎ Enter · Esc detach · Ctrl+C goes to the process · /stop %d to kill", state.sessionID)
 	lines := []string{zeroTheme.faint.Render(command), ""}
 	lines = append(lines, tail...)
 	lines = append(lines, "", zeroTheme.faint.Render(footer))
