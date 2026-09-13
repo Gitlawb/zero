@@ -423,3 +423,50 @@ func newTestMCPTokenStore(t *testing.T) *mcp.TokenStore {
 	}
 	return store
 }
+
+// A STDIO BRIDGE'S ENDPOINT IS A CREDENTIAL WHEREVER IT ARRIVES.
+//
+// sensitiveMCPArgValues collects by flag name, so an endpoint handed over
+// positionally ("mcp-remote https://...") or packed into a value
+// ("--url=https://...") was never a redaction candidate. The display side
+// recognises all three shapes through looksLikeMCPDisplayURLValue, which is
+// how the two came to disagree: the Target row replaced the opaque query value
+// while the failure reason directly above it printed it intact, and both are
+// persisted to the transcript. Reported by @jatmn.
+//
+// Asserted on the rendered reason rather than on the collector, because a
+// collector-only check passes today for the raw.URL case while this one leaks.
+func TestFailedServerReasonRedactsAURLValuedStdioArgument(t *testing.T) {
+	const workspaceToken = "opaque-workspace-9f3c2b7ae1d8"
+	const pathToken = "wk-9f3c2b7ae1d8c4f6"
+	endpoint := "https://host.invalid/mcp/" + pathToken + "?workspace=" + workspaceToken + "&mode=sse"
+
+	for _, testCase := range []struct {
+		name string
+		args []string
+	}{
+		{name: "positional", args: []string{"mcp-remote", endpoint}},
+		{name: "packed into a value", args: []string{"mcp-remote", "--url=" + endpoint}},
+		{name: "packed with a space", args: []string{"mcp-remote", "--url " + endpoint}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"bridge": {Type: "stdio", Command: "npx", Args: testCase.args},
+			}}
+			reason := failedServerReason(t, cfg, "bridge",
+				errors.New("child cannot connect to "+endpoint), nil)
+
+			for _, secret := range []string{workspaceToken, pathToken} {
+				if strings.Contains(reason, secret) {
+					t.Errorf("failure reason leaked %q: %s", secret, reason)
+				}
+			}
+			// The reason must stay diagnosable: what is redacted is the opaque
+			// material, not the host or the ordinary parameter that tells an
+			// operator which endpoint failed.
+			if !strings.Contains(reason, "host.invalid") {
+				t.Errorf("failure reason lost the host, so it no longer says what failed: %s", reason)
+			}
+		})
+	}
+}

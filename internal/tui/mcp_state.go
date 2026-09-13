@@ -662,6 +662,34 @@ func redactMCPDisplayRawQuery(rawQuery string) string {
 	return strings.Join(parts, "&")
 }
 
+// mcpArgURLCandidates returns the URL-shaped values carried by a stdio
+// command line, in the same three shapes redactedCommandArgs recognises on the
+// display side: a positional URL, the tail of "key=<url>", and the tail of a
+// packed "--flag <url>". Sharing looksLikeMCPDisplayURLValue with the display
+// is the contract: a value the Target row will treat as a URL must also be a
+// collection candidate, or one surface redacts it and the other does not.
+func mcpArgURLCandidates(args []string) []string {
+	candidates := []string{}
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") && looksLikeMCPDisplayURLValue(arg) {
+			candidates = append(candidates, arg)
+			continue
+		}
+		if _, rest, ok := strings.Cut(arg, "="); ok && looksLikeMCPDisplayURLValue(rest) {
+			candidates = append(candidates, strings.TrimSpace(rest))
+			continue
+		}
+		if _, rest, ok := strings.Cut(arg, " "); ok && looksLikeMCPDisplayURLValue(rest) {
+			candidates = append(candidates, strings.TrimSpace(rest))
+		}
+	}
+	return candidates
+}
+
 func looksLikeMCPDisplayURLValue(value string) bool {
 	value = strings.TrimSpace(value)
 	lower := strings.ToLower(value)
@@ -885,6 +913,28 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	// the captured stderr to the initialization error this panel renders.
 	for _, value := range sensitiveMCPArgValues(raw.Args) {
 		addKnown(value)
+	}
+	// A STDIO BRIDGE IS OFTEN HANDED ITS ENDPOINT AS AN ARGUMENT.
+	//
+	// sensitiveMCPArgValues collects by flag name, so it finds "--api-key X" and
+	// misses an endpoint that arrives positionally ("mcp-remote https://...") or
+	// packed into a value ("--url=https://..."). Those URLs carry credentials the
+	// same way raw.URL does: a query key the operator named, or userinfo. When
+	// the child fails and prints its own invocation, connectStdio appends that
+	// stderr to the registration error, and this panel renders it.
+	//
+	// The display side already recognises all three shapes through
+	// looksLikeMCPDisplayURLValue, which is exactly why the two disagreed: the
+	// Target row replaced the value while the failure reason above it did not.
+	// Sharing that predicate is the fix rather than a second policy.
+	for _, candidate := range mcpArgURLCandidates(raw.Args) {
+		candidateKnown, candidateAmbiguous := mcpURLSecretValues(candidate)
+		for _, value := range candidateKnown {
+			addKnown(value)
+		}
+		for _, value := range candidateAmbiguous {
+			add(value)
+		}
 	}
 	// THE ENDPOINT ITSELF CARRIES CREDENTIALS. HTTP and SSE send the configured
 	// URL verbatim, and it accepts both userinfo and arbitrary query keys, so
