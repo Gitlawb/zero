@@ -185,6 +185,12 @@ func TestNestedWorkspaceOwningGitKeepsItsOwnCarveouts(t *testing.T) {
 	}
 }
 
+// Compared through the profile's own canonicalization. PermissionProfileFromPolicy
+// stores normalizeProfilePath(root), which resolves symlinks, so a raw t.TempDir()
+// path does not match it on a runner where the temp directory is reached through
+// one: macOS /var -> /private/var, and the Windows short-name expansion of the
+// runner's profile directory. Comparing cleaned strings passed locally and failed
+// on both CI runners for that reason alone.
 func sameGitTestPath(a, b string) bool {
-	return filepath.Clean(a) == filepath.Clean(b)
+	return normalizeProfilePath(a) == normalizeProfilePath(b)
 }
