@@ -246,6 +246,27 @@ func (manager *ProcessManager) WriteInput(id int, data []byte) error {
 	return nil
 }
 
+// ResizeInput updates the PTY window size of a retained interactive process
+// so an attached terminal can fill its viewport. Non-positive dimensions are
+// a no-op; platforms without PTY support report the transport's error.
+func (manager *ProcessManager) ResizeInput(id int, cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
+		return nil
+	}
+	process, ok := manager.get(id)
+	if !ok {
+		return ErrProcessNotFound
+	}
+	process.touch()
+	if !process.tty || process.stdin == nil {
+		return ErrProcessStdinDisabled
+	}
+	if err := resizePTY(process.stdin, cols, rows); err != nil && !process.doneClosed() {
+		return err
+	}
+	return nil
+}
+
 func clampInitialProcessWait(wait time.Duration) time.Duration {
 	return min(wait, maxInteractiveYield)
 }

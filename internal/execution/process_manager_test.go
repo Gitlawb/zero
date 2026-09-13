@@ -166,6 +166,46 @@ func TestProcessManagerWriteInputDoesNotDrainPendingOutput(t *testing.T) {
 	}
 }
 
+func TestProcessManagerResizeInputUnknownProcess(t *testing.T) {
+	manager := NewProcessManager(ProcessManagerOptions{})
+	if err := manager.ResizeInput(4242, 100, 40); !errors.Is(err, ErrProcessNotFound) {
+		t.Fatalf("ResizeInput unknown id = %v, want ErrProcessNotFound", err)
+	}
+}
+
+func TestProcessManagerResizeInputUpdatesWindowSize(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("PTY sessions are only available on Linux")
+	}
+	root := t.TempDir()
+	manager := NewProcessManager(ProcessManagerOptions{})
+	command := exec.CommandContext(context.Background(), "/bin/sh", "-c", "sleep 0.3; stty size")
+	started, err := manager.Start(context.Background(), ProcessStart{
+		Prepared: PreparedCommand{Command: command}, Request: processManagerRequest(root, command),
+		CommandText: "stty size", TTY: true,
+	}, time.Millisecond)
+	if err != nil {
+		t.Skipf("PTY transport unavailable: %v", err)
+	}
+	if !started.TTY {
+		t.Skip("PTY transport fell back to pipes")
+	}
+	defer manager.Stop(started.ProcessID)
+
+	if err := manager.ResizeInput(started.ProcessID, 100, 40); err != nil {
+		t.Fatalf("ResizeInput: %v", err)
+	}
+	continued, err := manager.Continue(context.Background(), ProcessContinue{
+		ProcessID: started.ProcessID, Wait: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	if combined := started.Output + continued.Output; !strings.Contains(combined, "40 100") {
+		t.Fatalf("stty size output = %q, want %q", combined, "40 100")
+	}
+}
+
 func TestManagedProcessTerminateSkipsReapedProcess(t *testing.T) {
 	reaped := make(chan struct{})
 	close(reaped)

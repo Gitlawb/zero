@@ -15,6 +15,10 @@ type fakeExecSessionTool struct {
 	stopped  []int
 	stopAll  bool
 	writes   [][]byte
+
+	resizeCalls int
+	resizeCols  int
+	resizeRows  int
 }
 
 func (tool *fakeExecSessionTool) Name() string { return tools.ExecCommandToolName }
@@ -74,6 +78,21 @@ func (tool *fakeExecSessionTool) WriteExecSessionInput(id int, data []byte) erro
 			return execution.ErrProcessStdinDisabled
 		}
 		tool.writes = append(tool.writes, append([]byte(nil), data...))
+		return nil
+	}
+	return execution.ErrProcessNotFound
+}
+
+func (tool *fakeExecSessionTool) ResizeExecSession(id int, cols, rows int) error {
+	for _, session := range tool.sessions {
+		if session.ID != id {
+			continue
+		}
+		if !session.TTY {
+			return execution.ErrProcessStdinDisabled
+		}
+		tool.resizeCalls++
+		tool.resizeCols, tool.resizeRows = cols, rows
 		return nil
 	}
 	return execution.ErrProcessNotFound

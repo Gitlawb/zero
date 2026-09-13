@@ -51,6 +51,7 @@ type ExecSessionController interface {
 	StopExecSession(id int) bool
 	StopAllExecSessions() []int
 	WriteExecSessionInput(id int, data []byte) error
+	ResizeExecSession(id int, cols, rows int) error
 }
 
 type execCommandTool struct {
@@ -147,6 +148,10 @@ func (tool execCommandTool) StopAllExecSessions() []int {
 
 func (tool execCommandTool) WriteExecSessionInput(id int, data []byte) error {
 	return tool.manager.WriteInput(id, data)
+}
+
+func (tool execCommandTool) ResizeExecSession(id int, cols, rows int) error {
+	return tool.manager.ResizeInput(id, cols, rows)
 }
 
 func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine, directBudget bool) Result {

@@ -2495,6 +2495,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Size the composer so long input scrolls horizontally with the cursor
 		// visible instead of being clipped invisibly past the right edge.
 		m.input.SetWidth(maxInt(20, chatWidth(msg.Width)-14))
+		// An attached terminal fills the viewport, so the PTY tracks the
+		// live size instead of a fixed default.
+		m = m.resizeAttachedTerminalPTY()
 		// The title bar prints once into native scrollback when the inline
 		// renderer is active. In alt-screen mode it stays pinned inside View.
 		if !m.altScreen && !m.headerPrinted && msg.Width > 0 {
@@ -3246,6 +3249,13 @@ func (m model) pinnedTitleBar(width int) string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
+	// An attached terminal owns the keyboard and the viewport; the composer is
+	// inert, so like the ask_user and permission modals only the status line
+	// renders. Frame math routes through footerView, so this also shrinks the
+	// footer rect the overlay's row budget is derived from.
+	if m.terminalAttach != nil {
+		return m.footerStatusLine(width)
+	}
 	if m.renamePrompt != nil {
 		footer.WriteString(m.sessionRenamePromptView(width))
 		footer.WriteString("\n")

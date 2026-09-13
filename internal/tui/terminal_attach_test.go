@@ -6,6 +6,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -159,10 +161,84 @@ func TestTerminalAttachOverlay(t *testing.T) {
 	next, _ := m.openTerminalAttach(7)
 
 	overlay := next.terminalAttachOverlay(80)
-	for _, want := range []string{"session 7", "[sudo] password for me:", "Esc detach", "/stop 7"} {
+	for _, want := range []string{"Terminal", "sudo apt install x", "[running]", "[sudo] password for me:", "Esc detach", "/stop 7"} {
 		if !strings.Contains(overlay, want) {
 			t.Fatalf("overlay missing %q:\n%s", want, overlay)
 		}
+	}
+}
+
+func TestTerminalAttachOverlayFillsViewport(t *testing.T) {
+	m, _ := attachedModel(t)
+	m.width, m.height = 120, 40
+	next, _ := m.openTerminalAttach(7)
+
+	overlay := next.terminalAttachOverlay(120)
+	lines := strings.Split(overlay, "\n")
+	frame := next.scrollableTranscriptFrame(next.pinnedTitleBar(120), next.footerView(120))
+	if len(lines) != frame.bodyRect.height {
+		t.Fatalf("overlay lines = %d, want viewport body height %d", len(lines), frame.bodyRect.height)
+	}
+	for index, line := range lines {
+		if width := lipgloss.Width(line); width != 120 {
+			t.Fatalf("overlay line %d width = %d, want 120: %q", index, width, line)
+		}
+	}
+	plain := ansi.Strip(overlay)
+	if !strings.Contains(plain, "Terminal") || !strings.Contains(plain, "[running]") {
+		t.Fatalf("overlay missing border title: %q", lines[0])
+	}
+	if !strings.HasPrefix(plain, "╭") || !strings.Contains(lines[len(lines)-1], "╰") {
+		t.Fatal("overlay should be a bordered box")
+	}
+}
+
+func TestFooterViewWhileAttachedDropsComposer(t *testing.T) {
+	m, _ := attachedModel(t)
+	next, _ := m.openTerminalAttach(7)
+
+	footer := ansi.Strip(next.footerView(100))
+	if strings.Contains(footer, "describe a task") {
+		t.Fatalf("attached footer still shows the composer: %q", footer)
+	}
+	if strings.TrimSpace(footer) == "" {
+		t.Fatal("attached footer should still render the status line")
+	}
+	m.input.SetValue("typed")
+	if plain := ansi.Strip(m.footerView(100)); !strings.Contains(plain, "typed") {
+		t.Fatalf("detached footer lost the composer: %q", plain)
+	}
+}
+
+func TestTerminalAttachResizesPTYOnOpenAndResize(t *testing.T) {
+	m, tool := attachedModel(t)
+
+	// A resize while nothing is attached must not reach the controller.
+	if updated, _ := m.Update(tea.WindowSizeMsg{Width: 110, Height: 35}); updated != nil {
+		m = updated.(model)
+	}
+	if tool.resizeCalls != 0 {
+		t.Fatalf("WindowSizeMsg while detached resized: %d calls", tool.resizeCalls)
+	}
+
+	next, _ := m.openTerminalAttach(7)
+	wantCols := chatWidth(m.width) - 5
+	wantRows := next.terminalAttachViewportRows(chatWidth(m.width))
+	if tool.resizeCalls != 1 || tool.resizeCols != wantCols || tool.resizeRows != wantRows {
+		t.Fatalf("open resize = %d calls %dx%d, want 1 call %dx%d", tool.resizeCalls, tool.resizeCols, tool.resizeRows, wantCols, wantRows)
+	}
+
+	updated, _ := next.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	next = updated.(model)
+	wantCols, wantRows = 115, next.terminalAttachViewportRows(120)
+	if tool.resizeCalls != 2 || tool.resizeCols != wantCols || tool.resizeRows != wantRows {
+		t.Fatalf("resize = %d calls %dx%d, want 2 calls %dx%d", tool.resizeCalls, tool.resizeCols, tool.resizeRows, wantCols, wantRows)
+	}
+
+	// A no-change resize is not forwarded again.
+	_, _ = next.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	if tool.resizeCalls != 2 {
+		t.Fatalf("unchanged size resized again: %d calls", tool.resizeCalls)
 	}
 }
 
@@ -404,7 +480,7 @@ func TestRenderTerminalTail(t *testing.T) {
 			name:  "tail and padding",
 			raw:   "one\ntwo\nthree",
 			width: 10, rows: 4,
-			want: []string{"", "one", "two", "three"},
+			want: []string{"one", "two", "three", ""},
 		},
 		{
 			name:  "keeps last rows",

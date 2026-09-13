@@ -25,6 +25,8 @@ type terminalAttachState struct {
 	sessionID int
 	command   string
 	output    string
+	ptyCols   int
+	ptyRows   int
 }
 
 const terminalAttachTickInterval = 100 * time.Millisecond
@@ -101,7 +103,33 @@ func (m model) openTerminalAttach(id int) (model, tea.Cmd) {
 	}
 	m.terminalAttachSeen[id] = true
 	m.clearSuggestions()
+	m = m.resizeAttachedTerminalPTY()
 	return m, terminalAttachTickCmd()
+}
+
+// resizeAttachedTerminalPTY reports the overlay's output area to the PTY so
+// the session lays out at the size it is actually displayed at. Errors are
+// ignored: platforms without PTY support have nothing to resize.
+func (m model) resizeAttachedTerminalPTY() model {
+	state := m.terminalAttach
+	if state == nil {
+		return m
+	}
+	width := chatWidth(m.width)
+	// The box border and inset take 4 cells; one more is the cursor
+	// reservation, matching the width renderTerminalTail draws at.
+	cols := maxInt(1, width-5)
+	rows := m.terminalAttachViewportRows(width)
+	if cols == state.ptyCols && rows == state.ptyRows {
+		return m
+	}
+	controller, ok := m.execSessionController()
+	if !ok {
+		return m
+	}
+	state.ptyCols, state.ptyRows = cols, rows
+	_ = controller.ResizeExecSession(state.sessionID, cols, rows)
+	return m
 }
 
 // refreshTerminalAttach polls the session snapshot for the overlay tail. When
@@ -276,7 +304,7 @@ func ptyInputBytes(msg tea.KeyMsg) ([]byte, bool) {
 // renderTerminalTail turns raw PTY output into display lines: carriage returns
 // overwrite their line from column 0 (progress-bar style), ANSI sequences are
 // stripped, remaining control runes are dropped (tab expands to spaces), and
-// the result is the last rows lines padded to exactly rows.
+// the result is the last rows lines top-aligned and padded to exactly rows.
 func renderTerminalTail(raw string, width, rows int) []string {
 	if rows < 0 {
 		rows = 0
@@ -291,7 +319,7 @@ func renderTerminalTail(raw string, width, rows int) []string {
 		lines = lines[len(lines)-rows:]
 	}
 	for len(lines) < rows {
-		lines = append([]string{""}, lines...)
+		lines = append(lines, "")
 	}
 	return lines
 }
@@ -322,11 +350,17 @@ func sanitizeTerminalLine(line string, width int) string {
 	return fitStyledLine(builder.String(), width)
 }
 
-func terminalAttachRows(height int) int {
-	if height <= 0 {
+// terminalAttachViewportRows is the number of output rows the attached
+// terminal gets: the transcript viewport's body height minus the box's two
+// border lines and its footer hint line, so the bordered overlay fills the
+// viewport exactly. The same frame math the compositor uses keeps the two in
+// sync — and footerView already collapses to the status line while attached.
+func (m model) terminalAttachViewportRows(width int) int {
+	if m.height <= 0 {
 		return 10
 	}
-	return minInt(16, maxInt(6, height-10))
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	return maxInt(6, frame.bodyRect.height-3)
 }
 
 func (m model) terminalAttachOverlay(width int) string {
@@ -334,24 +368,35 @@ func (m model) terminalAttachOverlay(width int) string {
 	if state == nil {
 		return ""
 	}
-	overlayWidth := minInt(width, pickerOverlayMaxWidth)
-	if overlayWidth < pickerOverlayMinWidth {
-		overlayWidth = width
-	}
-	innerWidth := overlayWidth - 4
 	command := compactCommandOutputText(state.command)
 	if command == "" {
 		command = "command"
 	}
-	// Reserve one cell so the cursor never pushes a full line past the box edge.
-	tail := renderTerminalTail(state.output, innerWidth-1, terminalAttachRows(m.height))
-	if len(tail) > 0 {
-		tail[len(tail)-1] = tail[len(tail)-1] + zeroTheme.accent.Render("▌")
+	// styledBlockFillTitle drops the title when it can't fit the top rule, so
+	// truncate the command to whatever the border can carry.
+	titlePrefix := zeroTheme.accent.Render("●") + " Terminal  "
+	titleSuffix := "  [running]"
+	titleBudget := width - 5 - lipgloss.Width(titleSuffix)
+	title := titlePrefix + truncateRunes(command, maxInt(0, titleBudget-lipgloss.Width(titlePrefix))) + titleSuffix
+	innerWidth := maxInt(1, width-4)
+	// Reserve one cell so the cursor never pushes a full line past the edge.
+	tail := renderTerminalTail(state.output, innerWidth-1, m.terminalAttachViewportRows(width))
+	cursor := -1
+	for index := len(tail) - 1; index >= 0; index-- {
+		if strings.TrimSpace(ansi.Strip(tail[index])) != "" {
+			cursor = index
+			break
+		}
 	}
-	footer := fmt.Sprintf("type to send · ⏎ Enter · Esc detach · Ctrl+C goes to the process · /stop %d to kill", state.sessionID)
-	lines := []string{zeroTheme.faint.Render(command), ""}
+	if cursor < 0 && len(tail) > 0 {
+		cursor = 0
+	}
+	if cursor >= 0 {
+		tail[cursor] += zeroTheme.accent.Render("▌")
+	}
+	footer := fmt.Sprintf("Esc detach · Ctrl+C goes to the process · /stop %d to kill", state.sessionID)
+	lines := make([]string, 0, len(tail)+1)
 	lines = append(lines, tail...)
-	lines = append(lines, "", zeroTheme.faint.Render(footer))
-	title := fmt.Sprintf("Terminal · session %d", state.sessionID)
-	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+	lines = append(lines, zeroTheme.faint.Render(footer))
+	return styledBlockFillTitle(width, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 }
