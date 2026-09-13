@@ -130,7 +130,7 @@ func (m model) reloadProviderManagerRows() (model, tea.Cmd) {
 	// activeProvider follows it on every switch). Resolve it to the row it
 	// refers to once, here, so the render's exact comparison and the sync paths
 	// below share one value instead of each re-deciding what "active" means.
-	m.providerWizard.manageActiveName = sessionRowName(m.providerName, m.savedProviders)
+	m.providerWizard.manageActiveName = m.activeProviderRowName()
 	m.providerWizard.manageCredGen++
 	return m, providerManagerCredsCmd(m.providerWizard.manageCredGen, rows, m.userConfigPath)
 }
@@ -422,13 +422,14 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	// Decide whether the deleted row is the one this session runs on BEFORE the
 	// list shrinks: sessionRowName counts identity-carrying rows, and removing
 	// one of them changes that count.
-	deletedLiveRow := sessionRefersToPersistedRow(m.providerName, name, m.savedProviders)
+	deletedLiveRow := samePersistedProviderName(m.activeProviderRowName(), name)
 
 	// Surgical removal — see saveManagerEdit for why the raw cfg.Providers list
 	// must not replace the resolved/filtered savedProviders wholesale.
 	m.savedProviders = removeSavedProvider(m.savedProviders, name)
 
 	if deletedLiveRow {
+		m.removedLiveRow = strings.TrimSpace(name)
 		notes = append(notes, "This session keeps running on it until you switch.")
 	} else if activeAfter != "" && !samePersistedProviderName(activeAfter, name) {
 		notes = append(notes, "Active provider: "+activeAfter+".")
@@ -760,7 +761,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 	// Decide whether the edited row is the live one BEFORE the list is rewritten:
 	// a rename changes which rows carry the session's credential identity, and
 	// sessionRowName's sole-row resolution depends on that count.
-	editedLiveRow := sessionRefersToPersistedRow(m.providerName, oldName, m.savedProviders)
+	editedLiveRow := samePersistedProviderName(m.activeProviderRowName(), oldName)
 
 	// Mirror the edit into the in-memory list surgically. savedProviders was
 	// seeded from the RESOLVED (project-config layered) and usability-FILTERED
@@ -771,6 +772,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 	// Keep the live session's identity in sync with a rename of the provider it
 	// is running on: the exported ZERO_PROVIDER must resolve for spawned children.
 	if editedLiveRow {
+		m.removedLiveRow = ""
 		m.providerName = newName
 		m.providerProfile.Name = newName
 		config.SetActiveProviderEnv(newName)
@@ -778,7 +780,9 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 
 	wizard.step = providerWizardStepManage
 	next, cmd := m.reloadProviderManagerRows()
-	next.providerWizard.manageStatus = "Updated " + newName + "." + providerEditRestartNote(next.providerName, newName, next.savedProviders)
+	// activeProviderRowName already resolved ownership, including a removed
+	// live row. Do not resolve it again against the shortened saved list.
+	next.providerWizard.manageStatus = "Updated " + newName + "." + providerEditRestartNote(next.activeProviderRowName(), newName, nil)
 	return next, cmd
 }
 

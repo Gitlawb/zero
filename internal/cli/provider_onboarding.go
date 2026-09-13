@@ -621,11 +621,10 @@ func resolveProviderMutationName(path, name string, deps appDeps) (string, error
 	}
 	// Use the same user file the mutation will write, including injected paths.
 	options.UserConfigPath = path
-	resolved, err := config.Resolve(options)
+	names, err := config.ResolveProviderSourceNames(options)
 	if err != nil {
 		return "", err
 	}
-	names := config.ProviderProfileNames(resolved.Providers)
 	row, lookup := config.LookupProviderName(names, name)
 	if lookup == config.ProviderNameExact {
 		owner, err := config.ProviderRowOwnershipAt(path, names, row)

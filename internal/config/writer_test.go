@@ -1668,3 +1668,21 @@ func TestRemoveProviderNormalizesStaleActiveProviderSpelling(t *testing.T) {
 		t.Fatalf("exact mutator still cannot find the active row: %v", err)
 	}
 }
+
+func TestRepairExplicitSplitPreservesExactNamedSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{ActiveProvider: "other", Providers: []ProviderProfile{
+		{ProviderKind: ProviderKindOpenAI, Model: "gpt-4o"},
+		{Name: "other", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1", APIKey: "other-key"},
+	}}, 0600)
+	if _, _, err := RepairUnnamedProvider(path, "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := resolved.Provider; p.Name != "other" || p.Model != "gpt-4.1" || p.APIKey != "other-key" {
+		t.Fatal("explicit split changed the exact named selection")
+	}
+}
