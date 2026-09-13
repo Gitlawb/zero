@@ -152,6 +152,103 @@ func TestStopBackgroundTerminalsTextRejectsInvalidSessionID(t *testing.T) {
 	}
 }
 
+func TestBackgroundTerminalsTextAdvertisesAttachForTTY(t *testing.T) {
+	now := time.Unix(200, 0)
+	m := modelWithFakeExecSessions(&fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{{
+			ID: 1000, Command: "sudo apt install x", StartedAt: now, Status: "running", TTY: true,
+		}},
+	}, now)
+
+	text := m.backgroundTerminalsText()
+	if !strings.Contains(text, "/attach <session_id>") {
+		t.Fatalf("/ps card should offer /attach for a tty session:\n%s", text)
+	}
+	if summary := m.backgroundTerminalSummary(); !strings.HasSuffix(summary, " · /attach to type into it") {
+		t.Fatalf("summary = %q, want /attach hint", summary)
+	}
+}
+
+func TestAttachCommandNeedsController(t *testing.T) {
+	m := model{now: func() time.Time { return time.Unix(100, 0) }}
+	next, _ := m.attachTerminalCommand("7")
+	if !transcriptContains(next.transcript, "exec_command is not registered.") {
+		t.Fatalf("transcript = %#v", next.transcript)
+	}
+}
+
+func TestAttachCommandExplicitID(t *testing.T) {
+	now := time.Unix(200, 0)
+	tool := &fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{
+			{ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: now},
+			{ID: 8, TTY: false, Status: "running", Command: "sleep 30", StartedAt: now},
+		},
+	}
+	m := modelWithFakeExecSessions(tool, now)
+
+	next, cmd := m.attachTerminalCommand("7")
+	if cmd == nil || next.terminalAttach == nil || next.terminalAttach.sessionID != 7 {
+		t.Fatalf("expected attach to session 7, state=%#v cmd=%v", next.terminalAttach, cmd)
+	}
+
+	next, _ = m.attachTerminalCommand("8")
+	if !transcriptContains(next.transcript, "Session 8 has no terminal") {
+		t.Fatalf("non-tty session should be refused: %#v", next.transcript)
+	}
+	next, _ = m.attachTerminalCommand("9")
+	if !transcriptContains(next.transcript, "No running terminal session 9.") {
+		t.Fatalf("missing session should be reported: %#v", next.transcript)
+	}
+	next, _ = m.attachTerminalCommand("abc")
+	if !transcriptContains(next.transcript, "Usage: /attach [session_id]") {
+		t.Fatalf("invalid id should show usage: %#v", next.transcript)
+	}
+}
+
+func TestAttachCommandBarePicksSingleTTY(t *testing.T) {
+	now := time.Unix(200, 0)
+	tool := &fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{
+			{ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: now},
+			{ID: 8, TTY: false, Status: "running", Command: "sleep 30", StartedAt: now},
+		},
+	}
+	m := modelWithFakeExecSessions(tool, now)
+
+	next, _ := m.attachTerminalCommand("")
+	if next.terminalAttach == nil || next.terminalAttach.sessionID != 7 {
+		t.Fatalf("bare /attach should pick the only tty session, state=%#v", next.terminalAttach)
+	}
+}
+
+func TestAttachCommandBareNoneOrSeveral(t *testing.T) {
+	now := time.Unix(200, 0)
+	m := modelWithFakeExecSessions(&fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{
+			{ID: 8, TTY: false, Status: "running", Command: "sleep 30", StartedAt: now},
+		},
+	}, now)
+	next, _ := m.attachTerminalCommand("")
+	if next.terminalAttach != nil || !strings.Contains(next.transientNotice.text, "No interactive terminal sessions running.") {
+		t.Fatalf("bare /attach with no tty sessions: notice=%q state=%#v", next.transientNotice.text, next.terminalAttach)
+	}
+
+	m = modelWithFakeExecSessions(&fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{
+			{ID: 7, TTY: true, Status: "running", Command: "cat", StartedAt: now},
+			{ID: 9, TTY: true, Status: "running", Command: "top", StartedAt: now},
+		},
+	}, now)
+	next, _ = m.attachTerminalCommand("")
+	if next.terminalAttach != nil {
+		t.Fatal("bare /attach with several tty sessions should list, not attach")
+	}
+	if !transcriptContains(next.transcript, "/attach <session_id>") || !transcriptContains(next.transcript, "cat") || !transcriptContains(next.transcript, "top") {
+		t.Fatalf("expected a choice card listing both sessions: %#v", next.transcript)
+	}
+}
+
 func TestQuitStopsBackgroundTerminals(t *testing.T) {
 	tool := &fakeExecSessionTool{
 		sessions: []tools.ExecSessionSnapshot{{ID: 1000, StartedAt: time.Unix(100, 0), Status: "running"}},

@@ -4760,6 +4760,8 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 	case commandStop:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.stopBackgroundTerminalsText(command.text)})
 		return m, nil
+	case commandAttach:
+		return m.attachTerminalCommand(command.text)
 	case commandSandboxSetup:
 		return m.startSandboxSetupCommand(command.text)
 	case commandProvider:
