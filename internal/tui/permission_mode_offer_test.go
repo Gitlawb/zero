@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -169,6 +170,64 @@ func TestOfferLabelNamesTheConfirmKey(t *testing.T) {
 	for _, want := range []string{"full-auto", "ctrl+g"} {
 		if !strings.Contains(label, want) {
 			t.Errorf("offer label %q does not mention %q", label, want)
+		}
+	}
+}
+
+// AN OFFER THAT IS NOT ON SCREEN MUST NOT BE ACCEPTABLE.
+//
+// The offer lives in the left chip, and several statuses used to take that chip
+// over wholesale: an active recording, a transcription, a model download. Arming
+// while the mic was live therefore rendered REC while ctrl+g still committed
+// full-auto, so the user was asked to confirm something the footer never put in
+// front of them, and the permission prompts went away. Reported by @jatmn.
+//
+// The invariant is one implication, asserted through the REAL renderer and the
+// REAL handler: if the mode became full-auto, the frame the user saw before
+// pressing the key contained the offer. Matrixed over the states that contend
+// for the chip and the width tiers, because the two branches of statusLine
+// reach the chip by different routes.
+func TestConfirmOnlyCommitsAnOfferTheFooterShowed(t *testing.T) {
+	for _, width := range []int{40, 96, 160} {
+		for _, state := range []struct {
+			name  string
+			apply func(model) model
+		}{
+			{"idle", func(m model) model { return m }},
+			{"recording", func(m model) model {
+				m.dictation.phase = dictRecording
+				return m
+			}},
+			{"transcribing", func(m model) model {
+				m.dictation.phase = dictTranscribing
+				return m
+			}},
+			{"downloading a model", func(m model) model {
+				m.dictation.downloading = true
+				m.dictation.downloadStatus = "downloading 42%"
+				return m
+			}},
+		} {
+			t.Run(fmt.Sprintf("%s/%d", state.name, width), func(t *testing.T) {
+				armed := state.apply(armedModel(t))
+				armed.width = width
+
+				shown := armed.statusLine(width)
+				confirmed := pressKey(t, armed, tea.Key{Code: 'g', Mod: tea.ModCtrl})
+
+				if confirmed.permissionMode == agent.PermissionModeFullAuto &&
+					!strings.Contains(shown, "ctrl+g") {
+					t.Fatalf("ctrl+g committed full-auto while the footer showed %q, "+
+						"so the offer was accepted without ever being displayed", shown)
+				}
+				// The feature still has to work where the offer IS shown, or a fix
+				// that simply made confirmation unreachable would pass the above.
+				if strings.Contains(shown, "ctrl+g") &&
+					confirmed.permissionMode != agent.PermissionModeFullAuto {
+					t.Fatalf("the footer offered full-auto (%q) but ctrl+g did not commit it: mode=%s",
+						shown, confirmed.permissionMode)
+				}
+			})
 		}
 	}
 }

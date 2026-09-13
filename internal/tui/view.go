@@ -191,6 +191,26 @@ func (m model) composerDividerLine(width int) string {
 // chip (permission mode + effort/fast tier) on the left, a flexible gap, then the
 // context-fill gauge and token/cost usage on the right. The provider lives in the
 // title bar and is NOT duplicated here. Groups drop with the width tier.
+// offerOwnsStatusChip reports whether a live full-auto offer holds the left
+// chip. The offer is a question the user must be able to READ before ctrl+g
+// accepts it, so it outranks the statuses that merely REPORT what is happening
+// - a recording mic, a model download - while the two confirmations that ask
+// their own question still win, because those are what the user just pressed a
+// key for. Reported by @jatmn.
+//
+// offerConfirmable is the same rule taking the armed flag as an argument,
+// because the key handler captures and clears m.unsafeArmed before its switch
+// runs. Sharing one expression is the point: the renderer and the confirm key
+// must never disagree about whether an offer is live, or ctrl+g accepts an
+// offer the footer did not show.
+func (m model) offerOwnsStatusChip() bool {
+	return m.offerConfirmable(m.unsafeArmed)
+}
+
+func (m model) offerConfirmable(armed bool) bool {
+	return armed && !m.exitConfirmActive && !m.cancelConfirmActive
+}
+
 func (m model) statusLine(width int) string {
 	tier := widthTier(width)
 	separator := zeroTheme.line.Render(" │ ")
@@ -213,6 +233,15 @@ func (m model) statusLine(width int) string {
 		if m.cancelConfirmActive {
 			return fitStyledLine(prefix+btwChip+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(escCancelConfirmText), width)
 		}
+		// A LIVE OFFER OUTRANKS A STATUS THAT MERELY REPORTS.
+		//
+		// left already carries the offer, because modeLabel renders it, and the
+		// takeover below discards left entirely. Arming while the mic was live
+		// therefore showed REC while ctrl+g would still confirm, so the user was
+		// asked to confirm something the footer never put in front of them.
+		if m.offerOwnsStatusChip() {
+			return fitStyledLine(left, width)
+		}
 		if dictation := m.dictationStatusChip(); dictation != "" {
 			return fitStyledLine(prefix+btwChip+dictation, width)
 		}
@@ -233,10 +262,10 @@ func (m model) statusLine(width int) string {
 		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
 	} else if m.cancelConfirmActive {
 		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(escCancelConfirmText)
-	} else if m.dictation.downloading && m.dictation.downloadStatus != "" {
+	} else if !m.offerOwnsStatusChip() && m.dictation.downloading && m.dictation.downloadStatus != "" {
 		// A model download in progress takes over the left chip with a live percentage.
 		left = prefix + btwChip + zeroTheme.accent.Render("⬇ ") + zeroTheme.muted.Render(m.dictation.downloadStatus)
-	} else if dictation := m.dictationStatusChip(); dictation != "" && m.dictation.active() {
+	} else if dictation := m.dictationStatusChip(); !m.offerOwnsStatusChip() && dictation != "" && m.dictation.active() {
 		// An active recording/transcription takes over the left chip — it is the
 		// most time-sensitive thing on screen (the mic is live).
 		left = prefix + btwChip + dictation

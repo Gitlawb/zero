@@ -1995,7 +1995,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.syncPeerIdentity()
 				return m, nil
 			}
-		case keyCtrl(msg, 'g') && unsafeWasArmed:
+		case keyCtrl(msg, 'g') && m.offerConfirmable(unsafeWasArmed):
 			// Confirms an unsafe offer raised by the shift+tab immediately before
 			// this. Guarded on unsafeWasArmed in the case itself rather than inside
 			// the body, so without a live offer this key is not consumed at all and
