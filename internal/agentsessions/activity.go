@@ -135,7 +135,7 @@ func (log *activityLog) add(bucket string, list *[]string, value string) {
 // filename (repo invariant #2, and #8 — these arguments are untrusted input).
 func (log *activityLog) observeCall(callID string, name string, arguments string) {
 	log.calls++
-	trimmedName := strings.TrimSpace(name)
+	trimmedName := strings.TrimSpace(DisplayField(name))
 	if trimmedName == "" {
 		trimmedName = "unknown"
 	}
@@ -145,7 +145,7 @@ func (log *activityLog) observeCall(callID string, name string, arguments string
 		// Not a JSON object. Codex's custom_tool_call carries a bare script in
 		// "input", which is a command in every sense that matters here.
 		if script := strings.TrimSpace(arguments); script != "" {
-			log.add("cmd", &log.commands, log.shorten(firstLine(script)))
+			log.add("cmd", &log.commands, log.shorten(script))
 			return
 		}
 		log.toolCounts[trimmedName]++
@@ -153,7 +153,7 @@ func (log *activityLog) observeCall(callID string, name string, arguments string
 	}
 
 	if command := firstStringField(fields, "command", "cmd", "script", "input"); command != "" {
-		log.add("cmd", &log.commands, log.shorten(firstLine(command)))
+		log.add("cmd", &log.commands, log.shorten(command))
 		return
 	}
 	if pattern := firstStringField(fields, "pattern", "query", "search_query", "regex"); pattern != "" {
@@ -198,11 +198,11 @@ func (log *activityLog) observeResult(callID string, name string, status tools.S
 	// The call did not do what it claimed, so its pending claim is dropped
 	// (never committed) and the failure itself is recorded below.
 	log.failed++
-	trimmedName := strings.TrimSpace(name)
+	trimmedName := strings.TrimSpace(DisplayField(name))
 	if trimmedName == "" {
 		trimmedName = "unknown"
 	}
-	detail := log.shorten(firstLine(output))
+	detail := log.shorten(output)
 	if detail == "" {
 		detail = "failed"
 	}
@@ -243,7 +243,11 @@ func (log *activityLog) relative(path string) string {
 // line.
 func (log *activityLog) shorten(value string) string {
 	const limit = 120
-	collapsed := strings.Join(strings.Fields(value), " ")
+	// Redact sees the complete value before this presentation copy loses later
+	// lines or its tail. Truncating first can cut away the syntax that lets the
+	// shared redactor recognize a credential. Keep the established first-line
+	// activity policy after that complete-value pass.
+	collapsed := strings.Join(strings.Fields(firstLine(redact(value))), " ")
 	runes := []rune(collapsed)
 	if len(runes) <= limit {
 		return collapsed

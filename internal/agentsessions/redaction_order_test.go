@@ -1,6 +1,7 @@
 package agentsessions
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -192,6 +193,9 @@ func TestAnIntactKeyAfterARemovedSeparatorIsStillRedacted(t *testing.T) {
 	if got := redact("line one\nline\ttwo"); got != "line one\nline\ttwo" {
 		t.Errorf("newline/tab were not preserved: %q", got)
 	}
+	if got := redact("prefix\x00sk-note"); !strings.Contains(got, "sk-note") {
+		t.Errorf("a short prefix-shaped prose token was over-redacted: %q", got)
+	}
 }
 
 func TestCombinedRemovedSeparatorsCannotHideSplitCredentials(t *testing.T) {
@@ -348,6 +352,53 @@ func TestDisplayFieldPrefixFilterKeepsEverySupportedSecretFamily(t *testing.T) {
 			t.Errorf("split %q was not redacted: %q", secret, got)
 		}
 		assertNoCredentialRun(t, got, secret, 8)
+	}
+}
+
+func TestLongSplitJWTFailsClosedAtTheDisplayProbeLimit(t *testing.T) {
+	jwt := "eyJ" + strings.Repeat("A", 20) + "." + strings.Repeat("B", 300) + "." + strings.Repeat("C", 24)
+	if contiguous := DisplayField(jwt); !strings.Contains(contiguous, "[REDACTED]") {
+		t.Fatalf("contiguous JWT control was not recognized: %q", contiguous)
+	}
+	split := jwt[:180] + "\t" + jwt[180:]
+	for _, probe := range []struct {
+		name string
+		got  string
+	}{
+		{"display", DisplayField(split)},
+		{"title ingress", summarizeTitle("session " + split)},
+	} {
+		if !strings.Contains(probe.got, "[REDACTED]") {
+			t.Fatalf("%s did not fail closed for delayed JWT recognition: %q", probe.name, probe.got)
+		}
+		assertNoCredentialRun(t, probe.got, jwt, 8)
+	}
+}
+
+func TestTitlesRedactCompleteValuesBeforeShortening(t *testing.T) {
+	pat := "ghp_" + strings.Repeat("P", 36)
+	for _, input := range []string{
+		strings.Repeat("x", 55) + " " + pat,
+		strings.Repeat("y", 50) + ` {"password":"demoPass"}`,
+	} {
+		got := summarizeTitle(input)
+		if strings.Contains(got, pat) || strings.Contains(got, "demoPass") {
+			t.Fatalf("shortened title exposed a value recognizable only before truncation: %q", got)
+		}
+		if !strings.Contains(got, "[REDACT") {
+			t.Fatalf("shortened title lost the complete-value redaction marker: %q", got)
+		}
+	}
+}
+
+func BenchmarkRedactControlDense(b *testing.B) {
+	for _, pairs := range []int{1000, 2000, 4000, 8000} {
+		input := strings.Repeat("a\x00", pairs)
+		b.Run(strconv.Itoa(pairs), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				_ = redact(input)
+			}
+		})
 	}
 }
 

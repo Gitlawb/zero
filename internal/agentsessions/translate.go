@@ -68,7 +68,6 @@ func redact(value string) string {
 	if value == "" {
 		return ""
 	}
-	value = redaction.RedactString(value, redaction.Options{})
 	normalized, boundaries := stripControlWithBoundaries(value)
 	return redactAtRemovedBoundaries(normalized, boundaries)
 }
@@ -106,21 +105,49 @@ func appendBoundary(boundaries []int, position int) []int {
 
 // redactAtRemovedBoundaries preserves the fact that a removed control separated
 // two adjacent bytes. The ordinary post-normalization pass catches credentials
-// assembled across an internal control. A synthetic non-word prefix at each
-// former boundary additionally catches the combined case where another removed
-// control also glued preceding prose to the credential and erased its word
-// boundary. Process right-to-left so redactions cannot invalidate earlier byte
-// offsets; the private-use marker is never emitted.
+// assembled across an internal control. At a former boundary, a known secret
+// prefix also owns the complete adjacent token even when deleting the control
+// glued preceding prose to it and erased the redactor's word boundary.
+//
+// Each boundary and each byte in a matched token is visited at most a constant
+// number of times. The previous implementation redacted every remaining suffix
+// once per removed byte, making a control-dense accepted value quadratic.
 func redactAtRemovedBoundaries(value string, boundaries []int) string {
 	const boundaryHint = "\ue000"
-	for i := len(boundaries) - 1; i >= 0; i-- {
-		position := boundaries[i]
-		if position < 0 || position > len(value) {
+	spans := make([]byteSpan, 0)
+	coveredThrough := 0
+	for _, position := range boundaries {
+		if position < coveredThrough || position < 0 || position >= len(value) {
 			continue
 		}
-		suffix := redaction.RedactString(boundaryHint+value[position:], redaction.Options{})
-		suffix = strings.TrimPrefix(suffix, boundaryHint)
-		value = value[:position] + suffix
+		if !fullDisplaySecretPrefixAt(value[position:]) {
+			continue
+		}
+		probeEnd := position
+		for probeEnd < len(value) && probeEnd-position < maxDisplaySecretProbeBytes && isTextSecretByte(value[probeEnd]) {
+			probeEnd++
+		}
+		candidate := value[position:probeEnd]
+		probe := redaction.RedactString(boundaryHint+candidate, redaction.Options{})
+		detected := strings.Contains(probe, redaction.RedactedSecret)
+		if !detected && len(candidate) >= maxDisplaySecretProbeBytes {
+			// A supported delayed-match shape (notably a long JWT) can still be
+			// incomplete at the work cap. Abandoning it would fail open.
+			detected = true
+		}
+		if !detected {
+			continue
+		}
+		end := probeEnd
+		for end < len(value) && isTextSecretByte(value[end]) {
+			end++
+		}
+		spans = append(spans, byteSpan{start: position, end: end})
+		coveredThrough = end
+	}
+	for index := len(spans) - 1; index >= 0; index-- {
+		span := spans[index]
+		value = value[:span.start] + redaction.RedactedSecret + value[span.end:]
 	}
 	return redaction.RedactString(value, redaction.Options{})
 }
@@ -156,7 +183,8 @@ func redactDisplaySpaceSplits(value string, boundaries []int) (string, []int) {
 	const boundaryHint = "\ue000"
 	return redactDisplaySpaceSplitsWithProbe(value, boundaries, func(candidate string) bool {
 		probe := redaction.RedactString(boundaryHint+candidate, redaction.Options{})
-		return strings.Contains(probe, redaction.RedactedSecret)
+		return strings.Contains(probe, redaction.RedactedSecret) ||
+			(len(candidate) >= maxDisplaySecretProbeBytes && fullDisplaySecretPrefixAt(candidate))
 	})
 }
 
@@ -196,9 +224,6 @@ func redactDisplaySpaceSplitsWithProbe(value string, boundaries []int, detectsSe
 				break
 			}
 			detected := detectsSecret(probeText)
-			if !detected && candidate.Len() >= maxDisplaySecretProbeBytes && strings.HasPrefix(probeText, "sk-") {
-				detected = true
-			}
 			if !detected {
 				if candidate.Len() >= maxDisplaySecretProbeBytes {
 					break
@@ -266,6 +291,15 @@ func redactDisplaySpaceSplitsWithProbe(value string, boundaries []int, detectsSe
 func displaySecretPrefixPossible(candidate string) bool {
 	for _, prefix := range displaySecretPrefixes {
 		if strings.HasPrefix(prefix, candidate) || strings.HasPrefix(candidate, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func fullDisplaySecretPrefixAt(candidate string) bool {
+	for _, prefix := range displaySecretPrefixes {
+		if strings.HasPrefix(candidate, prefix) {
 			return true
 		}
 	}
