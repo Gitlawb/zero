@@ -329,14 +329,14 @@ func TestToolCallResult(t *testing.T) {
 	}
 }
 
-func TestToolCallDiffJSONPreservesEmptyFilesWithoutClaimingDeletion(t *testing.T) {
+func TestToolCallDiffJSONDistinguishesEmptyFilesAndDeletion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "empty.txt")
 	content := appendToolResultDiffs(nil, []tools.FileDiff{
 		{Path: path, OldExists: false, NewExists: true, NewText: ""},
 		{Path: path, OldExists: true, NewExists: true, OldText: "before", NewText: ""},
 		{Path: path, OldExists: true, NewExists: false, OldText: "before"},
 	})
-	if len(content) != 2 {
+	if len(content) != 3 {
 		t.Fatalf("diff content = %#v", content)
 	}
 	for index, diff := range content {
@@ -348,14 +348,22 @@ func TestToolCallDiffJSONPreservesEmptyFilesWithoutClaimingDeletion(t *testing.T
 		if err := json.Unmarshal(encoded, &wire); err != nil {
 			t.Fatal(err)
 		}
-		if wire["path"] != path || wire["newText"] != "" {
+		if wire["path"] != path {
 			t.Fatalf("wire diff %d = %s", index, encoded)
 		}
-		if index == 0 && wire["oldText"] != nil {
-			t.Fatalf("create oldText = %#v, want null", wire["oldText"])
-		}
-		if index == 1 && wire["oldText"] != "before" {
-			t.Fatalf("update oldText = %#v, want before", wire["oldText"])
+		switch index {
+		case 0:
+			if wire["oldText"] != nil || wire["newText"] != "" {
+				t.Fatalf("create diff = %s, want null oldText and empty newText", encoded)
+			}
+		case 1:
+			if wire["oldText"] != "before" || wire["newText"] != "" {
+				t.Fatalf("empty replacement diff = %s", encoded)
+			}
+		case 2:
+			if wire["oldText"] != "before" || wire["newText"] != nil {
+				t.Fatalf("deletion diff = %s, want oldText and null newText", encoded)
+			}
 		}
 	}
 }
@@ -421,7 +429,7 @@ func TestToolResultLocationsDeduplicateOnlyExactPaths(t *testing.T) {
 	}
 }
 
-func TestDeletedFileKeepsPathOnlyLocation(t *testing.T) {
+func TestDeletedFileEmitsDiffAndKeepsLocations(t *testing.T) {
 	relativePath := "deleted.go"
 	absolutePath := filepath.Join(t.TempDir(), relativePath)
 	update := toolCallResult(agent.ToolResult{
@@ -430,8 +438,8 @@ func TestDeletedFileKeepsPathOnlyLocation(t *testing.T) {
 			Path: absolutePath, OldExists: true, NewExists: false, OldText: "before",
 		}},
 	})
-	if len(update.Content) != 0 {
-		t.Fatalf("deleted file must not emit an ambiguous ACP diff: %#v", update.Content)
+	if len(update.Content) != 1 || update.Content[0].OldText == nil || *update.Content[0].OldText != "before" || update.Content[0].NewText != nil {
+		t.Fatalf("deleted file diff = %#v, want oldText with null newText", update.Content)
 	}
 	if len(update.Locations) != 2 || update.Locations[0].Path != absolutePath || update.Locations[1].Path != relativePath {
 		t.Fatalf("deleted file locations = %#v", update.Locations)

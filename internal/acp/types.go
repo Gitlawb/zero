@@ -241,9 +241,9 @@ type ToolCallContent struct {
 }
 
 // MarshalJSON preserves ACP's discriminated content union. A diff always has
-// path and newText (including an intentionally empty deletion value); oldText
-// is JSON null for a newly created file. Other content variants omit all diff
-// fields rather than serializing irrelevant nulls.
+// path, while nullable oldText/newText distinguish creation, deletion, and an
+// existing file replaced with empty content. Other content variants omit all
+// diff fields rather than serializing irrelevant nulls.
 func (content ToolCallContent) MarshalJSON() ([]byte, error) {
 	if content.Type == "diff" {
 		return json.Marshal(struct {
