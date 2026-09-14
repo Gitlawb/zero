@@ -39,6 +39,14 @@ func NewLoopbackListener(state string) (*LoopbackListener, error) {
 // port (0 = OS-assigned). Used by ChatGPT OAuth which requires a fixed
 // redirect_uri of http://localhost:1455/auth/callback.
 func NewLoopbackListenerOnPort(state string, port int) (*LoopbackListener, error) {
+	return newLoopbackListener(state, port, nil)
+}
+
+// newLoopbackListener is NewLoopbackListenerOnPort with an optional ConnState
+// hook, set before the Serve goroutine starts so tests can synchronize on
+// connection lifecycle events (e.g. a stalled request header being accepted)
+// without racing the running server.
+func newLoopbackListener(state string, port int, connState func(net.Conn, http.ConnState)) (*LoopbackListener, error) {
 	if strings.TrimSpace(state) == "" {
 		return nil, errors.New("oauth: loopback listener requires a non-empty CSRF state")
 	}
@@ -58,6 +66,7 @@ func NewLoopbackListenerOnPort(state string, port int) (*LoopbackListener, error
 		// never finishes sending its request header must not be able to hold
 		// the accepted connection (and Close, below) open indefinitely.
 		ReadHeaderTimeout: 5 * time.Second,
+		ConnState:         connState,
 	}
 	go func() {
 		_ = l.server.Serve(ln)
