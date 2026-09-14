@@ -353,7 +353,8 @@ func TestToolCallDiffJSONDistinguishesEmptyFilesAndDeletion(t *testing.T) {
 		}
 		switch index {
 		case 0:
-			if wire["oldText"] != nil || wire["newText"] != "" {
+			oldText, present := wire["oldText"]
+			if !present || oldText != nil || wire["newText"] != "" {
 				t.Fatalf("create diff = %s, want null oldText and empty newText", encoded)
 			}
 		case 1:
@@ -361,7 +362,8 @@ func TestToolCallDiffJSONDistinguishesEmptyFilesAndDeletion(t *testing.T) {
 				t.Fatalf("empty replacement diff = %s", encoded)
 			}
 		case 2:
-			if wire["oldText"] != "before" || wire["newText"] != nil {
+			newText, present := wire["newText"]
+			if wire["oldText"] != "before" || !present || newText != nil {
 				t.Fatalf("deletion diff = %s, want oldText and null newText", encoded)
 			}
 		}
