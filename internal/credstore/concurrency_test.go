@@ -12,6 +12,7 @@ import (
 
 func fileStore(t *testing.T, dir string) *Store {
 	t.Helper()
+	secureTestDirectory(t, dir)
 	store, err := New(Options{Dir: dir, Storage: "file"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -154,6 +155,7 @@ func TestConcurrentSetAcrossProcesses(t *testing.T) {
 	}
 
 	dir := t.TempDir()
+	secureTestDirectory(t, dir)
 	const children = 4
 	var wg sync.WaitGroup
 	failures := make(chan string, children)
@@ -221,7 +223,10 @@ func TestTheLockIsNotTheDataFile(t *testing.T) {
 func TestOperationsFailWhenTheLockCannotBeAcquired(t *testing.T) {
 	base := t.TempDir()
 	dir := filepath.Join(base, "creds")
-	store := fileStore(t, dir)
+	store, err := New(Options{Dir: dir, Storage: "file"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Where the store expects its directory, put a regular file.
 	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
