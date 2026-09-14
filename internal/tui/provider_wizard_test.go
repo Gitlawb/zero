@@ -1708,7 +1708,7 @@ func TestApplyProviderWizardReplacesRemovedLiveRowIdentity(t *testing.T) {
 	t.Setenv(config.ActiveProviderEnv, "work")
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work"}]}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"providers":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m := newModel(context.Background(), Options{
