@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -387,15 +388,13 @@ func TestClearProviderKeyStoredCaseVariantsPreservesDistinctUnicodeIdentity(t *t
 	}
 }
 
-// A rejected publication must leave the user exactly where they started: the
-// previous working key intact, not deleted by a rollback that assumed this
-// call had created the entry.
-func TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected(t *testing.T) {
+// Preflight rejection leaves an existing credential unchanged; this fixture
+// never reaches marker publication or rollback.
+func TestPublishProviderCredentialPreflightPreservesPreviousKey(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	// Legacy duplicate rows: the write-time validator rejects this config, so
-	// the marker publication fails after the credential has been captured.
+	// Legacy duplicate rows are rejected before credential capture.
 	original := []byte(`{"providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`)
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
@@ -417,7 +416,7 @@ func TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected(t *testi
 		t.Fatal(err)
 	}
 	if !ok || key != "sk-working" {
-		t.Fatalf("stored key does not match the previous value (present=%v, len=%d), want sk-working restored", ok, len(key))
+		t.Fatalf("stored key does not match the previous value (present=%v, len=%d), want sk-working preserved", ok, len(key))
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {
@@ -428,9 +427,8 @@ func TestPublishProviderCredentialRestoresPreviousKeyWhenMarkerRejected(t *testi
 	}
 }
 
-// When the call created the entry there is nothing to restore, so a rejected
-// publication must not leave an orphaned secret behind either.
-func TestPublishProviderCredentialDeletesEntryItCreatedWhenMarkerRejected(t *testing.T) {
+// Preflight rejection must not create a credential when no entry exists.
+func TestPublishProviderCredentialPreflightDoesNotCreateEntry(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -479,5 +477,73 @@ func TestPublishProviderCredentialStoresAndMarks(t *testing.T) {
 	}
 	if !cfg.Providers[0].APIKeyStored || strings.TrimSpace(cfg.Providers[0].APIKeyEnv) != "" {
 		t.Fatalf("marker not published: apiKeyStored=%v apiKeyEnv=%q", cfg.Providers[0].APIKeyStored, cfg.Providers[0].APIKeyEnv)
+	}
+}
+
+func TestRepairUnnamedProviderStoredIdentity(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		for _, destination := range []bool{false, true} {
+			t.Run(fmt.Sprintf("shared=%t/destination=%t", shared, destination), func(t *testing.T) {
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				t.Setenv("APPDATA", home)
+				t.Setenv("LOCALAPPDATA", home)
+				t.Setenv("XDG_CONFIG_HOME", home)
+				t.Setenv("XDG_CACHE_HOME", home)
+				t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+				store, err := ProviderKeyStore()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Set("legacy", "original-key"); err != nil {
+					t.Fatal(err)
+				}
+				if destination {
+					if err := store.Set("work", "destination-key"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				rows := []ProviderProfile{{ProviderKind: ProviderKindOpenAI, Model: "gpt-4o", APIKeyStored: true}}
+				if shared {
+					rows = append(rows, ProviderProfile{Name: "legacy", Model: "gpt-4o", APIKeyStored: true})
+				}
+				cfg := FileConfig{ActiveProvider: "legacy", Providers: rows}
+				data, err := json.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(t.TempDir(), "config.json")
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := RepairUnnamedProvider(path, "work"); err == nil || !strings.Contains(err.Error(), "stored credential") {
+					t.Fatalf("identity-changing repair must refuse: %v", err)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || string(after) != string(data) {
+					t.Fatal("refusal changed config")
+				}
+				key, ok, err := store.Get("legacy")
+				if err != nil || !ok || key != "original-key" {
+					t.Fatal("old credential changed")
+				}
+				key, ok, err = store.Get("work")
+				if err != nil || ok != destination || (ok && key != "destination-key") {
+					t.Fatal("destination credential changed")
+				}
+				// Bare repair preserves the old identity, including the shared-owner merge.
+				if _, _, err := RepairUnnamedProvider(path, ""); err != nil {
+					t.Fatal(err)
+				}
+				resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				profile := ApplyStoredAPIKey(resolved.Provider, store)
+				if profile.Name != "legacy" || profile.APIKey != "original-key" {
+					t.Fatal("repaired marker no longer retrieves the legacy credential")
+				}
+			})
+		}
 	}
 }

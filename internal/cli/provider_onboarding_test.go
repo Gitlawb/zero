@@ -1006,7 +1006,7 @@ func TestRunProvidersRepairConfigExplainsCollidingDefaultName(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	seed := `{"activeProvider":"openai","providers":[{"name":"","provider_kind":"openai","model":"gpt-4o"},{"name":"OPENAI","provider_kind":"openai","model":"gpt-4.1"}]}`
+	seed := `{"activeProvider":"openai","providers":[{"provider_kind":"openai-compatible","baseURL":"https://legacy.example/v1","model":"legacy-model","apiKey":"legacy-key"},{"name":"OPENAI","provider_kind":"openai-compatible","baseURL":"https://other.example/v1","model":"other-model","apiKey":"other-key"}]}`
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1044,10 +1044,96 @@ func TestRunProvidersRepairConfigExplainsCollidingDefaultName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh Resolve after guided repair: %v", err)
 	}
-	if resolved.Provider.Name != "OPENAI" {
-		t.Fatalf("resolved provider = %q, want the untouched active OPENAI row", resolved.Provider.Name)
+	if p := resolved.Provider; p.Name != "legacy" || p.BaseURL != "https://legacy.example/v1" || p.Model != "legacy-model" || p.APIKey != "legacy-key" {
+		t.Fatal("guided repair changed the active endpoint, model or credential")
 	}
 	if readFileConfig(t, configPath).Providers[0].Name != "legacy" {
 		t.Fatalf("guided repair did not name the legacy row: %+v", readFileConfig(t, configPath).Providers)
+	}
+}
+
+func TestProviderMutationsWithoutRunnableActiveProvider(t *testing.T) {
+	for _, unusable := range []bool{false, true} {
+		for _, command := range []string{"remove", "rename"} {
+			for _, name := range []string{"work", "WORK"} {
+				t.Run(fmt.Sprintf("%t/%s/%s", unusable, command, name), func(t *testing.T) {
+					setCLIUserConfigRoot(t)
+					clearProviderEnv(t)
+					t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+					path, err := config.DefaultUserConfigPath()
+					if err != nil {
+						t.Fatal(err)
+					}
+					rows := []config.ProviderProfile{{Name: "work", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4o"}, {Name: "other", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}}
+					if unusable {
+						rows = rows[:1]
+						rows[0].ProviderKind = "obsolete"
+					}
+					writeProviderOnboardingConfig(t, path, config.FileConfig{Providers: rows})
+					deps := providerSetupDeps(path)
+					workspace := t.TempDir()
+					deps.getwd = func() (string, error) { return workspace, nil }
+					args := []string{"providers", command, name}
+					if command == "rename" {
+						args = append(args, "renamed")
+					}
+					var out, stderr bytes.Buffer
+					if code := runWithDeps(args, &out, &stderr, deps); code != exitSuccess {
+						t.Fatalf("exit=%d: %s", code, stderr.String())
+					}
+					cfg := readFileConfig(t, path)
+					for _, p := range cfg.Providers {
+						if p.Name == "work" {
+							t.Fatal("old row remains")
+						}
+					}
+					if command == "rename" && cfg.Providers[0].Name != "renamed" {
+						t.Fatal("renamed row missing")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestProviderAliasMutationRejectsUntrustedSourceErrors(t *testing.T) {
+	for _, command := range []string{"remove", "rename"} {
+		for _, body := range []string{`{"providers":`, `{"providers":[{"name":"work","provider_kind":"openai-compatible","baseURL":"https://untrusted.example/v1"}]}`} {
+			t.Run(command+"/"+fmt.Sprint(len(body)), func(t *testing.T) {
+				setCLIUserConfigRoot(t)
+				clearProviderEnv(t)
+				clearProviderEnv(t)
+				path, err := config.DefaultUserConfigPath()
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeProviderOnboardingConfig(t, path, config.FileConfig{Providers: []config.ProviderProfile{{Name: "work", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://user.example/v1", APIKey: "user-key", Model: "user-model"}}})
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				workspace := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(workspace, ".zero"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(workspace, ".zero", "config.json"), []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+				deps := providerSetupDeps(path)
+				deps.getwd = func() (string, error) { return workspace, nil }
+				args := []string{"providers", command, "WORK"}
+				if command == "rename" {
+					args = append(args, "renamed")
+				}
+				var out, stderr bytes.Buffer
+				if code := runWithDeps(args, &out, &stderr, deps); code == exitSuccess {
+					t.Fatal("untrusted project error was ignored")
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatal("rejection mutated the user config")
+				}
+			})
+		}
 	}
 }

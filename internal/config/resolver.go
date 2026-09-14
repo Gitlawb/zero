@@ -64,7 +64,7 @@ const MaxTurnsCeiling = 500
 // (set 0 to always advertise every schema, e.g. for a model without tool_search).
 const defaultDeferThreshold = 3
 
-func Resolve(options ResolveOptions) (ResolvedConfig, error) {
+func resolveSourceConfig(options ResolveOptions) (FileConfig, error) {
 	cfg := FileConfig{
 		MaxTurns: defaultMaxTurns,
 	}
@@ -72,20 +72,20 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	if options.UserConfigPath != "" {
 		fileConfig, err := loadConfigFile(options.UserConfigPath)
 		if err != nil {
-			return ResolvedConfig{}, err
+			return FileConfig{}, err
 		}
 		if err := ValidatePersistedProviderNames(fileConfig); err != nil {
-			return ResolvedConfig{}, err
+			return FileConfig{}, err
 		}
 		mergeConfig(&cfg, fileConfig)
 	}
 	if options.ProjectConfigPath != "" {
 		fileConfig, err := loadConfigFile(options.ProjectConfigPath)
 		if err != nil {
-			return ResolvedConfig{}, err
+			return FileConfig{}, err
 		}
 		if err := mergeProjectConfig(&cfg, fileConfig); err != nil {
-			return ResolvedConfig{}, err
+			return FileConfig{}, err
 		}
 	}
 
@@ -94,7 +94,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	if options.ProviderCommand != "" {
 		commandConfig, err := LoadProviderCommand(options.ProviderCommand)
 		if err != nil {
-			return ResolvedConfig{}, err
+			return FileConfig{}, err
 		}
 		// Sandbox.Enabled is NOT accepted from a provider command, for the same
 		// reason project config cannot set it (see mergeProjectConfig): only
@@ -111,6 +111,15 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	}
 
 	applyOverrides(&cfg, options.Overrides)
+
+	return cfg, nil
+}
+
+func Resolve(options ResolveOptions) (ResolvedConfig, error) {
+	cfg, err := resolveSourceConfig(options)
+	if err != nil {
+		return ResolvedConfig{}, err
+	}
 
 	if !cfg.Tools.deferThresholdSet && cfg.Tools.DeferThreshold == 0 {
 		cfg.Tools.DeferThreshold = defaultDeferThreshold
@@ -966,29 +975,21 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 		}
 	}
 
-	// Select the active source row before normalizing anything. An exact name
-	// always wins; credential-store identity is only a fallback when it identifies
+	// Select the active source row using normalization's name default. Exact
+	// names always win; credential-store identity is only a fallback when it identifies
 	// one row. This prevents an invalid case-variant sibling from making an exact
 	// target fail while keeping distinct identities such as "s" and "ſ" separate.
 	activeIndex := -1
 	if activeName != "" {
 		for index := range providers {
-			providerName := strings.TrimSpace(providers[index].Name)
-			if providerName == "" {
-				providerName = string(ProviderKindOpenAI)
-			}
-			if providerName == activeName {
+			if normalizedProviderName(providers[index].Name) == activeName {
 				activeIndex = index
 				break
 			}
 		}
 		if activeIndex < 0 {
 			for index := range providers {
-				providerName := strings.TrimSpace(providers[index].Name)
-				if providerName == "" {
-					providerName = string(ProviderKindOpenAI)
-				}
-				if !sameProviderIdentity(providerName, activeName) {
+				if !sameProviderIdentity(normalizedProviderName(providers[index].Name), activeName) {
 					continue
 				}
 				if activeIndex >= 0 {
@@ -1038,8 +1039,17 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 	return normalized, active, nil
 }
 
+// normalizedProviderName supplies the name default for command/project profiles.
+// Persisted user rows are validated before this permissive boundary.
+func normalizedProviderName(name string) string {
+	if name = strings.TrimSpace(name); name != "" {
+		return name
+	}
+	return string(ProviderKindOpenAI)
+}
+
 func normalizeProvider(profile ProviderProfile, env map[string]string, options normalizeOptions) (ProviderProfile, error) {
-	profile.Name = strings.TrimSpace(profile.Name)
+	profile.Name = normalizedProviderName(profile.Name)
 	profile.Provider = strings.TrimSpace(profile.Provider)
 	profile.ProviderKind = ProviderKind(strings.TrimSpace(strings.ToLower(string(profile.ProviderKind))))
 	profile.CatalogID = providercatalog.NormalizeID(profile.CatalogID)
@@ -1052,9 +1062,6 @@ func normalizeProvider(profile ProviderProfile, env map[string]string, options n
 	profile.AuthHeaderValue = strings.TrimSpace(profile.AuthHeaderValue)
 	profile.Model = strings.TrimSpace(profile.Model)
 
-	if profile.Name == "" {
-		profile.Name = string(ProviderKindOpenAI)
-	}
 	if profile.CatalogID != "" {
 		descriptor, err := providercatalog.Require(profile.CatalogID)
 		if err != nil {
