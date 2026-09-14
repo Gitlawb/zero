@@ -238,6 +238,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	m.pendingSessionTitle = ""
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	if m.providerName == "" {
+		m.removedLiveRow = ""
 		m.providerName = session.Provider
 	}
 	if m.modelName == "" {

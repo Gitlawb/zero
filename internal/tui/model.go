@@ -82,9 +82,12 @@ type model struct {
 	providerName         string
 	modelName            string
 	modelCatalog         modelregistry.Registry
-	providerProfile      config.ProviderProfile
-	savedProviders       []config.ProviderProfile
-	provider             zeroruntime.Provider
+
+	// removedLiveRow retains ownership while a deleted row's client keeps running.
+	removedLiveRow  string
+	providerProfile config.ProviderProfile
+	savedProviders  []config.ProviderProfile
+	provider        zeroruntime.Provider
 	// allowEscalation mirrors Options.AllowEscalation: it gates the per-run model
 	// switchers, and the caller gates the escalate_model tool on the same flag.
 	allowEscalation             bool

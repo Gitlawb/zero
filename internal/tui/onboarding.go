@@ -895,6 +895,7 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 		m.setup.configPath = result.ConfigPath
 	}
 	if result.Provider.Name != "" {
+		m.removedLiveRow = ""
 		m.providerProfile = result.Provider
 		m.providerName = result.Provider.Name
 		m.modelName = result.Provider.Model

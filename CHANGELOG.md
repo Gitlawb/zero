@@ -10,7 +10,7 @@ tagged. Until then, source builds report the version `dev`.
 
 ### Features
 
-* **providers:** add `zero providers repair-config [--name <name>]` to recover a single legacy unnamed provider profile while preserving the active-provider name or falling back to `openai`
+* **providers:** add `zero providers repair-config [--name <name>]` to recover a single legacy unnamed provider profile while preserving the legacy effective provider and active reference; identity-changing repairs of stored-key profiles refuse before writing, so they cannot point at another credential
 
 ### Bug Fixes
 

@@ -1278,12 +1278,12 @@ func TestRemoveProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing
 	}
 }
 
-func TestRemoveProviderRejectsNonExactCaseDuplicateTarget(t *testing.T) {
+func TestRemoveProviderRejectsAmbiguousCaseDuplicateTarget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "WORK"}}}, 0o600)
 	_, err := RemoveProvider(path, "WoRk")
-	if err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("error = %v, want exact-target not-found error", err)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous provider name") {
+		t.Fatalf("error = %v, want ambiguous provider-name error", err)
 	}
 	after, readErr := os.ReadFile(path)
 	if readErr != nil || !bytes.Equal(after, before) {
@@ -2134,15 +2134,85 @@ func TestRemoveProviderRetainsKeyForSurvivingCaseVariant(t *testing.T) {
 	if err := store.Set("work", "sk-survives"); err != nil {
 		t.Fatal(err)
 	}
-	cfg, removed, err := RemoveProviderAndKey(path, "work")
+	cfg, removedName, removed, err := RemoveProviderAndKey(path, "work")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed || len(cfg.Providers) != 1 || cfg.Providers[0].Name != "WORK" {
-		t.Fatalf("remove result: removed=%v cfg=%+v", removed, cfg)
+	if removedName != "work" || removed || len(cfg.Providers) != 1 || cfg.Providers[0].Name != "WORK" {
+		t.Fatalf("remove result: name=%q removed=%v cfg=%+v", removedName, removed, cfg)
 	}
 	if key, ok, err := store.Get("WORK"); err != nil || !ok || key != "sk-survives" {
 		t.Fatalf("surviving row credential = %q ok=%v err=%v", key, ok, err)
+	}
+}
+
+func TestRemoveProviderAndKeySerializesIdentityResolutionAndReassignment(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{
+		Name: "WORK", APIKeyStored: true,
+	}}}, 0o600)
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("WORK", "old-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	removalLocked := make(chan struct{})
+	continueRemoval := make(chan struct{})
+	originalAcquire := acquireProviderWriteLock
+	var once sync.Once
+	acquireProviderWriteLock = func(configPath string) (func() error, error) {
+		release, err := originalAcquire(configPath)
+		if err != nil {
+			return nil, err
+		}
+		once.Do(func() {
+			close(removalLocked)
+			<-continueRemoval
+		})
+		return release, nil
+	}
+	t.Cleanup(func() { acquireProviderWriteLock = originalAcquire })
+
+	removeDone := make(chan error, 1)
+	go func() {
+		_, removedName, keyRemoved, err := RemoveProviderAndKey(path, "work")
+		if err == nil && (removedName != "WORK" || !keyRemoved) {
+			err = fmt.Errorf("removal = %q, keyRemoved=%v; want WORK and true", removedName, keyRemoved)
+		}
+		removeDone <- err
+	}()
+	<-removalLocked
+
+	reassignDone := make(chan error, 1)
+	go func() {
+		_, err := CommitProviderProfile(path, ProviderCommit{Profile: ProviderProfile{
+			Name: "Work", APIKey: "new-key",
+		}})
+		reassignDone <- err
+	}()
+	select {
+	case err := <-reassignDone:
+		t.Fatalf("case-variant reassignment completed outside the removal transaction: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(continueRemoval)
+	if err := <-removeDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reassignDone; err != nil {
+		t.Fatal(err)
+	}
+	if key, ok, err := store.Get("Work"); err != nil || !ok || key != "new-key" {
+		t.Fatalf("reassigned credential = %q ok=%v err=%v, want new-key", key, ok, err)
+	}
+	final := readConfigFixture(t, path)
+	if len(final.Providers) != 1 || final.Providers[0].Name != "Work" || !final.Providers[0].APIKeyStored {
+		t.Fatalf("final config = %+v, want reassigned keyed row", final.Providers)
 	}
 }
 
@@ -2157,5 +2227,23 @@ func TestProviderConfigErrorsRedactSecrets(t *testing.T) {
 	}
 	if _, _, err := ProviderCredentialCandidates(path, "work"); err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("ProviderCredentialCandidates error leaked secret: %v", err)
+	}
+}
+
+func TestRepairExplicitSplitPreservesExactNamedSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{ActiveProvider: "other", Providers: []ProviderProfile{
+		{ProviderKind: ProviderKindOpenAI, Model: "gpt-4o"},
+		{Name: "other", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1", APIKey: "other-key"},
+	}}, 0600)
+	if _, _, err := RepairUnnamedProvider(path, "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := resolved.Provider; p.Name != "other" || p.Model != "gpt-4.1" || p.APIKey != "other-key" {
+		t.Fatal("explicit split changed the exact named selection")
 	}
 }

@@ -584,6 +584,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 		return m, "Model\n" + redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{target.APIKey}}), false, nil, nil
 	}
 	m.provider = next
+	m.removedLiveRow = ""
 	m.providerProfile = target
 	m.providerName = target.Name
 	m.modelName = target.Model
@@ -745,10 +746,14 @@ func oauthLoginName(profile config.ProviderProfile) (string, bool) {
 }
 
 // activeProviderRowName is the saved-row spelling this session actually runs on.
-// It is sessionRowName's answer — exact first, sole identity match otherwise —
+// A removed row keeps its identity until a provider switch. Otherwise use
+// sessionRowName: exact first, sole identity match otherwise,
 // so every "is this the provider I am on?" comparison uses one value instead of
 // each caller re-deciding what "active" means from a credential identity.
 func (m model) activeProviderRowName() string {
+	if m.removedLiveRow != "" {
+		return m.removedLiveRow
+	}
 	return sessionRowName(m.providerName, m.savedProviders)
 }
 
