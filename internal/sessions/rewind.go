@@ -66,14 +66,9 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 			// caller asked for. Corruption is a hard error.
 			return report, fmt.Errorf("decode checkpoint payload seq %d: %w", ev.Sequence, err)
 		}
-		checkpointRoot := strings.TrimSpace(payload.WorkspaceRoot)
-		if checkpointRoot == "" {
-			if imported {
-				return report, fmt.Errorf("checkpoint seq %d has no verified local workspace binding; refusing to rewind imported session", ev.Sequence)
-			}
-			// Legacy native-Zero checkpoints predate the binding field. Their
-			// session workspace was locally authored, so preserve compatibility.
-			checkpointRoot = workspaceRoot
+		checkpointRoot, err := store.trustedCheckpointRoot(payload, workspaceRoot, imported)
+		if err != nil {
+			return report, fmt.Errorf("checkpoint seq %d: %w", ev.Sequence, err)
 		}
 		for _, f := range payload.Files {
 			// Resolve/confine the target FIRST so the dedupe key below is the
@@ -138,6 +133,37 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 		}
 	}
 	return report, nil
+}
+
+func (store *Store) trustedCheckpointRoot(payload CheckpointPayload, requestedRoot string, imported bool) (string, error) {
+	boundRoot := strings.TrimSpace(payload.WorkspaceRoot)
+	if len(payload.WorkspaceBinding) > 0 {
+		verified, err := store.checkpointRootCrypter().Open(payload.WorkspaceBinding)
+		if err != nil {
+			return "", fmt.Errorf("verify local workspace binding: %w", err)
+		}
+		verifiedRoot := strings.TrimSpace(string(verified))
+		if verifiedRoot == "" || boundRoot == "" || !sessionWorkspacePathEqual(verifiedRoot, boundRoot) {
+			return "", fmt.Errorf("workspace root does not match its verified local binding")
+		}
+		return verifiedRoot, nil
+	}
+	if imported {
+		return "", fmt.Errorf("has no verified local workspace binding; refusing to rewind imported session")
+	}
+
+	// Native checkpoints written before WorkspaceBinding existed remain usable,
+	// but their event-supplied root gets no authority. It must either be absent or
+	// agree with the caller's trusted workspace, and restore stays under the
+	// caller-supplied root.
+	requestedRoot = strings.TrimSpace(requestedRoot)
+	if requestedRoot == "" {
+		return "", fmt.Errorf("has no trusted workspace root")
+	}
+	if boundRoot != "" && !sessionWorkspacePathEqual(boundRoot, requestedRoot) {
+		return "", fmt.Errorf("legacy workspace root does not match the requested workspace")
+	}
+	return requestedRoot, nil
 }
 
 // resolveWithinWorkspace joins rel to root and confirms the result stays inside
