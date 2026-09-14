@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -139,6 +140,20 @@ func TestImportWorkspaceWarningUsesWindowsCaseInsensitivePaths(t *testing.T) {
 	}
 	if got := importWorkspaceWarningForOS(`/Work/Other`, `/work/project`, "windows"); got == "" {
 		t.Fatal("different Windows paths produced no warning")
+	}
+}
+
+func TestImportWorkspaceWarningRecognizesNativeDirectoryAliases(t *testing.T) {
+	realDir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "project-alias")
+	if err := os.Symlink(realDir, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if got := importWorkspaceWarningForOS(realDir, alias, runtime.GOOS); got != "" {
+		t.Fatalf("same native directory through symlink produced warning: %q", got)
+	}
+	if got := importWorkspaceWarningForOS(realDir, t.TempDir(), runtime.GOOS); got == "" {
+		t.Fatal("distinct native directories produced no warning")
 	}
 }
 

@@ -1237,6 +1237,46 @@ func TestACPLoadUsesOperationalWorkspaceKeyForPersistedIdentity(t *testing.T) {
 }
 
 // drainText collects streamed chunks for a short window and concatenates them.
+func TestACPListAndLoadShareOperationalWorkspaceIdentity(t *testing.T) {
+	for _, createDisplay := range []bool{false, true} {
+		t.Run(fmt.Sprintf("display-exists-%v", createDisplay), func(t *testing.T) {
+			deps := testDeps(t)
+			root := t.TempDir()
+			operational := filepath.Join(root, "token-shaped-workspace")
+			display := filepath.Join(root, "[REDACTED]-workspace")
+			if err := os.MkdirAll(operational, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if createDisplay {
+				if err := os.MkdirAll(display, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			meta, err := deps.Store.Create(sessions.CreateInput{Cwd: display, WorkspaceKey: operational})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, deps)
+			defer h.stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			for _, params := range []ListSessionsParams{{}, {Cwd: operational}} {
+				var listed ListSessionsResult
+				if err := h.client.Call(ctx, MethodSessionList, params, &listed); err != nil {
+					t.Fatalf("session/list: %v", err)
+				}
+				if len(listed.Sessions) != 1 || listed.Sessions[0].Cwd != operational {
+					t.Fatalf("session/list = %+v, want operational cwd %q", listed.Sessions, operational)
+				}
+				if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: listed.Sessions[0].Cwd}, &LoadSessionResult{}); err != nil {
+					t.Fatalf("list-to-load round trip: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func drainText(t *testing.T, ch <-chan string) string {
 	t.Helper()
 	return drainTextUntil(t, ch, func(text string) bool {
@@ -1874,8 +1914,9 @@ func TestACPCompactedHistoryReplacesCompactedTurnsWithTheirSummary(t *testing.T)
 	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{{
 		Type: sessions.EventCompaction,
 		Payload: map[string]any{
-			"summary":      summary,
-			"preserveLast": 1,
+			"summary":       summary,
+			"preserveLast":  1,
+			"importedEvent": true,
 			"compactableEvents": []map[string]any{
 				{"id": appended[0].ID, "sequence": appended[0].Sequence},
 				{"id": appended[1].ID, "sequence": appended[1].Sequence},
@@ -1936,6 +1977,9 @@ func TestACPCompactedHistoryReplacesCompactedTurnsWithTheirSummary(t *testing.T)
 	if !strings.Contains(prompt, summary) {
 		t.Fatalf("resumed prompt lost the compaction summary:\n%s", prompt)
 	}
+	if !strings.Contains(prompt, sessions.ImportedBoundaryText("another agent's")) {
+		t.Fatalf("resumed prompt lost imported reference-only provenance:\n%s", prompt)
+	}
 	if strings.Contains(prompt, "compacted answer") {
 		t.Fatalf("resumed prompt replayed a compacted-away turn:\n%s", prompt)
 	}
@@ -1958,6 +2002,10 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredOccurrence(t *testing.T) {
 		// An older record spells the id "id" rather than "toolCallId".
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "bash", "id": "call-88", "arguments": `{"command":"go build"}`}},
 		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "bash", "id": "call-88", "status": "error", "output": "build failed"}},
+		// A foreign result with no structured outcome must not become success just
+		// because its prose happens to sound successful.
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "shell", "toolCallId": "call-unknown", "arguments": `{"command":"false"}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "shell", "toolCallId": "call-unknown", "status": "unknown", "output": "command completed successfully"}},
 		// A start with no result is an interrupted call, not a completed one.
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "grep", "toolCallId": "call-99", "arguments": `{"pattern":"TODO"}`}},
 		// No id at all: unpairable, so it must be skipped rather than replayed.
@@ -1985,6 +2033,8 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredOccurrence(t *testing.T) {
 		{UpdateToolCall, replayToolCallID(appended[3].ID), ToolStatusInProgress, nil},
 		{UpdateToolCallUpdate, replayToolCallID(appended[3].ID), ToolStatusFailed, nil},
 		{UpdateToolCall, replayToolCallID(appended[5].ID), ToolStatusInProgress, nil},
+		{UpdateToolCallUpdate, replayToolCallID(appended[5].ID), "", nil},
+		{UpdateToolCall, replayToolCallID(appended[7].ID), ToolStatusInProgress, nil},
 	}
 	for i, w := range wants {
 		select {

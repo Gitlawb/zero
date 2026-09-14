@@ -282,7 +282,12 @@ func pathsEqualForOS(left string, right string, goos string) bool {
 	if goos == "windows" {
 		return strings.EqualFold(left, right)
 	}
-	return left == right
+	if left == right {
+		return true
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 func cleanPathForOS(value string, goos string) string {

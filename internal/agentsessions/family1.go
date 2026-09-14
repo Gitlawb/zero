@@ -313,7 +313,10 @@ func parseTimestamp(value string) time.Time {
 // summarizeTitle collapses a prompt to a single short line. Runes, not bytes,
 // so a multi-byte character is never split into invalid UTF-8.
 func summarizeTitle(prompt string) string {
-	collapsed := strings.Join(strings.Fields(prompt), " ")
+	// Sanitize the complete source before shortening it. Cutting first can remove
+	// the suffix or closing quote that makes a credential recognizable and leave
+	// a secret-bearing fragment in the persisted title.
+	collapsed := strings.Join(strings.Fields(DisplayField(prompt)), " ")
 	if collapsed == "" {
 		return "untitled"
 	}
