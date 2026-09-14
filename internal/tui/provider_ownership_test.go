@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -17,14 +16,11 @@ import (
 func setTUIUserConfigRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	switch runtime.GOOS {
-	case "windows":
-		t.Setenv("APPDATA", root)
-	case "darwin":
-		t.Setenv("HOME", root)
-	default:
-		t.Setenv("XDG_CONFIG_HOME", root)
-	}
+	t.Setenv("HOME", root)
+	t.Setenv("APPDATA", root)
+	t.Setenv("LOCALAPPDATA", root)
+	t.Setenv("XDG_CACHE_HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", root)
 	configRoot, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatalf("UserConfigDir() error = %v", err)
@@ -48,7 +44,13 @@ func caseSiblingModel(t *testing.T, activeName string, builtProfiles *[]config.P
 	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 
-	configPath := filepath.Join(t.TempDir(), "config.json")
+	configPath, err := config.DefaultUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	userRow := config.ProviderProfile{
 		Name:         "work",
 		ProviderKind: config.ProviderKindOpenAICompatible,
@@ -391,4 +393,62 @@ func TestSyncSavedProviderModelPreservesTheRestOfTheProfile(t *testing.T) {
 	if saved[0].Model != "old" {
 		t.Fatalf("input slice mutated in place: %+v", saved[0])
 	}
+}
+
+func TestModelPickerAfterDeletingLiveProjectRow(t *testing.T) {
+	var built []config.ProviderProfile
+	m := caseSiblingModel(t, "WORK", &built)
+	wantUser := m.savedProviders[0]
+	t.Setenv("ZERO_PROVIDER", "WORK")
+	before, err := os.ReadFile(m.userConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = selectManagerRow(t, m, "WORK")
+	m = managerKey(t, m, testKeyText("d"))
+	next, cmd := m.handleProviderWizardKey(testKeyText("y"))
+	m = drainProviderManagerCmds(t, next, cmd)
+	assertUserRowUntouched(t, m, before)
+	if m.providerName != "WORK" || m.providerProfile.BaseURL != "https://project.example.com/v1" {
+		t.Fatal("deletion changed the running client")
+	}
+	if m.activeProviderRowName() != "WORK" || m.providerWizard.manageActiveName != "WORK" {
+		t.Error("deletion reassigned the live identity to the surviving user row")
+	}
+	m.providerWizard = nil
+	m.picker = m.newModelPicker()
+	if m.picker == nil {
+		t.Fatal("missing picker")
+	}
+	found := false
+	chosen := ""
+	for i, item := range m.picker.items {
+		if item.OwnerProvider == "work" && item.Value != "" {
+			m.picker.selected = i
+			chosen = item.Value
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("actual picker did not offer the surviving user model")
+	}
+	updated, _ := m.choosePicker()
+	m = updated.(model)
+	if len(built) == 0 {
+		t.Fatal("selection did not construct a provider")
+	}
+	p := built[len(built)-1]
+	if p.Name != "work" || p.BaseURL != "https://user.example.com/v1" || p.APIKey != "sk-user" {
+		t.Fatal("picker constructed the continuing project profile instead of the selected user profile")
+	}
+	if m.providerName != "work" || m.modelName != chosen || m.activeProviderRowName() != "work" || len(m.savedProviders) != 1 {
+		t.Fatal("live/saved identity did not follow selection")
+	}
+	cfg := readManagerConfig(t, m.userConfigPath)
+	if cfg.ActiveProvider != "work" || cfg.Providers[0].Model != chosen {
+		t.Fatal("user selection was not persisted")
+	}
+	wantUser.Model = chosen
+	assertUserProviderRowUnchanged(t, m, wantUser, "work")
 }

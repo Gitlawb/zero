@@ -102,7 +102,8 @@ func writeProviderNameRepair(path string, before FileConfig, after FileConfig) e
 // RepairUnnamedProvider gives legacy provider rows that predate required names
 // an explicit persisted identity. Older releases resolved one unnamed row as
 // activeProvider, falling back to "openai"; preserve that choice unless the
-// user supplies a replacement. Multiple unnamed rows are left untouched because
+// user supplies a replacement. Stored-key profiles cannot change credential
+// identity during repair. Multiple unnamed rows are left untouched because
 // selecting one would silently merge or discard profiles.
 //
 // The chosen name is returned rather than left for the caller to re-derive: the
@@ -131,25 +132,28 @@ func RepairUnnamedProvider(path string, replacement string) (result FileConfig, 
 			return fmt.Errorf("no unnamed persisted provider found")
 		}
 		activeName := strings.TrimSpace(cfg.ActiveProvider)
-		activeMatchesNamedRow := false
-		if activeName != "" {
-			for index := range cfg.Providers {
-				rowName := strings.TrimSpace(cfg.Providers[index].Name)
-				if rowName == "" {
-					continue
-				}
-				if rowName == activeName || sameProviderIdentity(rowName, activeName) {
-					activeMatchesNamedRow = true
-					break
-				}
+		// Establish legacy row ownership before changing its serialized name. The
+		// old merge materialized this name before exact-first active selection, so
+		// a case sibling cannot own the unnamed row's exact active selector.
+		legacyName := providerMergeName(*cfg, cfg.Providers[unnamed])
+		var legacyConfig FileConfig
+		mergeConfig(&legacyConfig, *cfg)
+		selected, lookup := LookupProviderName(ProviderProfileNames(legacyConfig.Providers), activeName)
+		unnamedWasActive := lookup.Resolved() && selected == legacyName
+		// An explicit split leaves an existing exact named selector on that row.
+		// Bare repair below instead preserves their legacy merged composition.
+		for index, profile := range cfg.Providers {
+			if index != unnamed && strings.TrimSpace(profile.Name) == activeName {
+				unnamedWasActive = false
+				break
 			}
 		}
+		activeMatchesNamedRow := lookup.Resolved() && !unnamedWasActive
 		name := strings.TrimSpace(replacement)
 		explicit := name != ""
 		if !explicit {
 			// Preserve the legacy exact-name composition inside the same lock
 			// and publication boundary as every other provider repair.
-			legacyName := providerMergeName(*cfg, cfg.Providers[unnamed])
 			for index, profile := range cfg.Providers {
 				if index == unnamed || strings.TrimSpace(profile.Name) != legacyName {
 					continue
@@ -167,12 +171,14 @@ func RepairUnnamedProvider(path string, replacement string) (result FileConfig, 
 				chosen = legacyName
 				return nil
 			}
-		}
-		if !explicit && !activeMatchesNamedRow {
-			name = activeName
-		}
-		if name == "" {
-			name = "openai"
+			// Preserve the legacy effective name unless the active selector belongs
+			// to a different row.
+			if !activeMatchesNamedRow {
+				name = activeName
+			}
+			if name == "" {
+				name = "openai"
+			}
 		}
 		if conflict, collides := conflictingProviderRowName(*cfg, unnamed, name); collides {
 			if explicit {
@@ -184,8 +190,11 @@ func RepairUnnamedProvider(path string, replacement string) (result FileConfig, 
 				"the unnamed provider would default to %q, which persisted provider %q already uses; rerun with `zero providers repair-config --name <unique-name>`",
 				name, conflict)
 		}
+		if cfg.Providers[unnamed].APIKeyStored && !sameProviderIdentity(legacyName, name) {
+			return fmt.Errorf("cannot rename the unnamed provider from %q to %q during repair: its stored credential is indexed by the old identity; repair with the legacy name first, or manually repair the config and credential together", legacyName, name)
+		}
 		cfg.Providers[unnamed].Name = name
-		if activeName != "" && !activeMatchesNamedRow {
+		if activeName != "" && unnamedWasActive {
 			cfg.ActiveProvider = name
 		}
 		chosen = name

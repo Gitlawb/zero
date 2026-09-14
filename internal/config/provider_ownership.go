@@ -186,3 +186,14 @@ func ProviderRowOwnershipAt(path string, resolvedNames []string, name string) (P
 	}
 	return ResolveProviderRowOwnership(providers, resolvedNames, name), nil
 }
+
+// ResolveProviderSourceNames loads and merges the identity-bearing sources with
+// the same trust checks as Resolve, without requiring runnable providers or an
+// active selection. Unusable rows still own their structural names.
+func ResolveProviderSourceNames(options ResolveOptions) ([]string, error) {
+	cfg, err := resolveSourceConfig(options)
+	if err != nil {
+		return nil, err
+	}
+	return ProviderProfileNames(cfg.Providers), nil
+}
