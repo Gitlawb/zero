@@ -247,7 +247,11 @@ func (log *activityLog) shorten(value string) string {
 	// lines or its tail. Truncating first can cut away the syntax that lets the
 	// shared redactor recognize a credential. Keep the established first-line
 	// activity policy after that complete-value pass.
-	collapsed := strings.Join(strings.Fields(firstLine(redact(value))), " ")
+	selected := firstLine(redact(value))
+	// DisplayField adds the presentation-only split-credential pass after the
+	// complete-value redactor has retained the established first-line boundary.
+	// Run it before Fields rejoins whitespace-separated credential fragments.
+	collapsed := strings.Join(strings.Fields(DisplayField(selected)), " ")
 	runes := []rune(collapsed)
 	if len(runes) <= limit {
 		return collapsed

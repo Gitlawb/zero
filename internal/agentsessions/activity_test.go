@@ -424,14 +424,19 @@ func TestTheActivityHeadlineIsTruncatedAfterItIsAssembled(t *testing.T) {
 
 func TestActivityItemsRedactCompleteValuesBeforeShortening(t *testing.T) {
 	secret := "ghp_" + strings.Repeat("Q", 36)
-	log := newActivityLog("/workspace")
-	log.observeCall("call", "bash", `{"command":"`+strings.Repeat("x", 105)+` `+secret+`"}`)
-	events := log.summaryEvents()
-	joined := ""
-	for _, event := range events {
-		joined += str(t, event, "content") + "\n"
-	}
-	if strings.Contains(joined, secret) || !strings.Contains(joined, "[REDACTED]") {
-		t.Fatalf("activity summary exposed a secret after shortening:\n%s", joined)
+	for _, presented := range []string{
+		secret,
+		"ghp_ " + strings.Repeat("Q", 36),
+	} {
+		log := newActivityLog("/workspace")
+		log.observeCall("call", "bash", `{"command":"`+strings.Repeat("x", 105)+` `+presented+`"}`)
+		events := log.summaryEvents()
+		joined := ""
+		for _, event := range events {
+			joined += str(t, event, "content") + "\n"
+		}
+		if strings.Contains(joined, secret) || !strings.Contains(joined, "[REDACTED]") {
+			t.Fatalf("activity summary exposed a secret after shortening:\n%s", joined)
+		}
 	}
 }

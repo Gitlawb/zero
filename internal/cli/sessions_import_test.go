@@ -141,6 +141,12 @@ func TestImportWorkspaceWarningUsesWindowsCaseInsensitivePaths(t *testing.T) {
 	if got := importWorkspaceWarningForOS(`/Work/Other`, `/work/project`, "windows"); got == "" {
 		t.Fatal("different Windows paths produced no warning")
 	}
+	if got := importWorkspaceWarningForOS(`C:`, `C:\`, "windows"); got == "" {
+		t.Fatal("drive-relative and drive-rooted Windows paths compared equal")
+	}
+	if got := importWorkspaceWarningForOS(`\\server\share`, `\server\share`, "windows"); got == "" {
+		t.Fatal("UNC and root-relative Windows paths compared equal")
+	}
 }
 
 func TestImportWorkspaceWarningRecognizesNativeDirectoryAliases(t *testing.T) {
