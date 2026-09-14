@@ -1319,6 +1319,7 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	if nextProvider != nil {
 		m.provider = nextProvider
 	}
+	m.removedLiveRow = ""
 	m.providerProfile = profile
 	m.providerName = profile.Name
 	m.modelName = profile.Model

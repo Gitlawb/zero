@@ -1704,6 +1704,72 @@ func TestApplyProviderWizardExportsActiveProviderEnv(t *testing.T) {
 	}
 }
 
+func TestApplyProviderWizardReplacesRemovedLiveRowIdentity(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: config.ProviderProfile{Name: "work"},
+		UserConfigPath:  configPath,
+	})
+	m.removedLiveRow = "work"
+	m.newProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) {
+		return &fakeProvider{}, nil
+	}
+	m.providerWizard = &providerWizardState{
+		step:        providerWizardStepModel,
+		profileName: "openai",
+		providers: []providercatalog.Descriptor{{
+			ID:             "openai",
+			Name:           "OpenAI",
+			Transport:      providercatalog.TransportOpenAICompatible,
+			DefaultBaseURL: "https://api.openai.com/v1",
+			DefaultModel:   "gpt-4.1",
+		}},
+		models: []providerWizardModel{{ID: "gpt-4.1"}},
+	}
+
+	updated, _ := m.applyProviderWizard()
+	next := updated
+	if next.removedLiveRow != "" {
+		t.Fatalf("removedLiveRow = %q, want cleared after wizard commits a new live provider", next.removedLiveRow)
+	}
+	next, _ = next.openProviderManager()
+	if got := next.providerWizard.manageActiveName; got != "openai" {
+		t.Fatalf("manageActiveName = %q, want wizard-committed provider openai", got)
+	}
+
+	for index, row := range next.providerWizard.manageRows {
+		if row.profile.Name == "openai" {
+			next.providerWizard.manageCursor = index
+			break
+		}
+	}
+	profile, ok := next.providerWizard.currentManagerRow()
+	if !ok || profile.profile.Name != "openai" {
+		t.Fatalf("wizard-committed provider missing from manager rows: %+v", next.providerWizard.manageRows)
+	}
+	next.providerWizard.beginProviderEdit(profile.profile, profile.owner)
+	next.providerWizard.editDraft.Name = "renamed-openai"
+	next, _ = next.saveManagerEdit()
+	if next.providerName != "renamed-openai" {
+		t.Fatalf("providerName = %q after rename, want renamed-openai", next.providerName)
+	}
+	if got := os.Getenv(config.ActiveProviderEnv); got != "renamed-openai" {
+		t.Fatalf("%s = %q after rename, want renamed-openai", config.ActiveProviderEnv, got)
+	}
+
+	next.providerWizard.manageCursor = 0
+	next, _ = next.deleteManagerSelection()
+	if next.removedLiveRow != "renamed-openai" {
+		t.Fatalf("removedLiveRow = %q after delete, want renamed live row", next.removedLiveRow)
+	}
+}
+
 // On a config PERSIST failure, applyProviderWizard must leave live state fully
 // unchanged — the chat must NOT already be running on the new provider while the
 // status line and the ZERO_PROVIDER export (which pins spawned children) still

@@ -1221,6 +1221,7 @@ func TestResumeHonorsPriorCompaction(t *testing.T) {
 	}
 
 	m := newModel(context.Background(), Options{SessionStore: store})
+	m.removedLiveRow = "stale-previous-provider"
 	next, _ := m.handleResumeCommand(session.SessionID)
 	// Resume must load the rehydrated (compaction-aware) context, not the raw log —
 	// matching the CLI's --resume and the in-TUI /compact reload. Compare contents,
@@ -1229,6 +1230,9 @@ func TestResumeHonorsPriorCompaction(t *testing.T) {
 	// slip past a length check.
 	if !reflect.DeepEqual(next.sessionEvents, rehydrated) {
 		t.Fatalf("resumed sessionEvents do not match the rehydrated context (resume must honor prior compaction)\nresumed:    %+v\nrehydrated: %+v\nraw:        %+v", next.sessionEvents, rehydrated, raw)
+	}
+	if next.removedLiveRow != "" {
+		t.Fatalf("removedLiveRow = %q, want cleared when resume supplies the live provider", next.removedLiveRow)
 	}
 }
 
