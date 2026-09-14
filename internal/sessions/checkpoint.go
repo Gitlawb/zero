@@ -128,6 +128,13 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 	if info, err := os.Stat(verifiedRoot); err != nil || !info.IsDir() {
 		return CheckpointPayload{}, false
 	}
+	// The event log is user-editable JSONL, so seal the locally verified root
+	// under a store-local key. Do this before writing any blobs: if the key is
+	// unavailable, fail before creating content no checkpoint event can reference.
+	workspaceBinding, err := store.checkpointRootCrypter().Seal([]byte(verifiedRoot))
+	if err != nil {
+		return CheckpointPayload{}, false
+	}
 	capBytes := int64(maxCheckpointBytes())
 	files := make([]CheckpointFile, 0, len(paths))
 	for _, rel := range paths {
@@ -188,13 +195,6 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 		files = append(files, entry)
 	}
 	if len(files) == 0 {
-		return CheckpointPayload{}, false
-	}
-	// The event log is user-editable JSONL. Seal the locally verified root under
-	// a store-local key so rewind can distinguish a root captured by Zero from a
-	// different absolute directory substituted into the checkpoint later.
-	workspaceBinding, err := store.checkpointRootCrypter().Seal([]byte(verifiedRoot))
-	if err != nil {
 		return CheckpointPayload{}, false
 	}
 	return CheckpointPayload{
