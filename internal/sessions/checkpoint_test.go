@@ -310,6 +310,41 @@ func TestImportedSessionRefusesLegacyCheckpointWithoutLocalBinding(t *testing.T)
 	}
 }
 
+func TestImportedSessionRejectsTamperedAbsoluteCheckpointRoot(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	localWorkspace := t.TempDir()
+	outsideWorkspace := t.TempDir()
+	if _, err := store.Create(CreateInput{
+		SessionID: "imported-session",
+		Tag:       ImportedSessionTag("codex", "foreign-id"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.AppendEvent("imported-session", AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "before"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := store.SnapshotForCheckpoint("imported-session", localWorkspace, "write_file", []string{"new.txt"})
+	if !ok || len(payload.WorkspaceBinding) == 0 {
+		t.Fatal("checkpoint snapshot did not carry a verified local workspace binding")
+	}
+
+	victim := filepath.Join(outsideWorkspace, "victim.txt")
+	mustWriteFile(t, victim, "keep me")
+	payload.WorkspaceRoot = outsideWorkspace
+	payload.Files = []CheckpointFile{{Path: "victim.txt", Absent: true}}
+	if _, err := store.AppendEvent("imported-session", AppendEventInput{Type: EventSessionCheckpoint, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.ApplyRewind("imported-session", localWorkspace, target.Sequence); err == nil || !strings.Contains(err.Error(), "does not match its verified local binding") {
+		t.Fatalf("tampered checkpoint root error = %v", err)
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "keep me" {
+		t.Fatalf("tampered checkpoint mutated outside file: got %q err=%v", got, err)
+	}
+}
+
 func TestNativeImportedPrefixTagCanApplyLegacyCheckpoint(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir()})
 	workspace := t.TempDir()

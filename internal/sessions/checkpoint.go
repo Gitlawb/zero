@@ -10,12 +10,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/securefile"
 )
 
 // CheckpointsDir is the per-session subdirectory holding content-addressed blobs.
 const CheckpointsDir = "checkpoints"
 
 const defaultMaxCheckpointBytes = 5 << 20 // 5 MiB
+
+const checkpointRootSecretFile = ".checkpoint-root.secret"
 
 // CheckpointFile records the before-mutation state of one workspace file.
 type CheckpointFile struct {
@@ -30,9 +34,10 @@ type CheckpointFile struct {
 // CheckpointPayload is the payload of an EventSessionCheckpoint event. It indexes
 // the before-state blobs captured for one mutating tool call.
 type CheckpointPayload struct {
-	Tool          string           `json:"tool"`
-	WorkspaceRoot string           `json:"workspaceRoot,omitempty"`
-	Files         []CheckpointFile `json:"files"`
+	Tool             string           `json:"tool"`
+	WorkspaceRoot    string           `json:"workspaceRoot,omitempty"`
+	WorkspaceBinding []byte           `json:"workspaceBinding,omitempty"`
+	Files            []CheckpointFile `json:"files"`
 }
 
 // CheckpointsEnabled reports whether checkpoint capture is enabled (default on;
@@ -185,7 +190,23 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 	if len(files) == 0 {
 		return CheckpointPayload{}, false
 	}
-	return CheckpointPayload{Tool: tool, WorkspaceRoot: verifiedRoot, Files: files}, true
+	// The event log is user-editable JSONL. Seal the locally verified root under
+	// a store-local key so rewind can distinguish a root captured by Zero from a
+	// different absolute directory substituted into the checkpoint later.
+	workspaceBinding, err := store.checkpointRootCrypter().Seal([]byte(verifiedRoot))
+	if err != nil {
+		return CheckpointPayload{}, false
+	}
+	return CheckpointPayload{
+		Tool:             tool,
+		WorkspaceRoot:    verifiedRoot,
+		WorkspaceBinding: workspaceBinding,
+		Files:            files,
+	}, true
+}
+
+func (store *Store) checkpointRootCrypter() *securefile.Crypter {
+	return securefile.NewCrypter(filepath.Join(store.RootDir, checkpointRootSecretFile))
 }
 
 // writeBlob stores content under its sha256 (content-addressed, deduplicated) and
