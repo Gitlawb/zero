@@ -274,6 +274,9 @@ func importWorkspaceWarningForOS(recorded string, working string, goos string) s
 }
 
 func pathsEqualForOS(left string, right string, goos string) bool {
+	if goos == "windows" && windowsPathCategory(left) != windowsPathCategory(right) {
+		return false
+	}
 	left = cleanPathForOS(left, goos)
 	right = cleanPathForOS(right, goos)
 	if left == "." || right == "." {
@@ -297,6 +300,23 @@ func pathsEqualForOS(left string, right string, goos string) bool {
 	leftInfo, leftErr := os.Stat(left)
 	rightInfo, rightErr := os.Stat(right)
 	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
+}
+
+func windowsPathCategory(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, `\`, "/"))
+	if len(value) >= 2 && value[1] == ':' && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) {
+		if len(value) >= 3 && value[2] == '/' {
+			return "drive-rooted"
+		}
+		return "drive-relative"
+	}
+	if strings.HasPrefix(value, "//") {
+		return "unc"
+	}
+	if strings.HasPrefix(value, "/") {
+		return "root-relative"
+	}
+	return "relative"
 }
 
 func cleanPathForOS(value string, goos string) string {
