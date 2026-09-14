@@ -124,7 +124,11 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, content)
+	restoreMode := os.FileMode(0o644)
+	if priorInfo != nil {
+		restoreMode = priorInfo.Mode().Perm()
+	}
+	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, content, restoreMode)
 	content = formatting.Content
 	finalContentKnown := formatting.ContentKnown
 	// Baseline the freshly written content so a later edit/overwrite in this

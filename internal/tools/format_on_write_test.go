@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -173,6 +174,58 @@ func TestFormatOnWriteReportsWhenFormatterFailureCannotBeRestored(t *testing.T) 
 	}
 	if notice := formatting.notice("a.go"); !strings.Contains(notice, "WARNING: a.go may not hold what was written") {
 		t.Fatalf("failed recovery notice = %q", notice)
+	}
+}
+
+func TestWriteFileRecreatesFormatterDeletedTargetWithOriginalMode(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	for _, tc := range []struct {
+		name      string
+		existing  bool
+		wantMode  os.FileMode
+		overwrite bool
+	}{
+		{name: "create", wantMode: 0o644},
+		{name: "overwrite", existing: true, wantMode: 0o751, overwrite: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			targetPath := filepath.Join(root, "a.go")
+			if tc.existing {
+				if err := os.WriteFile(targetPath, []byte("before\n"), tc.wantMode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			priorRunner := runFormatOnWriteCommand
+			runFormatOnWriteCommand = func(_ context.Context, _ string, _ []string, _ string) error {
+				if err := os.Remove(targetPath); err != nil {
+					t.Fatal(err)
+				}
+				return exec.ErrNotFound
+			}
+			t.Cleanup(func() { runFormatOnWriteCommand = priorRunner })
+
+			result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+				"path": "a.go", "content": "requested\n", "overwrite": tc.overwrite,
+			})
+			if result.Status != StatusOK {
+				t.Fatalf("write status = %s: %s", result.Status, result.Output)
+			}
+			content, err := os.ReadFile(targetPath)
+			if err != nil || string(content) != "requested\n" {
+				t.Fatalf("recreated content = %q, err=%v", content, err)
+			}
+			if runtime.GOOS != "windows" {
+				info, err := os.Stat(targetPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := info.Mode().Perm(); got != tc.wantMode {
+					t.Fatalf("recreated mode = %o, want %o", got, tc.wantMode)
+				}
+			}
+		})
 	}
 }
 

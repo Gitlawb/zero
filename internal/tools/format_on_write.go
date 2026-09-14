@@ -136,14 +136,18 @@ var readFormattedFile = readRootedFile
 // callers use maybeFormatWrittenFileScoped so a formatter cannot redirect the
 // final read or recovery write outside the configured write roots.
 func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) formatOnWriteResult {
-	return maybeFormatWrittenFileScoped(ctx, filepath.Dir(absolutePath), nil, absolutePath, writtenContent)
+	restoreMode := os.FileMode(0o644)
+	if info, err := os.Stat(absolutePath); err == nil {
+		restoreMode = info.Mode().Perm()
+	}
+	return maybeFormatWrittenFileScoped(ctx, filepath.Dir(absolutePath), nil, absolutePath, writtenContent, restoreMode)
 }
 
 // maybeFormatWrittenFileScoped runs the configured formatter and returns only
 // content verified through a descriptor-bound root. Formatter failures restore
 // writtenContent through that same root; if restoration or the final read
 // fails, ContentKnown is false and callers omit exact diff evidence.
-func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, scope PathScope, absolutePath string, writtenContent string) formatOnWriteResult {
+func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, scope PathScope, absolutePath string, writtenContent string, restoreMode os.FileMode) formatOnWriteResult {
 	unformatted := formatOnWriteResult{Content: writtenContent, ContentKnown: true}
 	if !formatOnWriteEnabled() {
 		return unformatted
@@ -168,7 +172,7 @@ func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, sco
 	arguments := append(append([]string(nil), command[1:]...), absolutePath)
 	if err := runFormatOnWriteCommand(formatCtx, binaryPath, arguments, filepath.Dir(absolutePath)); err != nil {
 		unformatted.Formatter = command[0]
-		if restoreErr := restoreFormattedFile(root, relativePath, writtenContent); restoreErr != nil {
+		if restoreErr := restoreFormattedFile(root, relativePath, writtenContent, restoreMode); restoreErr != nil {
 			unformatted.RestoreFailed = true
 			unformatted.ContentKnown = false
 		} else if restored, info, readErr := readFormattedFile(root, relativePath); readErr != nil {
@@ -191,8 +195,8 @@ func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, sco
 	return formatOnWriteResult{Content: string(formatted), ContentKnown: true, Info: info, Formatter: command[0]}
 }
 
-func restoreFormattedFile(root *os.Root, relativePath string, content string) error {
-	file, err := root.OpenFile(relativePath, os.O_WRONLY|os.O_TRUNC, 0)
+func restoreFormattedFile(root *os.Root, relativePath string, content string, mode os.FileMode) error {
+	file, err := root.OpenFile(relativePath, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, mode)
 	if err != nil {
 		return err
 	}
