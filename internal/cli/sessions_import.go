@@ -280,10 +280,19 @@ func pathsEqualForOS(left string, right string, goos string) bool {
 		return false
 	}
 	if goos == "windows" {
-		return strings.EqualFold(left, right)
-	}
-	if left == right {
+		if strings.EqualFold(left, right) {
+			return true
+		}
+	} else if left == right {
 		return true
+	}
+	// Semantic identity is meaningful only when goos describes the host running
+	// the comparison. Tests also exercise foreign path syntax (for example,
+	// Windows paths on Unix), where handing those strings to os.Stat would inspect
+	// unrelated host paths. On the native host, SameFile recognizes symlinks,
+	// junctions, short names, and other aliases that lexical cleaning cannot.
+	if goos != runtime.GOOS {
+		return false
 	}
 	leftInfo, leftErr := os.Stat(left)
 	rightInfo, rightErr := os.Stat(right)
