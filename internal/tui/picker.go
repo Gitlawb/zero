@@ -196,7 +196,11 @@ func (m model) newModelPicker() *commandPicker {
 		return nil
 	}
 	activeModel := strings.TrimSpace(m.modelName)
-	activeProvider := strings.TrimSpace(m.providerName)
+	// The saved ROW this session runs on, not the raw live spelling: a
+	// credential-identity comparison marked BOTH of a pair of case-sibling rows
+	// active, so the picker showed two "active" endpoints and gave no way to tell
+	// which one a selection would land on.
+	activeProvider := strings.TrimSpace(m.activeProviderRowName())
 	recent := []pickerItem{}
 	for _, pair := range m.recentModelPairsForPicker() {
 		recent = append(recent, m.modelPickerRecentItem(registry, pair.Provider, pair.Model))
@@ -282,7 +286,11 @@ func (m model) modelPickerProviders() []config.ProviderProfile {
 // active provider prefers its live-discovered models when available.
 func (m model) savedProviderModelPickerItems(profile config.ProviderProfile, activeProvider, activeModel string) []pickerItem {
 	providerName := strings.TrimSpace(profile.Name)
-	isActive := providerName != "" && strings.EqualFold(providerName, activeProvider)
+	// Exact row equality. activeProvider is already the resolved active ROW (see
+	// newModelPicker), and SameProviderIdentity here marked user "Target" and
+	// project "target" active at the same time — two rows with different
+	// endpoints, one badge each, and no way to tell them apart.
+	isActive := providerName != "" && providerName == strings.TrimSpace(activeProvider)
 	descriptor, hasDescriptor := m.descriptorForProfile(profile)
 	group := modelPickerProviderGroup(profile, descriptor, hasDescriptor)
 
