@@ -197,7 +197,6 @@ func TestRunProvidersRepairConfigMigratesLegacyActiveReference(t *testing.T) {
 
 func TestProviderRepairCommandsCanResolveIndependentLegacyNameProblems(t *testing.T) {
 	setCLIUserConfigRoot(t)
-	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{
