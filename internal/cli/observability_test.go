@@ -397,12 +397,23 @@ func TestRunSearchJSONRedactsQueryAndSessionMetadata(t *testing.T) {
 	}
 
 	session, err := store.Create(sessions.CreateInput{
-		SessionID:    "json_metadata_secret",
-		Title:        "Title " + metadataSecret,
-		Cwd:          "/repo/" + metadataSecret,
-		WorkspaceKey: "/raw-repo/" + metadataSecret,
-		ModelID:      "model-" + metadataSecret,
-		Provider:     "provider-token=" + metadataSecret,
+		SessionID:        "json_metadata_secret",
+		Title:            "Title " + metadataSecret,
+		Cwd:              "/repo/" + metadataSecret,
+		WorkspaceKey:     "/raw-repo/" + metadataSecret,
+		ModelID:          "model-" + metadataSecret,
+		SourceModelID:    "source-model-" + metadataSecret,
+		Provider:         "provider-token=" + metadataSecret,
+		Tag:              "tag-" + metadataSecret,
+		SpecUserComment:  "comment-" + metadataSecret,
+		SpecRejectReason: "reason-" + metadataSecret,
+		Goal: &sessions.Goal{
+			Objective:    "objective-" + metadataSecret,
+			Status:       sessions.GoalStatusBlocked,
+			CreatedAt:    "2026-06-04T18:00:00Z",
+			UpdatedAt:    "2026-06-04T18:00:00Z",
+			StatusReason: "blocked-by-" + metadataSecret,
+		},
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
