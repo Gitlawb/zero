@@ -1301,17 +1301,19 @@ func TestSSHConfigEnvironmentPrecedence(t *testing.T) {
 	home, sshDir := sshGPGNormalizationHome()
 	t.Setenv("SSH_KEY_DIR", filepath.Join(home, "inherited"))
 	for _, tc := range []struct {
-		name string
-		env  []string
-		want string
+		name  string
+		input string
+		env   []string
+		want  string
 	}{
-		{"inherited", nil, filepath.Join(home, "inherited", "work")},
-		{"override", []string{"SSH_KEY_DIR=" + filepath.Join(home, "command")}, filepath.Join(home, "command", "work")},
-		{"last override wins", []string{"SSH_KEY_DIR=ignored", "SSH_KEY_DIR=" + filepath.Join(home, "last")}, filepath.Join(home, "last", "work")},
-		{"empty override drops path", []string{"SSH_KEY_DIR="}, ""},
+		{"inherited", "${SSH_KEY_DIR}/work", nil, filepath.Join(home, "inherited", "work")},
+		{"override", "${SSH_KEY_DIR}/work", []string{"SSH_KEY_DIR=" + filepath.Join(home, "command")}, filepath.Join(home, "command", "work")},
+		{"last override wins", "${SSH_KEY_DIR}/work", []string{"SSH_KEY_DIR=ignored", "SSH_KEY_DIR=" + filepath.Join(home, "last")}, filepath.Join(home, "last", "work")},
+		{"empty override expands", "~/keys/${KEY_SUFFIX}", []string{"KEY_SUFFIX="}, filepath.Join(home, "keys")},
+		{"unset variable drops path", "${UNSET_VAR}/work", nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := expandSSHConfigPath("${SSH_KEY_DIR}/work", home, sshDir, tc.env...); got != tc.want {
+			if got := expandSSHConfigPath(tc.input, home, sshDir, tc.env...); got != tc.want {
 				t.Fatalf("expanded path = %q, want %q", got, tc.want)
 			}
 		})
@@ -1432,5 +1434,293 @@ func TestUnexpressibleNestedAllowReadPreservesParentCredentialDeny(t *testing.T)
 	gnupgNorm := normalizeProfilePath(gnupgDir)
 	if !denyListedExact(creds.Paths, gnupgNorm) {
 		t.Fatalf("unexpressible nested allowRead must preserve parent credential dir deny %q: got %v", gnupgNorm, creds.Paths)
+	}
+}
+
+func TestSSHDiscovery_DirectoryBindingAndReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows open directory handle holds a share lock preventing rename")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	externalDir := t.TempDir()
+	externalKey := filepath.Join(externalDir, "external_id_ed25519")
+	mustWriteFile(t, externalKey, "-----BEGIN OPENSSH PRIVATE KEY-----\ndummy\n-----END OPENSSH PRIVATE KEY-----\n")
+
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(sshDir, "my_custom_key")
+	if err := os.Symlink(externalKey, symlinkPath); err != nil {
+		t.Skipf("symlinks unsupported in this environment: %v", err)
+	}
+
+	var replacedDir string
+	testSSHWalkChildHook = func(dir string) {
+		if replacedDir != "" {
+			return
+		}
+		replacedDir = dir + "_aside"
+		if err := os.Rename(dir, replacedDir); err != nil {
+			t.Fatalf("rename aside: %v", err)
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir replacement: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "my_custom_key"), []byte("benign file"), 0o600); err != nil {
+			t.Fatalf("write benign file: %v", err)
+		}
+	}
+	defer func() {
+		testSSHWalkChildHook = nil
+		if replacedDir != "" {
+			_ = os.RemoveAll(sshDir)
+			_ = os.Rename(replacedDir, sshDir)
+		}
+	}()
+
+	scanner := &sshDiscovery{}
+	candidates := scanner.privateKeyDenyCandidates(home)
+
+	if len(scanner.errors) == 0 && !denyCovered(candidates, externalKey) {
+		t.Fatalf("directory replacement was silently ignored without protecting external key: candidates=%v, errors=%v", candidates, scanner.errors)
+	}
+
+	testSSHWalkChildHook = nil
+	_ = os.RemoveAll(sshDir)
+	if err := os.Rename(replacedDir, sshDir); err != nil {
+		t.Fatalf("restore dir: %v", err)
+	}
+	replacedDir = ""
+
+	controlScanner := &sshDiscovery{}
+	controlCandidates := controlScanner.privateKeyDenyCandidates(home)
+	if len(controlScanner.errors) != 0 {
+		t.Fatalf("unchanged directory control returned errors: %v", controlScanner.errors)
+	}
+	if !denyCovered(controlCandidates, externalKey) {
+		t.Fatalf("unchanged directory control must discover external key %q: got %v", externalKey, controlCandidates)
+	}
+}
+
+func TestSSHConfig_RelativeIdentityFileWorkingDir(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	projectDir := t.TempDir()
+
+	projectKey := filepath.Join(projectDir, "keys", "work")
+	mustWriteFile(t, projectKey, "-----BEGIN OPENSSH PRIVATE KEY-----\nproject\n-----END OPENSSH PRIVATE KEY-----\n")
+
+	decoyKey := filepath.Join(sshDir, "keys", "work")
+	mustWriteFile(t, decoyKey, "decoy benign file")
+
+	externalKey := filepath.Join(t.TempDir(), "included_key")
+	mustWriteFile(t, externalKey, "-----BEGIN OPENSSH PRIVATE KEY-----\nincluded\n-----END OPENSSH PRIVATE KEY-----\n")
+
+	configPath := filepath.Join(sshDir, "config")
+	includeDir := filepath.Join(sshDir, "configs")
+	mustWriteFile(t, filepath.Join(includeDir, "sub.conf"), "IdentityFile "+filepath.ToSlash(externalKey)+"\n")
+	mustWriteFile(t, configPath, "IdentityFile keys/work\nInclude configs/*.conf\n")
+
+	scanner := &sshDiscovery{workingDir: projectDir}
+	candidates := scanner.privateKeyDenyCandidates(home)
+
+	normProjectKey := normalizeProfilePath(projectKey)
+	normDecoyKey := normalizeProfilePath(decoyKey)
+	normExternalKey := normalizeProfilePath(externalKey)
+
+	if !denyCovered(candidates, normProjectKey) {
+		t.Fatalf("expected IdentityFile keys/work to resolve relative to working directory %q: candidates=%v", normProjectKey, candidates)
+	}
+	if denyCovered(candidates, normDecoyKey) {
+		t.Fatalf("decoy key under ~/.ssh must not be discovered: %v", candidates)
+	}
+	if !denyCovered(candidates, normExternalKey) {
+		t.Fatalf("expected Include relative pattern to resolve from ~/.ssh and discover %q: candidates=%v", normExternalKey, candidates)
+	}
+
+	options := credentialPathOptions{
+		Homes:      []string{home},
+		ConfigDirs: []string{filepath.Join(home, ".config")},
+		BaseDirs:   []string{projectDir},
+	}
+	creds := credentialDenyReadPathsIn(options, []string{projectDir})
+	if denyCovered(creds.Paths, normProjectKey) {
+		t.Fatalf("workspace key under allowed projectDir must be filtered out by AllowRead: %v", creds.Paths)
+	}
+	if !denyCovered(creds.Paths, normExternalKey) {
+		t.Fatalf("external key must remain denied despite workspace allowRead: %v", creds.Paths)
+	}
+}
+
+func TestSSHConfig_EqualsSeparatorWhitespace(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	externalDir := t.TempDir()
+
+	keyWithEquals := filepath.Join(externalDir, "key=work")
+	mustWriteFile(t, keyWithEquals, "-----BEGIN OPENSSH PRIVATE KEY-----\nequals\n-----END OPENSSH PRIVATE KEY-----\n")
+
+	subConfWithEquals := filepath.Join(externalDir, "sub=conf.conf")
+	mustWriteFile(t, subConfWithEquals, "IdentityFile "+filepath.ToSlash(keyWithEquals)+"\n")
+
+	cases := []struct {
+		directive string
+		wantKey   string
+		wantVal   []string
+	}{
+		{"IdentityFile /path/to/key", "identityfile", []string{"/path/to/key"}},
+		{"IdentityFile=/path/to/key", "identityfile", []string{"/path/to/key"}},
+		{"IdentityFile =/path/to/key", "identityfile", []string{"/path/to/key"}},
+		{"IdentityFile= /path/to/key", "identityfile", []string{"/path/to/key"}},
+		{"IdentityFile = /path/to/key", "identityfile", []string{"/path/to/key"}},
+		{"IdentityFile =/path/to/key=work", "identityfile", []string{"/path/to/key=work"}},
+		{"Include /path/to/conf", "include", []string{"/path/to/conf"}},
+		{"Include=/path/to/conf", "include", []string{"/path/to/conf"}},
+		{"Include =/path/to/conf", "include", []string{"/path/to/conf"}},
+		{"Include= /path/to/conf", "include", []string{"/path/to/conf"}},
+		{"Include = /path/to/conf", "include", []string{"/path/to/conf"}},
+		{"Include =/path/to/sub=conf", "include", []string{"/path/to/sub=conf"}},
+	}
+	for _, tc := range cases {
+		key, vals := parseSSHDirective(tc.directive)
+		if key != tc.wantKey || len(vals) != len(tc.wantVal) || vals[0] != tc.wantVal[0] {
+			t.Fatalf("parseSSHDirective(%q) = (%q, %v), want (%q, %v)", tc.directive, key, vals, tc.wantKey, tc.wantVal)
+		}
+	}
+
+	configPath := filepath.Join(sshDir, "config")
+	mustWriteFile(t, configPath, fmt.Sprintf("Include =%s\nIdentityFile =%s\n", filepath.ToSlash(subConfWithEquals), filepath.ToSlash(keyWithEquals)))
+
+	scanner := &sshDiscovery{}
+	candidates := scanner.privateKeyDenyCandidates(home)
+	if !denyCovered(candidates, normalizeProfilePath(keyWithEquals)) {
+		t.Fatalf("expected discovery with '=' separators to find %q: candidates=%v", keyWithEquals, candidates)
+	}
+}
+
+func TestSSHConfig_PreserveEmbeddedHashInFilename(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	externalDir := t.TempDir()
+
+	keyWithHash := filepath.Join(externalDir, "key#work")
+	mustWriteFile(t, keyWithHash, "-----BEGIN OPENSSH PRIVATE KEY-----\nhash\n-----END OPENSSH PRIVATE KEY-----\n")
+
+	confWithHash := filepath.Join(externalDir, "config#work")
+	mustWriteFile(t, confWithHash, "IdentityFile "+filepath.ToSlash(keyWithHash)+" # trailing comment\n")
+
+	truncatedConf := filepath.Join(externalDir, "config")
+	_ = os.Remove(truncatedConf)
+	truncatedKey := filepath.Join(externalDir, "key")
+	_ = os.Remove(truncatedKey)
+
+	configPath := filepath.Join(sshDir, "config")
+	mustWriteFile(t, configPath, fmt.Sprintf("# Full line comment\nInclude %s\n", filepath.ToSlash(confWithHash)))
+
+	scanner := &sshDiscovery{}
+	candidates := scanner.privateKeyDenyCandidates(home)
+	if len(scanner.errors) != 0 {
+		t.Fatalf("unexpected discovery errors: %v", scanner.errors)
+	}
+	if !denyCovered(candidates, normalizeProfilePath(keyWithHash)) {
+		t.Fatalf("expected discovery to preserve embedded hash and find %q: candidates=%v", keyWithHash, candidates)
+	}
+}
+
+func TestSSHDiscovery_EnvironmentLookupEmptyVsUnset(t *testing.T) {
+	home, sshDir := sshGPGNormalizationHome()
+	externalKey := filepath.Join(home, "external", "key")
+	t.Setenv("SSH_INHERITED_VAR", filepath.Join(home, "inherited"))
+	t.Setenv("SSH_INHERITED_EMPTY", "")
+
+	if got := expandSSHConfigPath("${SSH_INHERITED_VAR}/key", home, sshDir); got != filepath.Join(home, "inherited", "key") {
+		t.Fatalf("nonempty inherited value = %q, want %q", got, filepath.Join(home, "inherited", "key"))
+	}
+	if got := expandSSHConfigPath("${SSH_INHERITED_EMPTY}"+externalKey, home, sshDir); got != externalKey {
+		t.Fatalf("inherited empty value = %q, want %q", got, externalKey)
+	}
+	if got := expandSSHConfigPath("${SSH_CMD_VAR}/key", home, sshDir, "SSH_CMD_VAR="+filepath.Join(home, "cmd")); got != filepath.Join(home, "cmd", "key") {
+		t.Fatalf("command-only value = %q, want %q", got, filepath.Join(home, "cmd", "key"))
+	}
+	if got := expandSSHConfigPath("${SSH_INHERITED_VAR}"+externalKey, home, sshDir, "SSH_INHERITED_VAR="); got != externalKey {
+		t.Fatalf("empty override over inherited = %q, want %q", got, externalKey)
+	}
+	if got := expandSSHConfigPath("${SSH_CMD_VAR}"+externalKey, home, sshDir, "SSH_CMD_VAR=/cmd", "SSH_CMD_VAR="); got != externalKey {
+		t.Fatalf("duplicate command entries last empty = %q, want %q", got, externalKey)
+	}
+	if got := expandSSHConfigPath("${DEFINITELY_UNSET_VAR_123}/key", home, sshDir); got != "" {
+		t.Fatalf("unset variable must drop path, got %q", got)
+	}
+
+	testHome := t.TempDir()
+	testSSHDir := filepath.Join(testHome, ".ssh")
+	realKey := filepath.Join(testHome, "real_key")
+	mustWriteFile(t, realKey, "-----BEGIN OPENSSH PRIVATE KEY-----\nreal\n-----END OPENSSH PRIVATE KEY-----\n")
+	t.Setenv("SSH_PREFIX", filepath.Join(testHome, "fake_prefix"))
+	mustWriteFile(t, filepath.Join(testSSHDir, "config"), "IdentityFile ${SSH_PREFIX}"+filepath.ToSlash(realKey)+"\n")
+
+	options := credentialPathOptionsFromEnvironment([]string{testHome}, []string{"HOME=" + testHome, "USERPROFILE=" + testHome, "SSH_PREFIX="})
+	creds := credentialDenyReadPathsIn(options, nil)
+	if len(creds.DiscoveryErrors) != 0 {
+		t.Fatalf("unexpected discovery errors: %v", creds.DiscoveryErrors)
+	}
+	if !denyCovered(creds.Paths, normalizeProfilePath(realKey)) {
+		t.Fatalf("expected command env empty override to resolve real_key: %v", creds.Paths)
+	}
+}
+
+func TestSSHInclude_GlobErrorPropagation(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+
+	absentScanner := &sshDiscovery{}
+	mustWriteFile(t, filepath.Join(sshDir, "config"), "Include /nonexistent/dir/*.conf\n")
+	_ = absentScanner.privateKeyDenyCandidates(home)
+	if len(absentScanner.errors) != 0 {
+		t.Fatalf("absent optional Include must not produce errors, got: %v", absentScanner.errors)
+	}
+
+	emptyDir := t.TempDir()
+	emptyScanner := &sshDiscovery{}
+	mustWriteFile(t, filepath.Join(sshDir, "config"), fmt.Sprintf("Include %s/*.conf\n", filepath.ToSlash(emptyDir)))
+	_ = emptyScanner.privateKeyDenyCandidates(home)
+	if len(emptyScanner.errors) != 0 {
+		t.Fatalf("empty matching directory must not produce errors, got: %v", emptyScanner.errors)
+	}
+
+	if runtime.GOOS != "windows" {
+		unreadableDir := t.TempDir()
+		mustWriteFile(t, filepath.Join(unreadableDir, "sub.conf"), "IdentityFile /some/key\n")
+		if err := os.Chmod(unreadableDir, 0o111); err == nil {
+			defer os.Chmod(unreadableDir, 0o700)
+			unreadableScanner := &sshDiscovery{}
+			mustWriteFile(t, filepath.Join(sshDir, "config"), fmt.Sprintf("Include %s/*.conf\n", filepath.ToSlash(unreadableDir)))
+			_ = unreadableScanner.privateKeyDenyCandidates(home)
+			if len(unreadableScanner.errors) == 0 {
+				t.Fatalf("unreadable Include directory must report discovery errors")
+			}
+		}
+	}
+
+	faultScanner := &sshDiscovery{}
+	testSSHIncludeGlobHook = func(dir string) error {
+		return os.ErrPermission
+	}
+	defer func() { testSSHIncludeGlobHook = nil }()
+
+	mustWriteFile(t, filepath.Join(sshDir, "config"), fmt.Sprintf("Include %s/*.conf\n", filepath.ToSlash(emptyDir)))
+	_ = faultScanner.privateKeyDenyCandidates(home)
+	if len(faultScanner.errors) == 0 {
+		t.Fatalf("expected fault-injected glob failure to produce discovery error")
+	}
+
+	options := credentialPathOptions{
+		Homes:          []string{home},
+		SSHEnvironment: nil,
+	}
+	creds := credentialDenyReadPathsIn(options, nil)
+	if len(creds.DiscoveryErrors) == 0 {
+		t.Fatalf("expected discovery error to propagate into profile.DiscoveryErrors")
 	}
 }

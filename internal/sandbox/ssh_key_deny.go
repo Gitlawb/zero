@@ -58,8 +58,9 @@ var sshSupportDirectives = map[string]bool{
 // ~/.ssh are discovered by parsing ~/.ssh/config (and Include) for IdentityFile
 // and the other path-valued directives.
 type sshDiscovery struct {
-	errors []string
-	env    []string
+	errors     []string
+	env        []string
+	workingDir string
 }
 
 func (s *sshDiscovery) fail(path, reason string) {
@@ -80,6 +81,8 @@ func (s *sshDiscovery) privateKeyDenyCandidates(home string) []string {
 	candidates = append(candidates, s.collectConfigPaths(filepath.Join(sshDir, "config"), home, sshDir, make(map[string]bool), 0)...)
 	return candidates
 }
+
+var testSSHWalkChildHook func(dir string)
 
 func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 	var out []string
@@ -102,8 +105,13 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 			}
 			return
 		}
+		defer root.Close()
+		rootStat, err := root.Stat(".")
+		if err != nil {
+			s.fail(dir, err.Error())
+			return
+		}
 		d, err := root.Open(".")
-		_ = root.Close()
 		if err != nil {
 			s.fail(dir, err.Error())
 			return
@@ -115,28 +123,49 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 				s.fail(dir, err.Error())
 				return
 			}
+			if testSSHWalkChildHook != nil {
+				testSSHWalkChildHook(dir)
+			}
+			// Verify directory identity has not changed since opening root.
+			dirStat, statErr := os.Lstat(dir)
+			if statErr != nil || !os.SameFile(dirStat, rootStat) {
+				s.fail(dir, "directory identity changed during inspection")
+				return
+			}
 			for _, entry := range entries {
 				name := entry.Name()
 				if name == "." || name == ".." {
 					continue
 				}
-				path := filepath.Join(dir, name)
-				info, err := os.Lstat(path)
+				info, err := root.Lstat(name)
 				if err != nil {
-					s.fail(path, err.Error())
+					s.fail(filepath.Join(dir, name), err.Error())
 					continue
 				}
+				path := filepath.Join(dir, name)
 				mode := info.Mode()
 				if mode.Type() == os.ModeSymlink {
-					targetStat, err := os.Stat(path)
+					target, err := root.Readlink(name)
+					if err != nil {
+						s.fail(path, err.Error())
+						continue
+					}
+					targetPath := target
+					if !filepath.IsAbs(targetPath) {
+						targetPath = filepath.Join(dir, target)
+					}
+					targetStat, err := os.Stat(targetPath)
 					if err == nil && targetStat.IsDir() {
-						pending = append(pending, path)
+						pending = append(pending, targetPath)
 						continue
 					}
 					// Inspect leaf symlinks (bounded, specials rejected) so a
 					// custom-named link to a PEM/OpenSSH key is still denied.
-					if isSSHPrivateKeyFileName(name) || s.fileLooksLikePrivateKey(path) {
+					if isSSHPrivateKeyFileName(name) || isSSHPrivateKeyFileName(filepath.Base(targetPath)) || s.fileLooksLikePrivateKey(targetPath) {
 						out = append(out, path)
+						if targetPath != path {
+							out = append(out, targetPath)
+						}
 					}
 					continue
 				}
@@ -147,7 +176,7 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 				if !mode.IsRegular() {
 					continue
 				}
-				if isSSHPrivateKeyFileName(name) || s.fileLooksLikePrivateKey(path) {
+				if isSSHPrivateKeyFileName(name) || s.rootFileLooksLikePrivateKey(root, name, path) {
 					out = append(out, path)
 				}
 			}
@@ -200,6 +229,32 @@ func sshKnownHostsFamilyName(name string) bool {
 		return true
 	}
 	return false
+}
+
+func (s *sshDiscovery) rootFileLooksLikePrivateKey(root *os.Root, name, path string) bool {
+	f, err := root.Open(name)
+	if err != nil {
+		s.fail(path, err.Error())
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, sshPrivateKeySniffBytes))
+	if err != nil {
+		s.fail(path, err.Error())
+		return false
+	}
+	content := strings.TrimSpace(string(data))
+	if strings.HasPrefix(content, "PuTTY-User-Key-File") {
+		return true
+	}
+	if !strings.HasPrefix(content, "-----BEGIN ") {
+		return false
+	}
+	return strings.Contains(content, "PRIVATE KEY")
 }
 
 func (s *sshDiscovery) fileLooksLikePrivateKey(path string) bool {
@@ -292,7 +347,7 @@ func (s *sshDiscovery) collectConfigPaths(path, home, sshDir string, seen map[st
 			continue
 		}
 		for _, raw := range values {
-			expanded := expandSSHConfigPath(raw, home, sshDir, s.env...)
+			expanded := expandSSHConfigPath(raw, home, s.effectiveWorkingDir(sshDir), s.env...)
 			if expanded == "" {
 				continue
 			}
@@ -311,6 +366,13 @@ func (s *sshDiscovery) collectConfigPaths(path, home, sshDir string, seen map[st
 	return out
 }
 
+func (s *sshDiscovery) effectiveWorkingDir(fallback string) string {
+	if strings.TrimSpace(s.workingDir) != "" {
+		return s.workingDir
+	}
+	return fallback
+}
+
 func sshConfigIdentity(path string) string {
 	if n := normalizeProfilePath(path); n != "" {
 		return n
@@ -322,18 +384,114 @@ func sshConfigIdentity(path string) string {
 	return cleaned
 }
 
+var testSSHIncludeGlobHook func(dir string) error
+
 func (s *sshDiscovery) includePaths(pattern, home, sshDir string) []string {
 	expanded := expandSSHConfigPath(pattern, home, sshDir, s.env...)
 	if expanded == "" {
 		return nil
 	}
-	matches, err := filepath.Glob(expanded)
-	if err != nil || len(matches) == 0 {
+	matches := s.globIncludePaths(expanded)
+	if len(matches) == 0 {
 		return nil
 	}
 	if len(matches) > sshIncludeMatchCap {
 		s.fail(expanded, "config Include match limit exceeded")
 		return nil
+	}
+	return matches
+}
+
+func hasGlobMagic(path string) bool {
+	return strings.ContainsAny(path, "*?[]")
+}
+
+func cleanGlobDir(dir string) string {
+	if dir == "" {
+		return "."
+	}
+	cleaned := filepath.Clean(dir)
+	if cleaned == "" {
+		return "."
+	}
+	return cleaned
+}
+
+func (s *sshDiscovery) globIncludePaths(pattern string) []string {
+	if !hasGlobMagic(pattern) {
+		if testSSHIncludeGlobHook != nil {
+			if err := testSSHIncludeGlobHook(pattern); err != nil {
+				s.fail(pattern, err.Error())
+				return nil
+			}
+		}
+		info, err := os.Lstat(pattern)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			s.fail(pattern, err.Error())
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		return []string{pattern}
+	}
+
+	dir, file := filepath.Split(pattern)
+	dir = cleanGlobDir(dir)
+
+	var parentDirs []string
+	if hasGlobMagic(dir) {
+		parentDirs = s.globIncludePaths(dir)
+	} else {
+		parentDirs = []string{dir}
+	}
+
+	var matches []string
+	for _, parent := range parentDirs {
+		if testSSHIncludeGlobHook != nil {
+			if err := testSSHIncludeGlobHook(parent); err != nil {
+				s.fail(parent, err.Error())
+				continue
+			}
+		}
+		fi, err := os.Stat(parent)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			s.fail(parent, err.Error())
+			continue
+		}
+		if !fi.IsDir() {
+			continue
+		}
+		f, err := os.Open(parent)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			s.fail(parent, err.Error())
+			continue
+		}
+		names, err := f.Readdirnames(-1)
+		_ = f.Close()
+		if err != nil && err != io.EOF {
+			s.fail(parent, err.Error())
+			continue
+		}
+		for _, name := range names {
+			matched, err := filepath.Match(file, name)
+			if err != nil {
+				s.fail(pattern, err.Error())
+				return nil
+			}
+			if matched {
+				matches = append(matches, filepath.Join(parent, name))
+			}
+		}
 	}
 	return matches
 }
@@ -350,10 +508,19 @@ func parseSSHDirective(line string) (string, []string) {
 	first := tokens[0]
 	rest := tokens[1:]
 	if i := strings.IndexByte(first, '='); i > 0 {
-		rest = append([]string{first[i+1:]}, rest...)
+		val := first[i+1:]
 		first = first[:i]
-		if rest[0] == "" {
+		if val != "" {
+			rest = append([]string{val}, rest...)
+		}
+	} else if len(rest) > 0 {
+		if rest[0] == "=" {
 			rest = rest[1:]
+		} else if strings.HasPrefix(rest[0], "=") {
+			rest[0] = rest[0][1:]
+			if rest[0] == "" {
+				rest = rest[1:]
+			}
 		}
 	}
 	key := strings.ToLower(first)
@@ -400,8 +567,10 @@ func splitSSHTokens(s string) []string {
 		case ' ', '\t':
 			flush()
 		case '#':
-			flush()
-			return out
+			if cur.Len() == 0 {
+				return out
+			}
+			cur.WriteByte(c)
 		default:
 			cur.WriteByte(c)
 		}
@@ -483,8 +652,8 @@ func expandSSHConfigPathEnv(value, home string, env ...string) (string, bool) {
 		if name == "HOME" {
 			b.WriteString(home)
 		} else {
-			val := sshDiscoveryEnvValue(env, name)
-			if val == "" {
+			val, ok := sshDiscoveryEnvValue(env, name)
+			if !ok {
 				return "", false
 			}
 			b.WriteString(val)
@@ -495,14 +664,14 @@ func expandSSHConfigPathEnv(value, home string, env ...string) (string, bool) {
 
 // Command overrides use last-entry precedence, including an explicitly empty
 // value. Only a missing override falls back to the inherited environment.
-func sshDiscoveryEnvValue(env []string, key string) string {
+func sshDiscoveryEnvValue(env []string, key string) (string, bool) {
 	for i := len(env) - 1; i >= 0; i-- {
 		name, value, ok := strings.Cut(env[i], "=")
 		if ok && name == key {
-			return value
+			return value, true
 		}
 	}
-	return os.Getenv(key)
+	return os.LookupEnv(key)
 }
 
 func sshEnvVarStart(c byte) bool {

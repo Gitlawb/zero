@@ -468,6 +468,7 @@ func credentialPathOptionsFromEnvironment(baseDirs []string, env []string) crede
 		SSHEnvironment:     append([]string(nil), env...),
 		Homes:              homes,
 		GPGHomes:           resolveCredentialOverridePaths(credentialEnvValue(env, "GNUPGHOME"), baseDirs),
+		BaseDirs:           append([]string(nil), baseDirs...),
 		ConfigDirs:         dedupeStrings(configDirs),
 		CloudSDKConfigDirs: dedupeStrings(cloudSDKConfigDirs),
 		GoogleCredentials:  resolveCredentialOverridePaths(credentialEnvValue(env, "GOOGLE_APPLICATION_CREDENTIALS"), baseDirs),
@@ -497,6 +498,7 @@ type credentialPathOptions struct {
 	SSHEnvironment     []string
 	Homes              []string
 	GPGHomes           []string
+	BaseDirs           []string
 	ConfigDirs         []string
 	CloudSDKConfigDirs []string
 	GoogleCredentials  []string
@@ -533,7 +535,11 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	var dirs []string
 	var lexicalCandidates []string
 	var lexicalDirs []string
-	scanner := &sshDiscovery{env: options.SSHEnvironment}
+	var workingDir string
+	if len(options.BaseDirs) > 0 {
+		workingDir = options.BaseDirs[0]
+	}
+	scanner := &sshDiscovery{env: options.SSHEnvironment, workingDir: workingDir}
 	var sshFiles []string
 	for _, home := range options.Homes {
 		if strings.TrimSpace(home) == "" {
