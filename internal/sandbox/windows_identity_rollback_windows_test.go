@@ -21,6 +21,8 @@ func stubWindowsProvisioning(t *testing.T, existed bool, groupErr error, offline
 	prevManaged := windowsSandboxUserIsManagedFn
 	prevOffline := addWindowsSandboxUserToOfflineGroupFn
 	prevReset := resetWindowsSandboxUserPasswordFn
+	prevRemove, prevUpgrade := removeWindowsSandboxIdentityFn, upgradeWindowsSandboxUserCommentFn
+	stubbedWindowsIdentityRemovals = nil
 	t.Cleanup(func() {
 		ensureWindowsSandboxGroupFn, ensureWindowsSandboxUserFn = prevGroup, prevUser
 		ensureWindowsSandboxOfflineGroupFn = prevOfflineGroup
@@ -28,8 +30,18 @@ func stubWindowsProvisioning(t *testing.T, existed bool, groupErr error, offline
 		windowsSandboxUserIsManagedFn = prevManaged
 		addWindowsSandboxUserToOfflineGroupFn = prevOffline
 		resetWindowsSandboxUserPasswordFn = prevReset
+		removeWindowsSandboxIdentityFn, upgradeWindowsSandboxUserCommentFn = prevRemove, prevUpgrade
 	})
 
+	// THE INVERSE IS FAKED TOO. Creation is faked and ownership is faked, so a
+	// rollback branch that trusts both would otherwise call the real NetUserDel
+	// on the current user's deterministic principal for C:ws, an account this
+	// fixture never created. Removals are recorded for the tests to assert on.
+	removeWindowsSandboxIdentityFn = func(username, workspaceKey string) error {
+		stubbedWindowsIdentityRemovals = append(stubbedWindowsIdentityRemovals, username+"|"+workspaceKey)
+		return nil
+	}
+	upgradeWindowsSandboxUserCommentFn = func(string, string) error { return nil }
 	ensureWindowsSandboxGroupFn = func() error { return nil }
 	ensureWindowsSandboxOfflineGroupFn = func() error { return nil }
 	// Adopted accounts are ours in these tests; the ownership check is a real
@@ -185,3 +197,7 @@ func TestWindowsACLAllowReadGrantsNoDelete(t *testing.T) {
 		}
 	}
 }
+
+// stubbedWindowsIdentityRemovals records every account deletion the mocked
+// provisioning fixture was asked for, newest last, as "username|workspaceKey".
+var stubbedWindowsIdentityRemovals []string

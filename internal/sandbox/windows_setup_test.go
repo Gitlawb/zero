@@ -592,3 +592,84 @@ func TestWindowsSandboxSetupArgsOmitAnUnknownCallerIdentity(t *testing.T) {
 		t.Errorf("CallerSID = %q, want empty so the helper falls back to its own token", config.CallerSID)
 	}
 }
+
+// THE SMOKE'S COMMAND SIDE HAS TO PLAN WHAT ITS SETUP SIDE PLANNED.
+//
+// The real elevated smoke is gated behind an environment variable and an
+// administrator, so this pins the portable half of what it does: the exact
+// setup-builder, parser, marker and direct-command sequence with principal mode
+// unset. The setup builder folds runtime roots into the profile; a command built
+// from the bare profile plans fewer entries than the marker attests to and is
+// refused before it runs. Built from the same augmented profile, the two agree.
+func TestRealSmokeCommandProfileAgreesWithSetup(t *testing.T) {
+	root := t.TempDir()
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                 FileSystemRestricted,
+			ReadRoots:            []string{root},
+			WriteRoots:           []WritableRoot{{Root: root, ProtectedMetadataNames: []string{".git", ".zero", ".agents"}}},
+			IncludePlatformRoots: true,
+			AllowTemp:            true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	setupArgs, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+		SandboxHome:       filepath.Join(root, ".zero-sandbox"),
+		CommandCWD:        root,
+		WorkspaceRoots:    []string{root},
+		PermissionProfile: profile,
+		PrincipalOptIn:    new(bool),
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
+	}
+	setupConfig, err := ParseWindowsSandboxSetupArgs(setupArgs)
+	if err != nil {
+		t.Fatalf("ParseWindowsSandboxSetupArgs: %v", err)
+	}
+	setupPlan, err := BuildWindowsACLPlan(setupConfig.commandConfig())
+	if err != nil {
+		t.Fatalf("setup plan: %v", err)
+	}
+
+	commandPlanFor := func(commandProfile PermissionProfile) WindowsACLPlan {
+		t.Helper()
+		args, err := BuildWindowsSandboxCommandArgs(WindowsSandboxCommandArgsOptions{
+			SandboxHome:       filepath.Join(root, ".zero-sandbox"),
+			CommandCWD:        root,
+			WorkspaceRoots:    []string{root},
+			PermissionProfile: commandProfile,
+			SandboxLevel:      WindowsSandboxLevelRestrictedToken,
+			Command:           []string{"cmd.exe", "/c", "ver"},
+		})
+		if err != nil {
+			t.Fatalf("BuildWindowsSandboxCommandArgs: %v", err)
+		}
+		config, err := ParseWindowsSandboxCommandArgs(args)
+		if err != nil {
+			t.Fatalf("ParseWindowsSandboxCommandArgs: %v", err)
+		}
+		plan, err := BuildWindowsACLPlan(config)
+		if err != nil {
+			t.Fatalf("command plan: %v", err)
+		}
+		return plan
+	}
+
+	bare := commandPlanFor(profile)
+	if len(bare.Entries) == len(setupPlan.Entries) {
+		t.Fatalf("SETUP INVALID: the bare profile already plans %d entries like setup does, so this test cannot tell the two apart", len(bare.Entries))
+	}
+	augmented := commandPlanFor(WindowsSandboxProfileWithRuntimeRoots(profile, []string{root}))
+	setupHash, err := WindowsACLPlanHash(setupPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandHash, err := WindowsACLPlanHash(augmented)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setupHash != commandHash {
+		t.Fatalf("setup plans %d entries and the augmented command plans %d, with different hashes; the smoke would be refused at the marker", len(setupPlan.Entries), len(augmented.Entries))
+	}
+}

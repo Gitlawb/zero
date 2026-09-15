@@ -39,7 +39,11 @@ func TestWindowsRestrictedTokenRealSandboxSmoke(t *testing.T) {
 		SandboxHome:       sandboxHome,
 		CommandCWD:        root,
 		WorkspaceRoots:    []string{root},
-		PermissionProfile: profile,
+		// The setup builder folds the runtime roots into its profile before the
+		// helper sees it; the command builder does not. Passing the bare profile
+		// here made every command disagree with the marker setup wrote, nine
+		// entries against five, before the first write probe ran.
+		PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{root}),
 		SandboxLevel:      WindowsSandboxLevelRestrictedToken,
 	}
 	runWindowsRealSmokeSetup(t, setupExe, WindowsSandboxSetupArgsOptions{

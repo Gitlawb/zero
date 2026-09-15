@@ -198,6 +198,16 @@ func TestSetupRollbackRevokesRightsOnlyForCreatedPrincipals(t *testing.T) {
 				}
 				t.Fatal("rights were revoked for an adopted account; AllRights drops its pre-existing rights and deletes the LSA object")
 			}
+			// And the account itself: requested through the fake for the created
+			// case, never for an adopted one. This fixture fakes creation, so the
+			// only acceptable deletion is one the fake sees.
+			removals := len(stubbedWindowsIdentityRemovals)
+			if testCase.existed && removals != 0 {
+				t.Fatalf("rollback deleted an adopted account: %v", stubbedWindowsIdentityRemovals)
+			}
+			if !testCase.existed && removals != 1 {
+				t.Fatalf("rollback of a created account requested %d removals through the fake, want exactly one: %v", removals, stubbedWindowsIdentityRemovals)
+			}
 		})
 	}
 }
@@ -312,6 +322,7 @@ func TestPrincipalACLPlanMaterializesReadOnlySubpaths(t *testing.T) {
 // setup writes the ACE on one directory while commands use another, and the
 // symptom is a bare ACCESS_DENIED with nothing pointing at the sandbox.
 func TestSetupGrantsTheRuntimeRootCommandsActuallyUse(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		t.Fatal(err)
@@ -363,6 +374,7 @@ func grantedRuntimeRootsCover(granted []string, selected string) bool {
 
 // No workspace root means nothing to grant, which is not an error.
 func TestSetupRuntimeRootWithoutWorkspaceIsNotAnError(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	granted, err := setupWindowsSandboxRuntimeRoot(WindowsSandboxCommandConfig{})
 	if err != nil {
 		t.Fatalf("no workspace root should not error: %v", err)

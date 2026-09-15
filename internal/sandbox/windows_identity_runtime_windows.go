@@ -310,7 +310,7 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 			_ = revokeWindowsSandboxLogonRightsFn(identity.SID)
 		}
 		if created {
-			_ = removeWindowsSandboxIdentity(identity.Username, key)
+			_ = removeWindowsSandboxIdentityFn(identity.Username, key)
 		}
 		return cleanupErr
 	}
@@ -899,6 +899,12 @@ var lookupWindowsSandboxPrincipalForCommandFn = lookupWindowsSandboxPrincipalFor
 // Seam for the secret read on the command path, so the mode-enforcement gates
 // ahead of it can be exercised without a provisioned secret on disk.
 var readWindowsSandboxSecretFn = readWindowsSandboxSecret
+
+// removeWindowsSandboxIdentityFn is the rollback's account deletion. A seam so a
+// fixture that fakes creation can also fake its inverse: a mocked provisioning
+// test that reports "created" and then injects a failure must not reach the
+// real NetUserDel on an account it never made.
+var removeWindowsSandboxIdentityFn = removeWindowsSandboxIdentity
 
 // Seam for the lookup the unrecorded-principal retirement decides on, so that
 // decision is observable in a test without a provisioned machine — on which the
