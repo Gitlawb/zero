@@ -6,6 +6,8 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
 	"runtime"
 	"strings"
 	"testing"
@@ -370,4 +372,92 @@ func TestHTTPClientReturnsStallHardenedSharedClient(t *testing.T) {
 	if HTTPClient(custom) != custom {
 		t.Fatal("an explicit client must be returned unchanged")
 	}
+}
+
+// startIdleConnCloser periodically closes idle pooled connections so stale HTTP/2
+// connections are not reused across long idle periods.
+func TestStartIdleConnCloserClosesIdleConnections(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = false
+	defer tr.CloseIdleConnections()
+
+	client := &http.Client{Transport: tr}
+
+	// First request creates a connection in the pool.
+	resp1, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("first request failed: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp1.Body)
+	_ = resp1.Body.Close()
+
+	// Immediate second request reuses the pooled connection.
+	var reusedFirst bool
+	trace1 := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			reusedFirst = info.Reused
+		},
+	}
+	req2, err := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace1), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("new request failed: %v", err)
+	}
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("second request failed: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp2.Body)
+	_ = resp2.Body.Close()
+
+	if !reusedFirst {
+		t.Fatal("expected immediate second request to reuse keep-alive connection")
+	}
+
+	// Start closer with a short interval and wait for it to fire.
+	stop := startIdleConnCloser(tr, 20*time.Millisecond)
+	defer stop()
+
+	time.Sleep(60 * time.Millisecond)
+
+	// Third request after closer fired must dial a fresh connection rather than reusing.
+	var reusedSecond bool
+	trace2 := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			reusedSecond = info.Reused
+		},
+	}
+	req3, err := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace2), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("new request failed: %v", err)
+	}
+	resp3, err := client.Do(req3)
+	if err != nil {
+		t.Fatalf("third request failed: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp3.Body)
+	_ = resp3.Body.Close()
+
+	if reusedSecond {
+		t.Fatal("expected connection to be closed by idle closer and not reused")
+	}
+}
+
+func TestStartIdleConnCloserEdgeCases(t *testing.T) {
+	// Zero or negative interval returns a no-op stop func without starting goroutine.
+	stopZero := startIdleConnCloser(nil, 0)
+	stopZero()
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	stopNil := startIdleConnCloser(tr, -1*time.Second)
+	stopNil()
+
+	// Calling stop multiple times is idempotent.
+	stop := startIdleConnCloser(tr, 100*time.Millisecond)
+	stop()
+	stop()
 }
