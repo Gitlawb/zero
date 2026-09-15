@@ -104,14 +104,31 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// candidate set so a later command that falls back still lands on a
 	// provisioned tree, and granting a path setup never created fails the entire
 	// run with "windows ACL target does not exist".
+	//
+	// And recoverable. Preparing an EXISTING candidate rewrites its DACL, which
+	// strips the grant a previous setup put there, before the ACL transaction
+	// below has a baseline to restore. Record what was there first and put it
+	// back on every failure between here and a completed apply.
+	candidateDACLs, err := snapshotWindowsRuntimeCandidateDACLs(windowsSandboxRuntimeCandidates(config.WorkspaceRoots))
+	if err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
+	}
+	restoreCandidateDACLs := func() {
+		if err := restoreWindowsRuntimeCandidateDACLs(candidateDACLs); err != nil {
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": restoring runtime root permissions after the failure: "+err.Error())
+		}
+	}
 	if err := ensureWindowsSandboxRuntimeCandidates(config.WorkspaceRoots); err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		restoreCandidateDACLs()
 		return 1
 	}
 
 	plan, err := BuildWindowsACLPlan(config.commandConfig())
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		restoreCandidateDACLs()
 		return 1
 	}
 	// Before the first mutation, and on this tier too. Elevated setup CAN write a
@@ -120,12 +137,23 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// changing one sandbox-owned object.
 	if refusal := WindowsACLPlanReadGrantRefusal(plan); refusal != "" {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+refusal)
+		restoreCandidateDACLs()
 		return 1
 	}
 	rollback, err := applyWindowsACLPlanFn(plan)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		restoreCandidateDACLs()
 		return 1
+	}
+	// The transaction's own baseline is the post-preparation DACL, so a later
+	// failure that rolls the apply back still needs the pre-preparation one put
+	// back after it.
+	appliedRollback := rollback
+	rollback = func() error {
+		err := appliedRollback()
+		restoreCandidateDACLs()
+		return err
 	}
 	// Provision this workspace's sandbox principal, when opted in. A principal is
 	// a separate local account, so it is created only on an explicit opt-in: it
