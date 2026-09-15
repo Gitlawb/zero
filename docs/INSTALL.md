@@ -156,10 +156,11 @@ go install github.com/Gitlawb/zero/cmd/zero@latest
 This builds from source, so it needs Go 1.26.6+ and it does not go through the
 release archives. Two consequences worth knowing before you pick it:
 
-- On Linux you also need the sandbox helper, which is a separate binary and is
-  not installed by this command. See
+- On Linux, Bubblewrap is still required for native sandboxing. Zero resolves
+  the helper in this order: an executable `zero-linux-sandbox` next to `zero`,
+  then `PATH`, then self-exec of the main binary. Standalone helpers remain
+  optional and preferred. See
   [Sandbox Helpers For Source Builds](#sandbox-helpers-for-source-builds).
-  Without it, native sandboxing is unavailable.
 - `zero upgrade` treats the result as a standalone install and will replace the
   binary with a release build rather than rebuilding from source. If you chose
   `go install` deliberately, rerun it instead.
@@ -184,21 +185,28 @@ Source builds require Go 1.26.6+.
 
 ### Sandbox Helpers For Source Builds
 
-Release archives include the platform sandbox helpers. If you build directly
-from source, build the helpers you need:
+Release archives include the platform sandbox helpers. A source build of the
+main `zero` binary is enough for Linux native sandboxing. Zero resolves the
+helper in this order:
 
-Linux:
+1. an executable `zero-linux-sandbox` next to `zero`
+2. then `PATH`
+3. then self-exec of the main binary
+
+Bubblewrap must still be installed. Standalone helpers remain optional and
+preferred.
+
+A separate helper remains supported if it sits next to `zero` or on `PATH`:
 
 ```bash
 go build -o zero ./cmd/zero
-go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox
-go build -o zero-seccomp ./cmd/zero-seccomp
+go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox   # optional
+go build -o zero-seccomp ./cmd/zero-seccomp               # optional compatibility wrapper
 ```
 
-Put `zero` and `zero-linux-sandbox` in the same directory on `PATH`, for example
-`~/.local/bin`. `zero-seccomp` is kept as a compatibility wrapper; the sandbox
-helper applies the Unix-socket filter itself when that sandbox option is enabled.
-Linux native sandboxing also requires Bubblewrap to be installed.
+Put `zero` on `PATH`, for example `~/.local/bin`. `zero-seccomp` is kept as a
+compatibility wrapper; the sandbox helper applies the Unix-socket filter itself
+when that sandbox option is enabled.
 
 macOS uses the system sandbox and does not need an extra helper binary.
 
