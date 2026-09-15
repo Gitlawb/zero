@@ -525,10 +525,11 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		visionCache[modelID] = supported
 		return supported
 	}
+	effectivePrompt := userText
 	if len(images) > 0 && !supportsVision(resolved.Provider.Model) {
 		msg := fmt.Sprintf("Model %s does not support image input; ignoring %d prompt image(s).", resolved.Provider.Model, len(images))
 		note.text("[zero] " + msg + "\n\n")
-		userText = fmt.Sprintf("[Note: %s]\n\n%s", msg, userText)
+		effectivePrompt = fmt.Sprintf("[Note: %s]\n\n%s", msg, userText)
 		images = nil
 	}
 
@@ -562,7 +563,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		},
 	}
 
-	agentPrompt := buildPrompt(sess.snapshotHistory(), userText)
+	agentPrompt := buildPrompt(sess.snapshotHistory(), effectivePrompt)
 	result, runErr := a.deps.RunAgent(ctx, agentPrompt, provider, opts)
 	if result.FinalAnswer != "" {
 		queue(messageEvent("assistant", result.FinalAnswer))

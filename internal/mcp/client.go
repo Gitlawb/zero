@@ -391,10 +391,6 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 	}
 }
 
-func (client *Client) ensureWriter() {
-	_ = client.startWriter()
-}
-
 func (client *Client) startWriter() error {
 	client.writeMu.Lock()
 	defer client.writeMu.Unlock()
