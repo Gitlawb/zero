@@ -1378,13 +1378,16 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 }
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var resizeCmd tea.Cmd
 	if size, ok := msg.(tea.WindowSizeMsg); ok {
-		m = m.resizeBTWParent(size)
+		m, resizeCmd = m.resizeBTWParent(size)
 	}
 	if next, cmd, routed := m.routeBTWParentMessage(msg); routed {
-		return next, cmd
+		return next, batchCommands(cmd, resizeCmd)
 	}
 	switch msg := msg.(type) {
+	case fileViewLoadedMsg:
+		return m.handleFileViewLoaded(msg)
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {
 			m.petCellPixelWidth = msg.Width
@@ -1447,6 +1450,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hasDarkBg = msg.IsDark()
 		if m.themeMode != themeSystem {
 			applyTheme(m.themeMode, m.hasDarkBg)
+			if m.fileView.active && m.fileView.mode == fileViewFull {
+				return m.startFileViewLoadCmd(m.chatColumnWidth())
+			}
 		}
 		return m, nil
 	case tea.MouseMsg:
@@ -1702,6 +1708,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.runDetailsOpen:
 			if keyIs(msg, tea.KeyEsc) || m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) {
 				m.runDetailsOpen = false
+				return m, nil
+			}
+			if keyIs(msg, tea.KeyEnter) && m.selectedFile != "" {
+				overlayWidth := minInt(72, maxInt(40, m.width-8))
+				inner := maxInt(12, overlayWidth-4)
+				layout := m.runDetailsLayout(inner)
+				for _, h := range layout.fileHits {
+					if h.path == m.selectedFile {
+						return m.selectFile(m.selectedFile)
+					}
+				}
+				return m, nil
 			}
 			return m, nil
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
@@ -1711,9 +1729,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// (so mid-sentence typing is never hijacked) and no modal is up (so a
 			// permission prompt / ask-user / wizard keeps its own key handling).
 			if keyText(msg) == "f" {
-				return m.setFileViewMode(fileViewFull), nil
+				return m.setFileViewMode(fileViewFull)
 			}
-			return m.setFileViewMode(fileViewDiff), nil
+			return m.setFileViewMode(fileViewDiff)
 		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }) && canFireComposerGatedToggle(m.keyBindings.toggleMouse, defaultToggleMouseChord, m.composerValue() == ""):
 			// Release/recapture the mouse so the user can drag-select and copy text
 			// natively (mouse capture otherwise intercepts terminal selection). The
@@ -2500,7 +2518,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// A resumed/idle session may already hold agents; keep their short lifecycle
 		// fade alive. No-op when the loop is already running or nothing animates.
-		return m, m.ensureSpinnerTick()
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			var cmd tea.Cmd
+			m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+			return m, batchCommands(m.ensureSpinnerTick(), cmd, resizeCmd)
+		}
+		return m, batchCommands(m.ensureSpinnerTick(), resizeCmd)
 	case permissionRequestMsg:
 		// The agent goroutine that raised this request is BLOCKED waiting on the
 		// decision callback, so every branch below must resolve it exactly once —
@@ -2837,6 +2860,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastCompactResult = &msg.result
 		m = m.setCompactStatusRow(m.compactText(true))
+		if msg.hasSessionSnapshot {
+			return m.refreshFileViewMarkers()
+		}
 		return m, nil
 	case planUpdateMsg:
 		if msg.runID != m.activeRunID {
@@ -2970,10 +2996,51 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A finished command tool may have mutated files git can see but no
 		// changedFiles reports (npm create, heredoc writes, subagent edits) —
 		// re-sweep so the FILES sidebar picks them up mid-turn.
-		if msg.row.kind == rowToolResult && isPlanCommandTool(msg.row.tool) {
-			var sweep tea.Cmd
-			m, sweep = m.maybeGitSweep()
-			return m, sweep
+		if msg.row.kind == rowToolResult {
+			if isPlanCommandTool(msg.row.tool) {
+				var sweep tea.Cmd
+				m, sweep = m.maybeGitSweep()
+				defaultFileViewCache.invalidateUnknownScope()
+				if m.fileView.active {
+					target := m.fileView.path
+					if !filepath.IsAbs(target) {
+						target = filepath.Join(m.cwd, target)
+					}
+					defaultFileViewCache.invalidatePath(target)
+					m.fileView.requiredSourceRev++
+					if m.fileView.mode == fileViewFull {
+						var loadCmd tea.Cmd
+						m, loadCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+						return m, tea.Batch(sweep, loadCmd)
+					}
+				}
+				return m, sweep
+			}
+			var loadCmds []tea.Cmd
+			for _, p := range msg.row.changedFiles {
+				target := p
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(m.cwd, target)
+				}
+				rev := defaultFileViewCache.invalidatePath(target)
+				if m.fileView.active && (p == m.fileView.path || target == m.fileView.path) {
+					if rev > m.fileView.requiredSourceRev {
+						m.fileView.requiredSourceRev = rev
+					} else {
+						m.fileView.requiredSourceRev++
+					}
+					if m.fileView.mode == fileViewFull {
+						var cmd tea.Cmd
+						m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+						if cmd != nil {
+							loadCmds = append(loadCmds, cmd)
+						}
+					}
+				}
+			}
+			if len(loadCmds) > 0 {
+				return m, tea.Batch(loadCmds...)
+			}
 		}
 		return m, nil
 	case swarmSessionsMsg:
@@ -3006,7 +3073,22 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prState = msg.state
 		return m, nil
 	case gitSweepMsg:
-		return m.handleGitSweepMsg(msg), nil
+		m = m.handleGitSweepMsg(msg)
+		if msg.ok && !msg.baseline {
+			for _, f := range msg.files {
+				p := f.path
+				if !filepath.IsAbs(p) {
+					p = filepath.Join(m.cwd, p)
+				}
+				defaultFileViewCache.invalidatePath(p)
+			}
+		}
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			var cmd tea.Cmd
+			m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+			return m, cmd
+		}
+		return m, nil
 	case prWatcherStartedMsg:
 		if msg.stop == nil {
 			return m, nil
@@ -3018,6 +3100,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
+		defaultFileViewCache.invalidateUnknownScope()
+		if m.fileView.active {
+			m.fileView.requiredSourceRev++
+			if m.fileView.mode == fileViewFull {
+				return m.startFileViewRefreshCmd(m.chatColumnWidth())
+			}
+		}
 		return m, nil
 	case providerModelsDiscoveredMsg:
 		return m.applyProviderModelsDiscovered(msg), nil
@@ -3699,6 +3788,15 @@ func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
 // so the absolute view holds; at the bottom (offset 0) it follows normally. Only the
 // scrolled-up path renders the body, so the common case stays cheap.
 func (m model) syncChatScroll() model {
+	// A pending full-file reload temporarily renders a one-line loading
+	// placeholder. Measuring it would clamp the reader's offset to 0 and lose
+	// their place, so hold the preserved offset until handleFileViewLoaded
+	// reconciles it against the real body.
+	if m.altScreen && m.fileView.active && m.fileView.mode == fileViewFull &&
+		m.fileView.loading && m.fileView.preservedScrollOffset > 0 {
+		m.chatScrollOffset = m.fileView.preservedScrollOffset
+		return m
+	}
 	if !m.altScreen || m.chatScrollOffset <= 0 {
 		// At the bottom (or inline mode): follow the tail; reset the pin baseline.
 		m.chatBodyLines = 0
@@ -4563,6 +4661,9 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
+		if text == "" {
+			m, cmd = m.refreshFileViewMarkers()
+		}
 	case pickerSkill:
 		// Fill the composer with "/name " so the user adds their request before
 		// submitting (a bare second Enter runs it without one); names the slash
@@ -4588,10 +4689,21 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// local preview and never changes the active palette.
 		text := ""
 		m, text = m.handleThemeCommand(item.Value)
+		var loadCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+		}
 		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
-			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			next, noticeCmd := m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			if loadCmd != nil {
+				return next, tea.Batch(noticeCmd, loadCmd)
+			}
+			return next, noticeCmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		if loadCmd != nil {
+			return m, loadCmd
+		}
 	}
 	return m, cmd
 }
@@ -4720,7 +4832,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		if m.loopActive() {
 			m = m.appendLoopSystem(m.loopFooterSummary() + " still running — /loop stop all to end them.")
 		}
-		return m, nil
+		var clearCmd tea.Cmd
+		m, clearCmd = m.refreshFileViewMarkers()
+		return m, clearCmd
 	case commandNew:
 		// A fresh session mid-run would strand the in-flight turn's events; make the
 		// user cancel first. Idle, /new saves the current session (already on disk)
@@ -4729,7 +4843,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "A run is in progress. Press Esc to cancel it first, then /new."})
 			return m, nil
 		}
-		return m.startNewSession(), nil
+		next := m.startNewSession()
+		var newCmd tea.Cmd
+		next, newCmd = next.refreshFileViewMarkers()
+		return next, newCmd
 	case commandBTW:
 		return m.handleBTWCommand(command.text)
 	case commandLoop:
@@ -4891,7 +5008,11 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		} else if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
-		return m, nil
+		var resumeCmd tea.Cmd
+		if text == "" {
+			m, resumeCmd = m.refreshFileViewMarkers()
+		}
+		return m, resumeCmd
 	case commandRename:
 		if title := strings.TrimSpace(command.text); title != "" {
 			return m.renameActiveSession(title), nil
@@ -4911,9 +5032,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m.toggleDetailedTranscript(), nil
 	case commandRewind:
 		text := ""
-		m, text = m.handleRewindCommand(command.text)
+		var rewindCmd tea.Cmd
+		m, text, rewindCmd = m.handleRewindCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		return m, nil
+		return m, rewindCmd
 	case commandEffort:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {
@@ -5001,10 +5123,21 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		}
 		text := ""
 		m, text = m.handleThemeCommand(command.text)
+		var loadCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+		}
 		if validThemeMode(command.text) && !strings.Contains(text, "could not save theme preference") {
-			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			next, noticeCmd := m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			if loadCmd != nil {
+				return next, tea.Batch(noticeCmd, loadCmd)
+			}
+			return next, noticeCmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		if loadCmd != nil {
+			return m, loadCmd
+		}
 		return m, nil
 	case commandImage:
 		m = m.handleImageCommand(command.text)
