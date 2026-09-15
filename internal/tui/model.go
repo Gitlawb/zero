@@ -2824,6 +2824,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastCompactResult = &msg.result
 		m = m.setCompactStatusRow(m.compactText(true))
+		if msg.hasSessionSnapshot {
+			return m.refreshFileViewMarkers()
+		}
 		return m, nil
 	case planUpdateMsg:
 		if msg.runID != m.activeRunID {
@@ -4607,13 +4610,12 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	case pickerSession:
 		// item.Value is the chosen session id; handleResumeCommand hydrates it and
 		// rebuilds the transcript (returning "" on success, an error note on failure).
-		previousSessionID := m.activeSession.SessionID
 		text := ""
 		m, text = m.handleResumeCommand(item.Value)
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
-		if m.activeSession.SessionID != previousSessionID {
+		if text == "" {
 			m, cmd = m.refreshFileViewMarkers()
 		}
 	case pickerSkill:
@@ -4931,7 +4933,6 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
 		return m, nil
 	case commandResume:
-		previousSessionID := m.activeSession.SessionID
 		if m.pending {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
@@ -4960,7 +4961,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
 		var resumeCmd tea.Cmd
-		if m.activeSession.SessionID != previousSessionID {
+		if text == "" {
 			m, resumeCmd = m.refreshFileViewMarkers()
 		}
 		return m, resumeCmd

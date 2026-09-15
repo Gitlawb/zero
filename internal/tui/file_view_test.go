@@ -3516,3 +3516,177 @@ func TestFileViewLifecycle_VariantAccountingConsistency(t *testing.T) {
 		t.Fatalf("a purged entry must not charge retained: retained=%d items=%d", retainedAfterPurge, purgedItems)
 	}
 }
+
+func TestFileViewReviewBTWInvalidation(t *testing.T) {
+	for _, parentResult := range []bool{false, true} {
+		scenario := "side_result_after_closing_inherited_view"
+		if parentResult {
+			scenario = "parent_result_with_distinct_visible_side_file"
+		}
+		t.Run(scenario, func(t *testing.T) {
+			resetFileViewCacheForTest()
+			m := newBTWTestModel(t)
+			m.cwd = t.TempDir()
+			write := func(name, content string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(m.cwd, name), []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("parent.txt", "parent before\n")
+			write("side.txt", "side before\n")
+			m.activeRunID = 1
+			m = testOpenFile(m, "parent.txt")
+			side, cmd := m.handleBTWCommand("")
+			if !side.btw.active {
+				t.Fatal("fork failed")
+			}
+			side = deliverCommandMessages(t, side, cmd)
+			side = side.exitFileView()
+			if parentResult {
+				side = testOpenFile(side, "side.txt")
+			}
+			write("parent.txt", "parent after\n")
+			write("side.txt", "side after\n")
+			var msg tea.Msg = bashResultMsg{output: "done"}
+			if parentResult {
+				msg = agentRowMsg{runID: 1, row: transcriptRow{kind: rowToolResult, tool: "bash", status: tools.StatusOK}}
+			}
+			next, cmd := side.Update(msg)
+			side = deliverCommandMessages(t, next.(model), cmd)
+			if parentResult && !strings.Contains(plainRender(t, side.renderFileViewFull(80)), "side after") {
+				t.Fatal("visible side did not recover after parent result")
+			}
+			parent, cmd := side.leaveBTW()
+			parent = deliverCommandMessages(t, parent, cmd)
+			if !strings.Contains(plainRender(t, parent.renderFileViewFull(80)), "parent after") {
+				t.Fatal("restored parent did not recover")
+			}
+		})
+	}
+}
+
+func TestFileViewReviewAbsolutePosition(t *testing.T) {
+	for _, count := range []int{220, 60, 200} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			resetFileViewCacheForTest()
+			m := filesPanelTestModel()
+			m.cwd = t.TempDir()
+			m.altScreen = true
+			m.width = 100
+			m.height = 30
+			write := func(n int) {
+				t.Helper()
+				var body strings.Builder
+				for i := 0; i < n; i++ {
+					fmt.Fprintf(&body, "numbered-line-%03d\n", i)
+				}
+				if err := os.WriteFile(filepath.Join(m.cwd, "lines.txt"), []byte(body.String()), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(200)
+			m = testOpenFile(m, "lines.txt")
+			// The shell is still running; the reader scrolls before its result arrives.
+			m.pending = true
+			m = m.scrollChat(50)
+			m = m.syncChatScroll()
+			before := plainRender(t, m.View().Content)
+			if !strings.Contains(before, "numbered-line-149") {
+				t.Fatal("scrolled viewport must visibly include line 149 before refresh")
+			}
+			write(count)
+			next, cmd := m.Update(bashResultMsg{output: "done"})
+			m = deliverCommandMessages(t, next.(model), cmd)
+			want := maxInt(0, 50+count-200)
+			if m.chatScrollOffset != want {
+				t.Fatalf("offset=%d want=%d", m.chatScrollOffset, want)
+			}
+			after := plainRender(t, m.View().Content)
+			if count >= 200 {
+				for i := 0; i < 200; i++ {
+					line := fmt.Sprintf("numbered-line-%03d", i)
+					if strings.Contains(before, line) != strings.Contains(after, line) {
+						t.Fatalf("visible line changed: %s", line)
+					}
+				}
+			} else if !strings.Contains(after, "numbered-line-059") {
+				t.Fatal("shrink must clamp to tail")
+			}
+			next, cmd = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+			m = deliverCommandMessages(t, next.(model), cmd)
+			if m.chatScrollOffset != want {
+				t.Fatalf("same height resize changed offset to %d", m.chatScrollOffset)
+			}
+		})
+	}
+}
+
+func TestFileViewReviewMarkerReplacement(t *testing.T) {
+	for _, entry := range []string{"compact", "resume", "picker"} {
+		t.Run(entry, func(t *testing.T) {
+			resetFileViewCacheForTest()
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", home)
+			t.Setenv("XDG_CACHE_HOME", home)
+			t.Setenv("XDG_STATE_HOME", home)
+			t.Setenv("APPDATA", home)
+			t.Setenv("LOCALAPPDATA", home)
+			m := newBTWTestModel(t)
+			m.cwd = t.TempDir()
+			if err := os.WriteFile(filepath.Join(m.cwd, "marked.go"), []byte("var markedValue = 42\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			preview := "--- a/marked.go\n+++ b/marked.go\n@@ -1,1 +1,1 @@\n-old value\n+var markedValue = 42"
+			_, err := m.sessionStore.AppendEvent(m.activeSession.SessionID, sessions.AppendEventInput{Type: sessions.EventToolResult, Payload: map[string]any{"changedFiles": []string{"marked.go"}, "toolCallId": "edit-review", "name": "edit_file", "status": "ok", "output": "Successfully edited marked.go (replaced 1 occurrence).", "displayPreview": preview}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m, text := m.handleResumeCommand(m.activeSession.SessionID)
+			if text != "" {
+				t.Fatal(text)
+			}
+			m = testOpenFile(m, "marked.go")
+			m = testSetMode(m, fileViewFull)
+			marker := func(m model) bool { return strings.Contains(plainRender(t, m.renderFileViewFull(80)), "▎") }
+			if !marker(m) {
+				t.Fatal("initial gutter marker missing")
+			}
+			var next tea.Model
+			var cmd tea.Cmd
+			if entry == "compact" {
+				m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+				stale := cmd()
+				m.compactInFlight = true
+				next, cmd = m.Update(compactResultMsg{hasSessionSnapshot: true, activeSession: m.activeSession, transcript: initialTranscript()})
+				m = deliverCommandMessages(t, next.(model), cmd)
+				next, _ = m.Update(stale)
+				m = next.(model)
+				if marker(m) || len(m.fileViewChangedLines()) != 0 {
+					t.Fatal("compaction retained obsolete gutter")
+				}
+			} else {
+				next, cmd = m.dispatchCommand(parsedCommand{kind: commandClear})
+				m = deliverCommandMessages(t, next.(model), cmd)
+				if marker(m) {
+					t.Fatal("clear retained marker")
+				}
+				m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+				stale := cmd()
+				if entry == "resume" {
+					next, cmd = m.dispatchCommand(parsedCommand{kind: commandResume, text: m.activeSession.SessionID})
+				} else {
+					m.picker = &commandPicker{kind: pickerSession, items: []pickerItem{{Value: m.activeSession.SessionID}}}
+					next, cmd = m.choosePicker()
+				}
+				m = deliverCommandMessages(t, next.(model), cmd)
+				next, _ = m.Update(stale)
+				m = next.(model)
+				if !marker(m) || !m.fileViewChangedLines()["var markedValue = 42"] {
+					t.Fatal("same-session resume did not restore gutter")
+				}
+			}
+		})
+	}
+}

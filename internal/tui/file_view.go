@@ -1013,6 +1013,9 @@ type fileViewState struct {
 	// preservedScrollOffset holds the reader's offset while an async reload
 	// swaps the body for the one-line loading placeholder.
 	preservedScrollOffset int
+	// completedBodyLines is the rendered body height of the last accepted
+	// snapshot, including screen wrapping. A loading placeholder never updates it.
+	completedBodyLines int
 
 	// View session lifetime identity (UUIDv7 RFC 9562 0-alloc)
 	lifetimeToken [16]byte
@@ -1222,16 +1225,18 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	m.fileView.loadedRev = msg.requiredSourceRev
 	m.fileView.hasError = (msg.err != nil)
 	// Reconcile the held reading offset against the real body now that the
-	// loading placeholder is gone; clamp in case the file shrank.
+	// loading placeholder is gone. Apply the height delta exactly once to
+	// preserve the absolute position, while offset zero keeps following the tail.
+	current, maxOffset := m.chatScrollMetrics()
 	if m.fileView.preservedScrollOffset > 0 {
-		current, maxOffset := m.chatScrollMetrics()
-		m.chatScrollOffset = clampInt(m.fileView.preservedScrollOffset, 0, maxOffset)
+		m.chatScrollOffset = clampInt(m.fileView.preservedScrollOffset+current-m.fileView.completedBodyLines, 0, maxOffset)
 		if m.chatScrollOffset > 0 {
 			m.chatBodyLines = current
 		} else {
 			m.chatBodyLines = 0
 		}
 	}
+	m.fileView.completedBodyLines = current
 	return m, nil
 }
 
@@ -1354,4 +1359,20 @@ func (m model) fileViewChangedLines() map[string]bool {
 		}
 	}
 	return changed
+}
+
+// recoverInvalidatedFileView schedules a snapshot for a surface whose shared
+// cache generation changed while another BTW surface handled the invalidation.
+func (m model) recoverInvalidatedFileView() (model, tea.Cmd) {
+	if !m.fileView.active || m.fileView.mode != fileViewFull {
+		return m, nil
+	}
+	generation := m.fileView.loadedGen
+	if m.fileView.loading {
+		generation = m.fileView.desiredGen
+	}
+	if generation == defaultFileViewCache.generation() {
+		return m, nil
+	}
+	return m.startFileViewLoadCmd(m.chatColumnWidth())
 }
