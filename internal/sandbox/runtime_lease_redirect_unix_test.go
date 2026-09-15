@@ -5,6 +5,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -28,8 +29,14 @@ func TestPrepareSandboxRuntimeRefusesARedirectedFallbackChild(t *testing.T) {
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 
 	anchor := fallbackRuntimeAnchor()
-	if rel, err := filepath.Rel(tempRoot, anchor); err != nil || rel == ".." || filepath.IsAbs(rel) || len(rel) > 1 && rel[:2] == ".." {
-		t.Fatalf("SETUP INVALID: fallback anchor %s is not under the fixture temp %s", anchor, tempRoot)
+	// Compared physically: the anchor is derived from the resolved temp root,
+	// and on macOS the fixture temp under /var resolves to /private/var.
+	physicalTemp, err := filepath.EvalSymlinks(tempRoot)
+	if err != nil {
+		t.Fatalf("resolve fixture temp: %v", err)
+	}
+	if rel, err := filepath.Rel(physicalTemp, anchor); err != nil || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, "..") {
+		t.Fatalf("SETUP INVALID: fallback anchor %s is not under the fixture temp %s", anchor, physicalTemp)
 	}
 	if err := os.MkdirAll(anchor, 0o700); err != nil {
 		t.Fatal(err)

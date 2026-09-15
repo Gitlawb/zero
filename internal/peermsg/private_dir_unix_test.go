@@ -59,7 +59,13 @@ func TestEnsurePrivateDirClosesTheDescriptorItOwns(t *testing.T) {
 		unix.Close(fd)
 		return fd
 	}
-	base := t.TempDir()
+	// The physical path: on macOS t.TempDir() sits under /var, which is itself
+	// a symlink to /private/var, and this walk refuses a symlink component by
+	// design. Production resolves its temp root the same way before calling.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
 	for _, depth := range []int{1, 3, 6} {
 		parts := []string{base}
 		for i := 0; i < depth; i++ {
