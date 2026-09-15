@@ -10,6 +10,7 @@ import (
 )
 
 func TestPrepareSandboxRuntimeStaysOutsideWorkspace(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := t.TempDir()
 	cacheRoot := t.TempDir()
 	original := sandboxUserCacheDir
@@ -39,6 +40,7 @@ func TestPrepareSandboxRuntimeStaysOutsideWorkspace(t *testing.T) {
 }
 
 func TestPrepareSandboxRuntimeCleansExpiredSibling(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := t.TempDir()
 	cacheRoot := t.TempDir()
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
@@ -70,6 +72,7 @@ func TestPrepareSandboxRuntimeCleansExpiredSibling(t *testing.T) {
 }
 
 func TestPrepareSandboxRuntimeFallsBackWhenUserCacheIsInsideWorkspace(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := t.TempDir()
 	original := sandboxUserCacheDir
 	sandboxUserCacheDir = func() (string, error) { return filepath.Join(workspace, ".cache"), nil }
@@ -89,6 +92,7 @@ func TestPrepareSandboxRuntimeFallsBackWhenUserCacheIsInsideWorkspace(t *testing
 }
 
 func TestCleanupSandboxRuntimeSkipsActiveLease(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := t.TempDir()
 	cacheRoot := t.TempDir()
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
@@ -345,6 +349,7 @@ func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 // without privilege, so this skips there; the platforms that CI caught the bug
 // on are the ones that run it.
 func TestPrepareSandboxRuntimeNormalizesTheCacheRootBeforeComparingIt(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := t.TempDir()
 	link := filepath.Join(t.TempDir(), "workspace-link")
 	if err := os.Symlink(workspace, link); err != nil {
@@ -404,4 +409,30 @@ func TestCanonicalSandboxWorkspaceRootResolvesThroughAMissingLeaf(t *testing.T) 
 	if !pathWithinRoot(existing, got) {
 		t.Errorf("%q should be inside %q once both are canonical", got, existing)
 	}
+}
+
+// isolateSandboxRuntimeRoots gives a test its own cache root AND its own temp
+// root, so every runtime tree the production code can select, the preferred
+// cache-derived one and the temp-derived fallback, lands under the fixture.
+// Workspace isolation is not runtime-storage isolation: those paths come from
+// separate resolver inputs, and a test that redirected only the workspace ran
+// real setup, preparation and reclamation against the developer's own cache
+// and temp. Both roots are returned for assertions on where things landed.
+func isolateSandboxRuntimeRoots(t *testing.T) (cacheRoot, tempRoot string) {
+	t.Helper()
+	cacheRoot = filepath.Join(t.TempDir(), "cache")
+	tempRoot = filepath.Join(t.TempDir(), "temp")
+	for _, dir := range []string{cacheRoot, tempRoot} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = previous })
+	// os.TempDir reads these at call time on every platform this runs on.
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
+	t.Setenv("TMPDIR", tempRoot)
+	return cacheRoot, tempRoot
 }

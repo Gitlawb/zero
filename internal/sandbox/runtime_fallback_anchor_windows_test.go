@@ -75,6 +75,7 @@ func assertNothingUnder(t *testing.T, target string) {
 // sandboxRuntimeRootFor itself returns the fallback root and the first lease
 // attempt is already against it.
 func TestFallbackAnchorIsRefusedWhenTheCacheLandsInsideTheWorkspace(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	target := fallbackAnchorFixture(t)
 	workspace := t.TempDir()
 
@@ -96,6 +97,7 @@ func TestFallbackAnchorIsRefusedWhenTheCacheLandsInsideTheWorkspace(t *testing.T
 // Trigger two: the cache root cannot be leased (a FILE sits where the cache
 // runtime tree would go), so preparation falls back explicitly.
 func TestFallbackAnchorIsRefusedWhenTheCacheRootCannotBeLeased(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	target := fallbackAnchorFixture(t)
 	workspace := t.TempDir()
 

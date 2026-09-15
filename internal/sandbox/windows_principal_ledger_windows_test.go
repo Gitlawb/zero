@@ -296,6 +296,14 @@ func stubWindowsPrincipalSetup(t *testing.T) WindowsSandboxCommandConfig {
 	}
 	cache := t.TempDir()
 	sandboxUserCacheDir = func() (string, error) { return cache, nil }
+	// And the temp-derived fallback, or setup and preparation reach for the real
+	// one whenever the cache candidate is not selected.
+	fixtureTemp := filepath.Join(t.TempDir(), "temp")
+	if err := os.MkdirAll(fixtureTemp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMP", fixtureTemp)
+	t.Setenv("TEMP", fixtureTemp)
 
 	return WindowsSandboxCommandConfig{
 		SandboxHome:    home,

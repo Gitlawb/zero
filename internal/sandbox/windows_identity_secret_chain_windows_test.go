@@ -60,6 +60,7 @@ func TestWriteWindowsSandboxSecretRefusesAJunctionedAncestor(t *testing.T) {
 // cache directory, which is to say under a tree the party this sandbox contains
 // can rearrange before elevated setup runs.
 func TestSetupWindowsSandboxRuntimeRootRefusesAJunctionedAncestor(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	cache := t.TempDir()
 	t.Setenv("LOCALAPPDATA", cache)
 	t.Setenv("XDG_CACHE_HOME", cache)

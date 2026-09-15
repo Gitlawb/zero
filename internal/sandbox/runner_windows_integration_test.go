@@ -36,9 +36,9 @@ func TestWindowsRestrictedTokenRealSandboxSmoke(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 	config := WindowsSandboxCommandArgsOptions{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        root,
-		WorkspaceRoots:    []string{root},
+		SandboxHome:    sandboxHome,
+		CommandCWD:     root,
+		WorkspaceRoots: []string{root},
 		// The setup builder folds the runtime roots into its profile before the
 		// helper sees it; the command builder does not. Passing the bare profile
 		// here made every command disagree with the marker setup wrote, nine

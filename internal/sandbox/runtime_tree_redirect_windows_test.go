@@ -104,6 +104,7 @@ func TestRuntimeTreePreparationIsIdempotent(t *testing.T) {
 // prepareSandboxRuntime to the old pathname loop leaves every one of them green.
 // The defect was in what the entry point called, so this drives the entry point.
 func TestPrepareSandboxRuntimeRefusesARedirectedDescendant(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	cacheRoot := t.TempDir()
 	target := t.TempDir()
 	previous := sandboxUserCacheDir
@@ -156,6 +157,7 @@ func TestPrepareSandboxRuntimeRefusesARedirectedDescendant(t *testing.T) {
 
 // And an ordinary workspace still prepares through the entry point.
 func TestPrepareSandboxRuntimeStillPreparesAnOrdinaryTree(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	cacheRoot := t.TempDir()
 	previous := sandboxUserCacheDir
 	t.Cleanup(func() { sandboxUserCacheDir = previous })

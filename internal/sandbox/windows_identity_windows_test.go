@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unsafe"
@@ -261,14 +262,32 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	// after it returns, the stored secret logs the principal on. That covers
 	// rotation, the secret write and the logon right in one assertion, and it is
 	// the thing a broken re-setup would actually break.
+	// A SECOND ACCOUNT THIS FIXTURE OWNS, CLEANED UP BY ITS OWN KEY. The key is
+	// derived from the workspace, so a fixture-owned workspace gives a key no
+	// other test or developer state can collide with, and cleanup uses that same
+	// derived key rather than a literal the ownership guard would refuse. It is
+	// registered the moment ownership exists, before the secret read and the
+	// logon below can fail, and it only deletes what this run created.
 	config := WindowsSandboxCommandConfig{
 		SandboxHome:    t.TempDir(),
-		WorkspaceRoots: []string{`C:\ziptest01`},
+		WorkspaceRoots: []string{filepath.Join(t.TempDir(), "ws")},
 	}
-	setupIdentity, _, err := provisionWindowsSandboxPrincipalForSetup(config, windowsSandboxRoleOffline)
+	secondKey := windowsSandboxPrincipalKey(config)
+	setupIdentity, secondCreated, err := provisionWindowsSandboxPrincipalForSetup(config, windowsSandboxRoleOffline)
 	if err != nil {
 		t.Fatalf("setup provision: %v", err)
 	}
+	t.Cleanup(func() {
+		if !secondCreated {
+			return
+		}
+		if err := revokeWindowsSandboxLogonRights(setupIdentity.SID); err != nil {
+			t.Errorf("revoke logon rights for the second account: %v", err)
+		}
+		if err := removeWindowsSandboxIdentity(setupIdentity.Username, secondKey); err != nil {
+			t.Errorf("remove the second account %s: %v", setupIdentity.Username, err)
+		}
+	})
 	secretPath, err := windowsSandboxSecretPath(config.SandboxHome, setupIdentity.Username)
 	if err != nil {
 		t.Fatalf("secret path: %v", err)
@@ -282,10 +301,6 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 		t.Fatalf("logon with the secret the setup path stored: %v", err)
 	}
 	_ = token.Close()
-	t.Cleanup(func() {
-		_ = revokeWindowsSandboxLogonRights(setupIdentity.SID)
-		_ = removeWindowsSandboxIdentity(setupIdentity.Username, "ziptest01")
-	})
 	// Lookup must find what provisioning created.
 	found, err := lookupWindowsSandboxIdentity("ziptest01", windowsSandboxRoleOffline)
 	if err != nil {

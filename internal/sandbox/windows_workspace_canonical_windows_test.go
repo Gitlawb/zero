@@ -94,6 +94,7 @@ func TestCanonicalWorkspaceRootResolvesTheExistingAncestor(t *testing.T) {
 // short path that resolution expands. Lowercasing reproduces the same class of
 // non-canonical spelling without needing a short name or any privilege.
 func TestSetupAndPrepareRuntimeAgreeOnANonCanonicalRoot(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	base := t.TempDir()
 	workspace := filepath.Join(base, "MyWs")
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
