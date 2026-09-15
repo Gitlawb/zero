@@ -422,27 +422,33 @@ func TestStartIdleConnCloserClosesIdleConnections(t *testing.T) {
 	stop := startIdleConnCloser(tr, 20*time.Millisecond)
 	defer stop()
 
-	time.Sleep(60 * time.Millisecond)
-
-	// Third request after closer fired must dial a fresh connection rather than reusing.
-	var reusedSecond bool
-	trace2 := &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			reusedSecond = info.Reused
-		},
+	// Poll until the idle closer evicts the connection and a fresh dial occurs.
+	deadline := time.Now().Add(2 * time.Second)
+	var closed bool
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		var reused bool
+		trace := &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				reused = info.Reused
+			},
+		}
+		req, err := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace), http.MethodGet, server.URL, nil)
+		if err != nil {
+			t.Fatalf("new request failed: %v", err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if !reused {
+			closed = true
+			break
+		}
 	}
-	req3, err := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace2), http.MethodGet, server.URL, nil)
-	if err != nil {
-		t.Fatalf("new request failed: %v", err)
-	}
-	resp3, err := client.Do(req3)
-	if err != nil {
-		t.Fatalf("third request failed: %v", err)
-	}
-	_, _ = io.Copy(io.Discard, resp3.Body)
-	_ = resp3.Body.Close()
-
-	if reusedSecond {
+	if !closed {
 		t.Fatal("expected connection to be closed by idle closer and not reused")
 	}
 }
