@@ -229,6 +229,9 @@ func buildPlatformCommandPlan(execRequest SandboxExecutionRequest, policy Policy
 	if execRequest.EnforcementLevel == EnforcementDisabled || execRequest.EnforcementLevel == EnforcementDegraded || execRequest.TargetBackend == BackendNone || !execRequest.RequiresPlatformSandbox {
 		return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
 	}
+	if problems := execRequest.PermissionProfile.FileSystem.CredentialDiscoveryErrors; len(problems) > 0 {
+		return CommandPlan{}, fmt.Errorf("cannot guarantee credential protection: %s", strings.Join(problems, "; "))
+	}
 	switch backend.Name {
 	case BackendLinuxBwrap:
 		if backend.Available && backend.Executable != "" {
@@ -900,7 +903,7 @@ func denyWriteRulesFromPaths(paths []string) []string {
 }
 
 func denySeatbeltPathRules(action string, paths []string) []string {
-	return denySeatbeltNormalizedPathRules(action, normalizeProfilePaths(paths))
+	return denySeatbeltNormalizedPathRules(action, unreadableEnforcementPaths(paths))
 }
 
 func denySeatbeltNormalizedPathRules(action string, paths []string) []string {

@@ -94,7 +94,7 @@ func TestBuildLinuxSandboxBwrapArgsWrapsInnerSeccompStage(t *testing.T) {
 	}
 	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
 		SandboxPolicyCWD:  "/workspace",
-		PermissionProfile: DefaultPermissionProfile("/workspace"),
+		PermissionProfile: PermissionProfileFromPolicy("/workspace", testPolicyWithSSHDirectoryDeny(t), nil),
 		BlockUnixSockets:  true,
 		Command:           []string{"true"},
 	})
@@ -150,7 +150,7 @@ func TestBuildLinuxSandboxBwrapArgsKeepsHostNetworkWhenAllowed(t *testing.T) {
 	if err := os.WriteFile(helperPath, []byte("helper"), 0o755); err != nil {
 		t.Fatalf("WriteFile helper: %v", err)
 	}
-	profile := DefaultPermissionProfile("/workspace")
+	profile := PermissionProfileFromPolicy("/workspace", testPolicyWithSSHDirectoryDeny(t), nil)
 	profile.Network = NetworkPolicy{Mode: NetworkAllow}
 	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
 		SandboxPolicyCWD:  "/workspace",
