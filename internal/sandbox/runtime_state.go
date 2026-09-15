@@ -152,10 +152,20 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 }
 
 func prepareSandboxRuntimeLease(root string) (*sandboxRuntimeLease, error) {
-	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
-		return nil, fmt.Errorf("create sandbox runtime parent: %w", err)
+	// THE OWNED TAIL IS VALIDATED BEFORE THE FIRST EFFECT, AND THE LEASE IS
+	// OPENED THROUGH THAT VALIDATION. The anchor check above this covers the
+	// anchor; the reusable "v1" child beneath it is the runtime's too, and
+	// creating it by pathname followed whatever was sitting at that name.
+	// Redirect v1 into another directory and the old sequence created a .lease
+	// there and only then failed validation. EnsurePrivateDir walks each
+	// component without following links and creates what is missing in place;
+	// the lease is then opened relative to a no-follow handle on that parent, so
+	// a component swapped in after the check cannot move the open either.
+	parent := filepath.Dir(root)
+	if err := peermsg.EnsurePrivateDir(parent); err != nil {
+		return nil, fmt.Errorf("sandbox runtime parent %s is not a private directory owned by this user: %w", parent, err)
 	}
-	return acquireSandboxRuntimeLease(root)
+	return acquireSandboxRuntimeLeaseIn(parent, filepath.Base(root)+sandboxRuntimeLeaseSuffix)
 }
 
 // cleanupSandboxRuntimeRoots applies a conservative age/count policy. Cleanup
