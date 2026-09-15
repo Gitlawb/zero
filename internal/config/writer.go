@@ -826,8 +826,10 @@ func validateNotify(value NotifyConfig) (NotifyConfig, error) {
 // disabled: false, which the typed serializer's omitempty cannot round-trip —
 // through the existing temp-file-and-rename atomic publish. Locking only the
 // final write would leave the stale-field merge outside the transaction, so
-// the whole sequence runs under one lock.
-func UpdateNotify(path string, merge func(current NotifyConfig) NotifyConfig) (NotifyConfig, error) {
+// the whole sequence runs under one lock. The release error is joined into the
+// result like every other writer: a failed unlock would leave the advisory
+// lock held and later updates blocked while the caller is told success.
+func UpdateNotify(path string, merge func(current NotifyConfig) NotifyConfig) (result NotifyConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return NotifyConfig{}, fmt.Errorf("config path is required")
@@ -839,7 +841,11 @@ func UpdateNotify(path string, merge func(current NotifyConfig) NotifyConfig) (N
 	if err != nil {
 		return NotifyConfig{}, err
 	}
-	defer func() { _ = release() }()
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed release would claim a state the
+	// next update cannot reproduce.
+	defer func() { err = errors.Join(err, release()) }()
 
 	current, err := UserNotify(path)
 	if err != nil {
