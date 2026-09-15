@@ -10,6 +10,11 @@ import (
 
 func execListToolsFor(t *testing.T, args ...string) string {
 	t.Helper()
+	// A temporary cwd isolates the workspace, not the user: runWithDeps fills
+	// the dependencies left out with production ones, and --list-tools returns
+	// only after startup has read user config, started configured MCP servers
+	// and begun the models.dev refresh. Every user root goes to a fixture first.
+	isolateCLIUserState(t)
 	cwd := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	exitCode := runWithDeps(append([]string{"exec"}, append(args, "--list-tools")...), &stdout, &stderr, appDeps{
