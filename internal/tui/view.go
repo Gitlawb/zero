@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/charmbracelet/x/ansi"
 	"os"
 	"path"
 	"path/filepath"
@@ -208,7 +209,37 @@ func (m model) offerOwnsStatusChip() bool {
 }
 
 func (m model) offerConfirmable(armed bool) bool {
-	return armed && !m.exitConfirmActive && !m.cancelConfirmActive
+	return armed && !m.exitConfirmActive && !m.cancelConfirmActive && m.offerKeyVisible()
+}
+
+// unsafeOfferLabel is the offer as the footer words it. One string, because the
+// fit decision below renders exactly what the footer renders.
+const unsafeOfferLabel = "full-auto? ctrl+g to confirm"
+
+// offerChip is the left chip the footer draws for a live offer.
+func (m model) offerChip() string {
+	btwChip := ""
+	if m.btw.active {
+		btwChip = zeroTheme.amber.Render("BTW") + zeroTheme.muted.Render(" · ")
+	}
+	return "  " + btwChip + zeroTheme.accent.Render("●") + " " + zeroTheme.modeUnsafe.Render(unsafeOfferLabel)
+}
+
+// offerKeyVisible reports whether the footer, at the width it actually has
+// after the pet reservation, shows the offer far enough for its confirmation
+// key to be read. The armed flag says an offer exists; it does not say the
+// layout put it in front of the user. With a docked pet at 24 or 30 columns the
+// chip came out as `  ● full-aut…` and `  ● full-auto? ctr…`, no key in either,
+// while ctrl+g still confirmed. The decision is made on the same truncation the
+// footer applies, so the two cannot disagree. Before the first WindowSizeMsg
+// there is no layout to judge and the offer is taken at its word.
+// Reported by @jatmn.
+func (m model) offerKeyVisible() bool {
+	if m.width <= 0 {
+		return true
+	}
+	available := m.width - m.petComposerReservedColumns(m.width)
+	return strings.Contains(ansi.Strip(fitStyledLine(m.offerChip(), available)), "ctrl+g")
 }
 
 func (m model) statusLine(width int) string {
@@ -404,7 +435,7 @@ func (m model) modeLabel() (string, lipgloss.Style) {
 	// reads as a question because nothing has changed yet: the session is still
 	// in whatever mode it was, and any other key declines.
 	if m.unsafeArmed {
-		return "full-auto? ctrl+g to confirm", zeroTheme.modeUnsafe
+		return unsafeOfferLabel, zeroTheme.modeUnsafe
 	}
 	switch m.permissionMode {
 	case agent.PermissionModeAuto:

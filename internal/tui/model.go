@@ -2023,6 +2023,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// turns permission prompts off entirely. See advancePermissionMode.
 			if m.noBlockingModal() {
 				m.permissionMode, m.unsafeArmed = advancePermissionMode(m.permissionMode, unsafeWasArmed)
+				// An offer the footer cannot show is not an offer. Raising it
+				// anyway would leave a truncated chip on screen and a live
+				// confirmation nobody was asked for; the next press re-offers, so
+				// full-auto stays two visible presses away, never a hidden one.
+				if m.unsafeArmed && !m.offerKeyVisible() {
+					m.unsafeArmed = false
+				}
 				// The peer record carries the permission class, so it has to be
 				// resynced wherever the mode changes. This branch and the ctrl+g
 				// confirm below are now two such places, not one.
@@ -2567,6 +2574,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeFreePetPosition(m.width, m.height, msg.Width, msg.Height)
 		m.width = msg.Width
 		m.height = msg.Height
+		// A live offer whose key the new width can no longer show is withdrawn
+		// rather than left confirmable behind a truncated chip.
+		if m.unsafeArmed && !m.offerKeyVisible() {
+			m.unsafeArmed = false
+		}
 		if msg.Width < runDetailsMinWidth {
 			m.runDetailsOpen = false
 		}

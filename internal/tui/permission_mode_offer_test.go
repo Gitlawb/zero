@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"github.com/Gitlawb/zero/internal/terminalpet"
+	"github.com/charmbracelet/x/ansi"
+	"image"
 	"strings"
 	"testing"
 
@@ -229,5 +232,77 @@ func TestConfirmOnlyCommitsAnOfferTheFooterShowed(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// THE OFFER IS CONFIRMABLE ONLY WHERE THE FOOTER SHOWS ITS KEY.
+//
+// The footer reserves columns for a docked pet before it renders the status
+// line, so at 24 and 30 columns the offer came out as `  ● full-aut…` and
+// `  ● full-auto? ctr…`, no confirmation key in either, while ctrl+g still
+// entered full-auto. The contract, checked through the complete View: either
+// the rendered footer carries the key and ctrl+g confirms, or it does not and
+// ctrl+g cannot. Wider and pet-free layouts are the controls, so the rule
+// cannot pass by refusing confirmation everywhere.
+func TestOfferConfirmsOnlyWhereTheFooterShowsItsKey(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		width       int
+		pet         bool
+		wantVisible bool
+	}{
+		{"24 columns with a docked pet", 24, true, false},
+		{"30 columns with a docked pet", 30, true, false},
+		{"30 columns without a pet", 30, false, true},
+		{"96 columns with a docked pet", 96, true, true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{AltScreen: true})
+			m.permissionMode = agent.PermissionModeAsk
+			m.width, m.height = testCase.width, 24
+			if testCase.pet {
+				frame := image.NewNRGBA(image.Rect(0, 0, 12, 12))
+				m.petAnimation, _ = terminalpet.ThumbnailAnimation(frame)
+				m.petID = "boba"
+				m.petRenderer = terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+				if m.petComposerReservedColumns(m.width) == 0 {
+					t.Fatal("SETUP INVALID: the docked pet reserved no footer columns")
+				}
+			}
+			armed := pressKey(t, m, tea.Key{Code: tea.KeyTab, Mod: tea.ModShift})
+			view := ansi.Strip(armed.View().Content)
+			visible := strings.Contains(view, "ctrl+g")
+			if visible != testCase.wantVisible {
+				t.Fatalf("footer key visible = %v, want %v; footer read:\n%s", visible, testCase.wantVisible, view)
+			}
+			confirmed := pressKey(t, armed, tea.Key{Code: 'g', Mod: tea.ModCtrl})
+			entered := confirmed.permissionMode == agent.PermissionModeFullAuto
+			if visible && !entered {
+				t.Fatalf("the footer showed the confirmation key but ctrl+g did not enter full-auto (mode %s)", confirmed.permissionMode)
+			}
+			if !visible && entered {
+				t.Fatal("ctrl+g entered full-auto on an offer the footer never showed the key for")
+			}
+		})
+	}
+}
+
+// And an offer that was visible when raised is withdrawn when the terminal
+// shrinks under it, rather than staying confirmable behind a truncated chip.
+func TestOfferIsWithdrawnWhenTheTerminalShrinksUnderIt(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.permissionMode = agent.PermissionModeAsk
+	m.width, m.height = 96, 24
+	armed := pressKey(t, m, tea.Key{Code: tea.KeyTab, Mod: tea.ModShift})
+	if !armed.unsafeArmed {
+		t.Fatal("SETUP INVALID: shift+tab at 96 columns did not raise the offer")
+	}
+	next, _ := armed.updateModel(tea.WindowSizeMsg{Width: 12, Height: 24})
+	shrunk := next.(model)
+	if shrunk.unsafeArmed {
+		t.Fatal("the offer stayed live after shrinking to a width that cannot show its key")
+	}
+	if confirmed := pressKey(t, shrunk, tea.Key{Code: 'g', Mod: tea.ModCtrl}); confirmed.permissionMode == agent.PermissionModeFullAuto {
+		t.Fatal("ctrl+g entered full-auto after the offer was withdrawn")
 	}
 }
