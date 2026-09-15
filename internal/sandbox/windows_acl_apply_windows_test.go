@@ -121,9 +121,14 @@ func TestApplyWindowsACLPathGroupMaterializes(t *testing.T) {
 		t.Fatal("applied = false, want true for a materialized target")
 	}
 	// Exactly one component was missing, so exactly one must be recorded as
-	// created, and it must be the leaf's own name rather than a path.
-	if len(snapshot.Created.Chain) != 1 || snapshot.Created.Chain[0] != (windowsACLChainStep{Name: "created", Made: true}) {
+	// created, and it must be the leaf's own name rather than a path, carrying
+	// the identity of the directory it made so rollback can prove it is still
+	// deleting that object.
+	if len(snapshot.Created.Chain) != 1 || snapshot.Created.Chain[0].Name != "created" || !snapshot.Created.Chain[0].Made {
 		t.Fatalf("created chain = %#v, want one step {created true}", snapshot.Created.Chain)
+	}
+	if snapshot.Created.Chain[0].ID.empty() {
+		t.Fatalf("created chain step carries no identity: %#v", snapshot.Created.Chain[0])
 	}
 	if snapshot.Created.AnchorPath != filepath.Dir(target) {
 		t.Fatalf("anchor = %q, want the existing parent %q", snapshot.Created.AnchorPath, filepath.Dir(target))
