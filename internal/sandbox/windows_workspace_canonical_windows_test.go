@@ -172,6 +172,16 @@ func TestGitConfigCarveoutShapeSurvivesANonCanonicalRoot(t *testing.T) {
 // root is random per process and never matches what commands used.
 func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
 	workspace := t.TempDir()
+	// A PRIVATE OBSERVATION ROOT. The assertions below snapshot the temp
+	// directory and fail on anything that appears, and the shared one is written
+	// by every other package the runner is testing at the same time. It also
+	// keeps the fallback runtime root this test drives inside the fixture.
+	observed := filepath.Join(t.TempDir(), "observed")
+	if err := os.Mkdir(observed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMP", observed)
+	t.Setenv("TEMP", observed)
 	// Force the branch that falls back: cache root inside the workspace.
 	original := sandboxUserCacheDir
 	sandboxUserCacheDir = func() (string, error) { return filepath.Join(workspace, ".cache"), nil }
@@ -226,6 +236,10 @@ func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
 	if len(setupRoots) == 0 {
 		t.Error("setup named no runtime root for a workspace whose cache-derived root is unusable; commands still select the stable fallback and would write there with no ACE")
 	}
+	// Purity is a property of RESOLUTION. Assert it here, before preparation,
+	// which is allowed to create the fallback anchor it selects; asserting after
+	// it blamed the resolver for preparation's legitimate directory.
+	assertCreatedNothing(t, beforeSetup, "setup path derivation")
 	// And it must be the tree a command actually picks, not merely some tree.
 	commandState, release, err := prepareSandboxRuntime(workspace)
 	if err != nil {
@@ -237,7 +251,6 @@ func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
 	if !grantedRuntimeRootsCover(setupRoots, commandState.Root) {
 		t.Errorf("setup granted %q but commands write to %q", setupRoots, commandState.Root)
 	}
-	assertCreatedNothing(t, beforeSetup, "setup path derivation")
 }
 
 // Setup and teardown must derive the SAME root in the ordinary case, since one

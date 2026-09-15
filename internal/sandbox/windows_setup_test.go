@@ -527,6 +527,10 @@ func TestWindowsSandboxSetupArgsCarryTheCallerIdentity(t *testing.T) {
 	}
 	const callerSID = "S-1-5-21-1111111111-2222222222-3333333333-1001"
 	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+		// Pinned: this fixture tests caller-identity transport, not principal mode.
+		// Left unset it inherits ZERO_WINDOWS_SANDBOX_IDENTITY from the host and
+		// stops at the launch refusal before reaching the assertions below.
+		PrincipalOptIn: new(bool),
 		SandboxHome:    `C:\home`,
 		CommandCWD:     `C:\workspace`,
 		WorkspaceRoots: []string{`C:\workspace`},
@@ -558,6 +562,7 @@ func TestWindowsSandboxSetupArgsCarryTheCallerIdentity(t *testing.T) {
 // be guessed at instead.
 func TestWindowsSandboxSetupArgsOmitAnUnknownCallerIdentity(t *testing.T) {
 	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+		PrincipalOptIn: new(bool), // transport fixture; see TestWindowsSandboxSetupArgsCarryTheCallerIdentity
 		SandboxHome:    `C:\home`,
 		CommandCWD:     `C:\workspace`,
 		WorkspaceRoots: []string{`C:\workspace`},
