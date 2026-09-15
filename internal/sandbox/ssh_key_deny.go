@@ -127,7 +127,7 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 				testSSHWalkChildHook(dir)
 			}
 			// Verify directory identity has not changed since opening root.
-			dirStat, statErr := os.Lstat(dir)
+			dirStat, statErr := os.Stat(dir)
 			if statErr != nil || !os.SameFile(dirStat, rootStat) {
 				s.fail(dir, "directory identity changed during inspection")
 				return

@@ -12,8 +12,15 @@ import (
 
 func denyCovered(denied []string, target string) bool {
 	norm := normalizeProfilePath(target)
+	if norm == "" {
+		norm = filepath.Clean(target)
+	}
 	for _, entry := range denied {
-		if entry == norm || pathWithinRoot(entry, norm) {
+		normEntry := normalizeProfilePath(entry)
+		if normEntry == "" {
+			normEntry = filepath.Clean(entry)
+		}
+		if normEntry == norm || pathWithinRoot(normEntry, norm) {
 			return true
 		}
 	}
