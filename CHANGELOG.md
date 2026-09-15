@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.9.1](https://github.com/Gitlawb/zero/compare/v0.9.0...v0.9.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **providers:** send stable session headers to OpenCode ([#1060](https://github.com/Gitlawb/zero/issues/1060)) ([99721c7](https://github.com/Gitlawb/zero/commit/99721c762f37cd43ac511007a5f51d1846df959e))
+
 ## [0.9.0](https://github.com/Gitlawb/zero/compare/v0.8.0...v0.9.0) (2026-09-15)
 
 
