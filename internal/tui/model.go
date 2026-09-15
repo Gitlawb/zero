@@ -589,6 +589,11 @@ type model struct {
 	// with. Nil in production; used by tests to assert image threading without a
 	// real provider round-trip.
 	captureRunImages func([]zeroruntime.ImageBlock)
+
+	// captureRunSupportsVision, when set, is invoked with the vision-support
+	// predicate wired into the run's agent options. Nil in production; used by
+	// tests to assert snapshot isolation and discovery scoping.
+	captureRunSupportsVision func(func(string) bool)
 }
 
 type agentTextMsg struct {
@@ -5481,26 +5486,16 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 }
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
-	var activeDescriptorID string
-	if descriptor, ok := m.activeProviderDescriptor(); ok {
-		activeDescriptorID = descriptor.ID
-	} else if len(m.modelPickerLiveByProvider) == 1 {
-		for id := range m.modelPickerLiveByProvider {
-			activeDescriptorID = id
-			break
-		}
-	}
-	discoveredSnapshot := make(map[string][]providermodeldiscovery.Model, len(m.modelPickerLiveByProvider))
-	for pID, list := range m.modelPickerLiveByProvider {
-		copiedList := make([]providermodeldiscovery.Model, len(list))
-		for i, dm := range list {
+	var activeDiscovered []providermodeldiscovery.Model
+	if models, ok := m.discoveredModelsForActiveRoute(); ok {
+		activeDiscovered = make([]providermodeldiscovery.Model, len(models))
+		for i, dm := range models {
 			copied := dm
 			if len(dm.InputModalities) > 0 {
 				copied.InputModalities = append([]string{}, dm.InputModalities...)
 			}
-			copiedList[i] = copied
+			activeDiscovered[i] = copied
 		}
-		discoveredSnapshot[pID] = copiedList
 	}
 	catalog := m.modelCatalog
 
@@ -5612,17 +5607,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			if trimmed == "" {
 				return false
 			}
-			if activeDescriptorID != "" {
-				if models, ok := discoveredSnapshot[activeDescriptorID]; ok {
-					if supported, ok := discoveredVisionSupport(models, trimmed); ok {
-						return supported
-					}
+			if len(activeDiscovered) > 0 {
+				if supported, ok := discoveredVisionSupport(activeDiscovered, trimmed); ok {
+					return supported
 				}
 			}
 			if entry, known := catalog.Resolve(trimmed); known {
 				return entry.Supports(modelregistry.ModelCapabilityVision)
 			}
 			return modelregistry.SupportsVision(catalog, trimmed)
+		}
+		if m.captureRunSupportsVision != nil {
+			m.captureRunSupportsVision(options.SupportsVision)
 		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it

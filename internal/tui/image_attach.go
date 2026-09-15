@@ -108,21 +108,10 @@ func (m model) modelSupportsVisionFor(modelID string) bool {
 	if trimmed == "" {
 		return false
 	}
-	// Check the discovered model list for the ACTIVE provider first.
-	activeID := ""
-	if descriptor, ok := m.activeProviderDescriptor(); ok && descriptor.ID != "" {
-		activeID = descriptor.ID
-	} else if len(m.modelPickerLiveByProvider) == 1 {
-		for id := range m.modelPickerLiveByProvider {
-			activeID = id
-			break
-		}
-	}
-	if activeID != "" {
-		if models, ok := m.modelPickerLiveByProvider[activeID]; ok {
-			if supported, ok := discoveredVisionSupport(models, trimmed); ok {
-				return supported
-			}
+	// Check the discovered model list for the ACTIVE provider route first.
+	if models, ok := m.discoveredModelsForActiveRoute(); ok {
+		if supported, ok := discoveredVisionSupport(models, trimmed); ok {
+			return supported
 		}
 	}
 	// The curated catalog is authoritative when active-provider discovery is absent or inconclusive.
