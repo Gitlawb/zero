@@ -741,6 +741,38 @@ func ensureWindowsSandboxRuntimeCandidates(workspaceRoots []string) error {
 // business, not ours -- the same pairing the fallback anchor uses, and the same
 // mistake that refused every fallback on macOS when the parent was left
 // unresolved.
+// ensureMissingWindowsSandboxRuntimeCandidates creates, with the same ownership
+// and no-follow checks setup uses, every runtime candidate that does not exist
+// yet, and leaves an existing one exactly as it is. The unelevated tier calls
+// this on every command, and an existing candidate carries the capability ACE
+// the previous command applied: re-running EnsurePrivateDir on it would strip
+// that grant, fail the marker's capability verification, and reapply the plan
+// on every launch. An existing candidate is still validated by the plan apply,
+// which opens it without following a reparse point.
+func ensureMissingWindowsSandboxRuntimeCandidates(workspaceRoots []string) error {
+	for _, root := range windowsSandboxRuntimeCandidates(workspaceRoots) {
+		info, err := os.Lstat(root)
+		switch {
+		case err == nil:
+			// Left alone, but not unexamined: a file or a reparse point at a
+			// candidate's name is not a runtime root, and the apply would happily
+			// put an ACE on either. Setup's full validation refuses both shapes
+			// too; this is the same answer without the DACL rewrite.
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
+				return fmt.Errorf("sandbox runtime root %s exists but is not a plain directory", root)
+			}
+			continue
+		case errors.Is(err, os.ErrNotExist):
+			if err := ensureRuntimeCandidateDir(root); err != nil {
+				return fmt.Errorf("create sandbox runtime root %s: %w", root, err)
+			}
+		default:
+			return fmt.Errorf("inspect sandbox runtime root %s: %w", root, err)
+		}
+	}
+	return nil
+}
+
 func ensureRuntimeCandidateDir(root string) error {
 	base, ok := runtimeCandidateBase(root)
 	if !ok {

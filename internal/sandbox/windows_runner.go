@@ -346,6 +346,18 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	level := WindowsSandboxLevelRestrictedToken
 	if execRequest.EnforcementLevel == EnforcementUnelevated {
 		level = WindowsSandboxLevelUnelevated
+		// THE UNELEVATED PLAN GRANTS BOTH RUNTIME CANDIDATES, SO BOTH HAVE TO EXIST.
+		// Elevated setup creates them before it applies; this tier has no setup
+		// step, and preparation below creates only the candidate this process
+		// selects. With a fresh usable cache the unused fallback was absent, the
+		// runner refused its own plan with "windows ACL target does not exist",
+		// and the command never launched, on every retry. Derived and created here
+		// in the parent, where TEMP is still the operator's: the runner's TEMP is
+		// already redirected into the runtime tree, so it cannot name the
+		// temp-derived candidate correctly itself.
+		if err := ensureMissingWindowsSandboxRuntimeCandidates([]string{execRequest.WorkspaceRoot}); err != nil {
+			return CommandPlan{}, err
+		}
 	}
 	args, err := BuildWindowsSandboxCommandArgs(WindowsSandboxCommandArgsOptions{
 		SandboxHome:    sandboxHome,
