@@ -306,6 +306,10 @@ func btwMessageRunID(msg tea.Msg) (int, bool) {
 		return typed.runID, true
 	case toolCallStreamStartMsg:
 		return typed.runID, true
+	case interactiveExecStartMsg:
+		return typed.runID, true
+	case terminalAutoAttachTickMsg:
+		return typed.runID, true
 	case toolCallStreamDeltaMsg:
 		return typed.runID, true
 	case planUpdateMsg:
