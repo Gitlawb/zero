@@ -24,7 +24,10 @@ const (
 )
 
 type windowsACLPathGroup struct {
-	Path            string
+	Path string
+	// Anchor is the write root Path was derived from, empty when the operator
+	// named the path. See verifyWindowsACLHandleUnderAnchor.
+	Anchor          string
 	Entries         []WindowsACLEntry
 	Materialize     bool
 	MaterializeFile bool
@@ -164,6 +167,12 @@ func groupWindowsACLPlanByPath(plan WindowsACLPlan) []windowsACLPathGroup {
 		group.Entries = append(group.Entries, entry)
 		group.Materialize = group.Materialize || entry.Materialize
 		group.MaterializeFile = group.MaterializeFile || entry.MaterializeFile
+		// One path is derived from at most one root, so the first anchor seen is
+		// the anchor. Taking it rather than overwriting keeps a later
+		// operator-named duplicate of the same path from clearing it.
+		if group.Anchor == "" {
+			group.Anchor = entry.Anchor
+		}
 	}
 	out := make([]windowsACLPathGroup, 0, len(byPath))
 	for _, group := range byPath {
@@ -222,7 +231,7 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 
 	var isDir bool
 	var err error
-	handle, isDir, err = openWindowsACLTarget(path)
+	handle, isDir, err = openWindowsACLTargetFinalComponent(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return windowsACLSnapshot{}, false, err
@@ -233,18 +242,34 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 			}
 			return windowsACLSnapshot{}, false, nil
 		}
+		// Before creating anything: os.MkdirAll walks a pathname and follows every
+		// reparse point on it, so a junction on the derived tail would have this
+		// elevated setup create the directory outside the write root and only the
+		// containment check below would notice, after the fact.
+		if err := verifyWindowsACLPathUnderAnchor(group.Anchor, path); err != nil {
+			return fail(err)
+		}
 		// created is assigned even on failure: materialization reports what it
 		// managed to make before it stopped, and fail() unwinds exactly that.
 		created, err = materializeWindowsACLTarget(path, group.MaterializeFile)
 		if err != nil {
 			return fail(fmt.Errorf("materialize windows ACL target %s: %w", path, err))
 		}
-		handle, isDir, err = openWindowsACLTarget(path)
+		handle, isDir, err = openWindowsACLTargetFinalComponent(path)
 		if err != nil {
 			// This is the branch that fires when the post-create verify catches a
 			// swap, so it is the single most important cleanup in the file.
 			return fail(fmt.Errorf("open materialized windows ACL target %s: %w", path, err))
 		}
+	}
+	// THE OBJECT HAS TO BE WHERE THE PLAN SAID IT WOULD BE. The open above
+	// refuses a reparse point at the final component and resolves every one
+	// above it, which is right for a path the operator named and not enough for
+	// one this package derived from a write root: a junction on the derived tail
+	// redirects the handle out of the sandbox with nothing about the final
+	// object looking wrong.
+	if err := verifyWindowsACLHandleUnderAnchor(handle, group.Anchor, path); err != nil {
+		return fail(err)
 	}
 	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -293,6 +318,30 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 // is exactly the redirection this guard exists to prevent. A missing target is
 // surfaced as os.ErrNotExist so the caller's materialize path still fires.
 func openWindowsACLTarget(path string) (windows.Handle, bool, error) {
+	handle, isDir, err := openWindowsACLTargetFinalComponent(path)
+	if err != nil {
+		return 0, false, err
+	}
+	// Ancestors are resolved by CreateFile even with FILE_FLAG_OPEN_REPARSE_POINT,
+	// so the final-component check is not enough on its own here: this opener
+	// serves the rollback re-open and the runtime ACE, which know no anchor and
+	// must not be redirected by anything on the way down.
+	if err := verifyWindowsACLTargetNotRedirected(handle, path); err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, false, err
+	}
+	return handle, isDir, nil
+}
+
+// openWindowsACLTargetFinalComponent is the open without the ancestor check.
+// The plan apply uses it: a reparse point ABOVE a target is the operator's
+// business (a workspace on a junction or a dev drive is a configuration that
+// works), and a reparse point on a tail this package derived from a write root
+// is caught by verifyWindowsACLHandleUnderAnchor, which knows the anchor and
+// tolerates exactly the aliases above it. That is main's rule from #1040 and
+// the two containment tests pin it; the blanket refusal above is kept for the
+// callers that have no anchor to reason with.
+func openWindowsACLTargetFinalComponent(path string) (windows.Handle, bool, error) {
 	utf16Path, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return 0, false, fmt.Errorf("encode windows ACL target %s: %w", path, err)
@@ -319,12 +368,6 @@ func openWindowsACLTarget(path string) (windows.Handle, bool, error) {
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		_ = windows.CloseHandle(handle)
 		return 0, false, fmt.Errorf("refusing to apply ACL to reparse-point target %s: possible path swap during elevated setup", path)
-	}
-	// Ancestors are resolved by CreateFile even with FILE_FLAG_OPEN_REPARSE_POINT,
-	// so the check above is not enough on its own.
-	if err := verifyWindowsACLTargetNotRedirected(handle, path); err != nil {
-		_ = windows.CloseHandle(handle)
-		return 0, false, err
 	}
 	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	return handle, isDir, nil
@@ -807,10 +850,20 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 		// renamed aside and replaced by an ordinary directory of the same name
 		// passes it, and the old DACL would land on the decoy while the real
 		// object kept the aborted setup's ACEs. See windowsACLSnapshot.TargetID.
-		handle, _, err := openWindowsACLTarget(snapshot.Path)
+		handle, _, err := openWindowsACLTargetFinalComponent(snapshot.Path)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("re-open windows ACL target %s for rollback: %w", snapshot.Path, err))
 			continue
+		}
+		// An identity to compare against makes the pathname route irrelevant: the
+		// object either is the one the DACL was read from or it is not. Without
+		// one, the route is all there is, so keep the blanket redirection check.
+		if snapshot.TargetID.empty() {
+			if err := verifyWindowsACLTargetNotRedirected(handle, snapshot.Path); err != nil {
+				_ = windows.CloseHandle(handle)
+				errs = append(errs, fmt.Errorf("re-open windows ACL target %s for rollback: %w", snapshot.Path, err))
+				continue
+			}
 		}
 		if !snapshot.TargetID.empty() {
 			got, identityErr := windowsIdentityOfHandle(handle)

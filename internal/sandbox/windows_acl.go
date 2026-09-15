@@ -93,8 +93,14 @@ type WindowsACLEntry struct {
 	// down onto the target's EXISTING descendants (not just new ones it
 	// creates going forward), which is why direct-only denies must set this
 	// flag rather than rely on inheritance.
-	NoInherit   bool `json:"noInherit,omitempty"`
-	Materialize bool `json:"materialize,omitempty"`
+	NoInherit bool `json:"noInherit,omitempty"`
+	// Anchor is the write root Path was DERIVED from, for the paths this
+	// package constructs rather than the operator naming. The apply requires
+	// the object it finally opens to still live under it, so a reparse point
+	// planted on the derived tail cannot walk an elevated ACL write out of the
+	// sandbox. Empty for an operator-named path, which has no owned tail.
+	Anchor      string `json:"anchor,omitempty"`
+	Materialize bool   `json:"materialize,omitempty"`
 	// MaterializeFile makes Materialize create an empty FILE instead of a
 	// directory. Only meaningful with Materialize. .git/config is the case that
 	// forces the distinction: created as a directory it does not merely carry
@@ -150,10 +156,22 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 		// rather than only the pathname is the point: this tier is the DEFAULT
 		// backend, so the weaker of the two rules was the one almost everyone got.
 		for _, path := range capability.ProtectedWriteDenyPaths {
+			// ANCHORED ONLY WHERE THE ANCHOR IS TRUE. Most of these are derived
+			// from the root and sit under it, and holding those inside it is the
+			// point. But ReadOnlySubpaths is a profile field an operator can set to
+			// any path, and one deliberately placed outside the root is a
+			// configuration that works today; anchoring it would turn that into a
+			// containment refusal. A path that is not under the root gets no
+			// anchor and keeps the final-component guard it always had.
+			anchor := ""
+			if pathWithinRoot(capability.Root, path) {
+				anchor = capability.Root
+			}
 			entries = append(entries, WindowsACLEntry{
 				Action:          WindowsACLDenyWrite,
 				Path:            path,
 				Capability:      capability.SID,
+				Anchor:          anchor,
 				Materialize:     true,
 				MaterializeFile: gitMetadataCarveoutIsFile(path),
 			})
