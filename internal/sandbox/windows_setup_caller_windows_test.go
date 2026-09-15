@@ -52,6 +52,11 @@ func withWindowsSetupSeams(t *testing.T, seams windowsSetupSeams) {
 		writeWindowsSandboxSetupMarkerFn = originalMarker
 	})
 
+	// The launch seam says no on every machine today; these fixtures test the
+	// provisioning flow behind it, so they open it and restore it after.
+	originalLaunch := windowsPrincipalLaunchAvailable
+	windowsPrincipalLaunchAvailable = func() error { return nil }
+	t.Cleanup(func() { windowsPrincipalLaunchAvailable = originalLaunch })
 	windowsProcessIsElevatedFn = func() bool { return seams.elevated }
 	// A zero lock is safe to release: release() tolerates a nil handle and
 	// runtime.UnlockOSThread is a no-op when the thread was never pinned.
@@ -280,5 +285,42 @@ func TestPrincipalKeyFollowsTheCallerNotTheCurrentProcess(t *testing.T) {
 	}
 	if again := windowsSandboxPrincipalKey(WindowsSandboxCommandConfig{WorkspaceRoots: roots, CallerSID: windowsForeignSID}); again != caller {
 		t.Error("the caller-scoped key is not stable, so setup and the command half would derive different accounts")
+	}
+}
+
+// THE HELPER REFUSES WHAT THE BUILDER REFUSES. An elevated same-caller run that
+// hands the helper `--sandbox-principal 1` directly must stop before any
+// account, secret or ACL effect while no launch path exists, exactly as
+// BuildWindowsSandboxSetupArgs would have stopped it from being serialized.
+func TestPrincipalSetupRefusesAtTheHelperWhileLaunchIsUnavailable(t *testing.T) {
+	withWindowsSetupSeams(t, windowsSetupSeams{elevated: true})
+	windowsPrincipalLaunchAvailable = func() error { return errWindowsPrincipalLaunchUnavailable }
+
+	provisioned := false
+	setupWindowsSandboxPrincipalFn = func(WindowsSandboxCommandConfig) (func() error, error) {
+		provisioned = true
+		return func() error { return nil }, nil
+	}
+	applied := false
+	applyWindowsACLPlanFn = func(WindowsACLPlan) (func() error, error) {
+		applied = true
+		return func() error { return nil }, nil
+	}
+
+	var stderr bytes.Buffer
+	if code := runWindowsSandboxSetup(windowsSetupTestConfig(t, true), &stderr); code == 0 {
+		t.Fatalf("setup provisioned a principal that nothing can launch: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing to provision a sandbox principal") {
+		t.Fatalf("refusal did not say why: %s", stderr.String())
+	}
+	if provisioned || applied {
+		t.Fatalf("the refusal came after an effect: provisioned=%v aclApplied=%v", provisioned, applied)
+	}
+
+	// CONTROL: the opt-out path does not consult launch availability at all.
+	stderr.Reset()
+	if code := runWindowsSandboxSetup(windowsSetupTestConfig(t, false), &stderr); code != 0 {
+		t.Fatalf("setup without a principal must not depend on launch availability, got %d: %s", code, stderr.String())
 	}
 }

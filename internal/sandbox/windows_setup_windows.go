@@ -75,6 +75,17 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// Before anything is provisioned: a principal this helper could not hand back
 	// to the caller must not be created at all.
 	if config.PrincipalOptIn {
+		// THE SAME REFUSAL THE ARGUMENT BUILDER MAKES, AT THE BOUNDARY THAT MUTATES.
+		// BuildWindowsSandboxSetupArgs refuses to serialize a principal opt-in while
+		// no launch path exists, but both shipped entrypoints reach this function
+		// through the parser, and handwritten `--sandbox-principal 1` arrived here
+		// with nothing in the way of account, secret and ACL provisioning for a
+		// principal nothing can run. Arguments are an input format, not proof that
+		// the builder approved them.
+		if err := windowsPrincipalLaunchAvailable(); err != nil {
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": refusing to provision a sandbox principal: "+err.Error())
+			return 1
+		}
 		if err := assertWindowsSetupRunsAsCaller(config.CallerSID); err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 			return 1
