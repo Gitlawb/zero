@@ -20,6 +20,10 @@ type AnalysisResult struct {
 	TooComplex bool
 	// Programs lists the distinct top-level command names found, for diagnostics.
 	Programs []string
+	// GitInit is set when the script would create a git repository. It is a
+	// separate signal from Destructive and Network because the decision it feeds
+	// depends on WHERE the workspace sits, which the analyzer cannot see.
+	GitInit bool
 }
 
 // destructivePrograms are commands that can irrecoverably destroy data.
@@ -183,6 +187,9 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if commandUsesNetwork(prog, rest) {
 			result.Network = true
 		}
+		if commandCreatesGitRepository(prog, rest) {
+			result.GitInit = true
+		}
 		if destructivePrograms[prog] ||
 			(prog == "rm" && hasRecursiveForce(rest)) ||
 			(powerShellRemoveItemPrograms[prog] && hasPowerShellRecursiveForce(rest)) ||
@@ -277,8 +284,148 @@ func packageManagerOffline(words []string) bool {
 	return false
 }
 
+// gitGlobalOptionsTakingValue are git's own options that consume the NEXT word.
+//
+// firstSubcommand skips words beginning with "-" but not the value that follows
+// one, so "git -C sub clone <url>" made it answer "sub" and the command was
+// classified as touching no network at all. The "--opt=value" spelling is one
+// token and needs no entry here.
+//
+// Keys are lowercase because the analyzer lowercases every word before it gets
+// here, which also means -C and -c arrive identically. That is fine: both
+// consume a value, and nothing below needs to tell them apart.
+var gitGlobalOptionsTakingValue = map[string]bool{
+	"-c": true, "-C": true,
+	"--git-dir": true, "--work-tree": true, "--namespace": true,
+	"--exec-path": true, "--config-env": true, "--super-prefix": true,
+	"--attr-source": true,
+}
+
+// gitSubcommand returns git's subcommand, skipping global options AND the values
+// they consume. Returns "" when the words carry no subcommand.
+func gitSubcommand(words []string) string {
+	for index := 0; index < len(words); index++ {
+		word := words[index]
+		if word == "" {
+			continue
+		}
+		if !strings.HasPrefix(word, "-") {
+			return word
+		}
+		// "--opt=value" is one token and carries its own value.
+		if strings.HasPrefix(word, "--") && strings.Contains(word, "=") {
+			continue
+		}
+		if gitGlobalOptionsTakingValue[word] {
+			index++
+		}
+	}
+	return ""
+}
+
+// commandCreatesGitRepository reports whether this call would create a git
+// repository. It shares gitSubcommand with the network gate deliberately, so the
+// global options that already bypassed that gate cannot bypass this one either:
+// "git -C sub init" and "git -c k=v init" both resolve to init.
+//
+// init-db is git's original spelling and still works today. clone creates a
+// repository as surely as init does, with its config and hooks written by the
+// fetch rather than by hand: "git clone <url> ." into a workspace governed by an
+// ancestor repository lands a root .git whose carveouts setup never planned, so
+// it is the same nested-repository decision. The network prompt is a separate
+// gate and granting it does not answer this one. Reported by @gnanam1990.
+func commandCreatesGitRepository(prog string, args []*syntax.Word) bool {
+	if prog != "git" {
+		return false
+	}
+	words := literalWordTexts(args)
+	return gitSubcommandCreatesRepository(gitSubcommand(words), gitInlineAliases(words))
+}
+
+// gitSubcommandCreatesRepository classifies the subcommand git will actually
+// run. The literal token is not always it: `git -c alias.bootstrap=init
+// bootstrap` runs init, and the nested-repository refusal that reasons about
+// the literal token let that spelling create a repository with a writable
+// config and hooks under the workspace grant. An inline alias is resolved to
+// the git subcommand it names, through a short chain of aliases if it points
+// at another one. A shell alias (`!...`) runs an arbitrary program that this
+// analyzer cannot classify, so under this guard it counts as creation: the
+// guard only applies in an ancestor-governed workspace with no local .git,
+// where the safe answer to "could this make one" is yes.
+func gitSubcommandCreatesRepository(subcommand string, aliases map[string]string) bool {
+	// Resolved all the way to a terminal subcommand, the way git resolves it,
+	// with the names already visited kept so a cycle cannot spin. Under this
+	// guard the two ways to run out, a cycle or a chain that never reaches a
+	// real subcommand, are refusals: an alias this analyzer cannot follow to
+	// its end is not evidence that nothing gets created. A depth cap that gave
+	// up with "false" let a five-link chain ending in init through.
+	visited := map[string]bool{}
+	for {
+		switch subcommand {
+		case "init", "init-db", "clone":
+			return true
+		}
+		expansion, ok := aliases[subcommand]
+		if !ok {
+			return false
+		}
+		if visited[subcommand] {
+			return true
+		}
+		visited[subcommand] = true
+		expansion = strings.TrimSpace(expansion)
+		if strings.HasPrefix(expansion, "!") {
+			return true
+		}
+		fields := strings.Fields(expansion)
+		if len(fields) == 0 {
+			return true
+		}
+		subcommand = fields[0]
+	}
+}
+
+// gitInlineAliases collects the alias.NAME=EXPANSION settings supplied on the
+// command line before the subcommand, in the spellings git accepts: `-c k=v`
+// and `-ck=v`. Other global options that take a
+// value are stepped over the way gitSubcommand steps over them, so a value
+// that happens to look like a subcommand does not end the scan early.
+func gitInlineAliases(words []string) map[string]string {
+	aliases := map[string]string{}
+	for index := 0; index < len(words); index++ {
+		word := words[index]
+		if word == "" {
+			continue
+		}
+		if !strings.HasPrefix(word, "-") {
+			break
+		}
+		setting := ""
+		switch {
+		case word == "-c":
+			if index+1 < len(words) {
+				index++
+				setting = words[index]
+			}
+		case strings.HasPrefix(word, "-c") && !strings.HasPrefix(word, "--"):
+			setting = strings.TrimPrefix(word, "-c")
+		case strings.HasPrefix(word, "--") && strings.Contains(word, "="):
+			continue
+		case gitGlobalOptionsTakingValue[word]:
+			index++
+			continue
+		}
+		name, expansion, found := strings.Cut(setting, "=")
+		if !found || !strings.HasPrefix(name, "alias.") {
+			continue
+		}
+		aliases[strings.TrimPrefix(name, "alias.")] = expansion
+	}
+	return aliases
+}
+
 func gitUsesNetwork(words []string) bool {
-	switch firstSubcommand(words, nil) {
+	switch gitSubcommand(words) {
 	case "clone", "fetch", "pull", "push", "ls-remote", "archive":
 		return true
 	default:

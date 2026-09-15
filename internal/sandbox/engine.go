@@ -374,6 +374,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		}
 		return deny(request, risk, BlockNetwork, "", ReasonNetworkBlocked, false)
 	}
+	if HasRiskCategory(risk, "nested_git_init") {
+		return deny(request, risk, BlockNestedGitInit, "", ReasonNestedGitInit, false)
+	}
 	if HasRiskCategory(risk, "destructive") {
 		if request.SideEffect == SideEffectShell && !request.PermissionGranted && request.PermissionMode != PermissionUnsafe {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: "destructive shell command requires approval"}
