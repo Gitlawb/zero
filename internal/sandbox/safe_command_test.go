@@ -407,6 +407,20 @@ func TestDetectInteractiveMongoEvalAndFullPaths(t *testing.T) {
 	}
 }
 
+func TestDetectInteractiveCommandBoundsNestedShellLaunchers(t *testing.T) {
+	command := "vim file"
+	for range maxAnalyzerDepth + 2 {
+		command = "bash -c '" + strings.ReplaceAll(command, "'", `'"'"'`) + "'"
+	}
+	got := DetectInteractiveCommand(command, "linux")
+	if !got.Interactive || got.Command != "nested shell launcher" {
+		t.Fatalf("DetectInteractiveCommand(deep shell chain) = %+v; want conservative depth-limit result", got)
+	}
+	if !strings.Contains(got.Reason, "cannot be proven non-interactive") {
+		t.Fatalf("DetectInteractiveCommand(deep shell chain).Reason = %q; want unresolved inspection reason", got.Reason)
+	}
+}
+
 // The hand-written segment splitter misses interactive programs hidden by
 // constructs only a real shell parser resolves (a newline separator collapsed
 // to a space; a brace group that shifts the real command position). The AST
