@@ -53,19 +53,21 @@ func TestRollbackRefusesAReplacedMaterializedChild(t *testing.T) {
 			}
 
 			removed, err := rollbackWindowsACLMaterialization(created)
-			if err == nil {
-				t.Fatal("rollback deleted a replacement it never created without complaint")
-			}
-			if removed {
-				t.Fatal("rollback reported the target removed after refusing the replacement")
-			}
+			// The replacement is the whole point: it has to survive, whatever the
+			// rollback reported about itself.
 			if _, statErr := os.Lstat(target); statErr != nil {
-				t.Fatalf("the replacement at %s is gone: %v", target, statErr)
+				t.Fatalf("rollback deleted the replacement at %s, which it never created: %v", target, statErr)
 			}
 			if !asFile {
 				if _, statErr := os.Lstat(filepath.Join(target, "keep")); statErr != nil {
 					t.Fatalf("the replacement directory's contents are gone: %v", statErr)
 				}
+			}
+			if err == nil {
+				t.Fatal("rollback left a replacement it never created without saying why")
+			}
+			if removed {
+				t.Fatal("rollback reported the target removed after refusing the replacement")
 			}
 		})
 	}
