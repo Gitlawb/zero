@@ -263,3 +263,56 @@ func TestNestedWorkspaceRefusesGitCloneIntoTheRoot(t *testing.T) {
 		t.Fatalf("clone into a standalone workspace was refused as nested: %#v", decision)
 	}
 }
+
+// AN INLINE ALIAS IS STILL INIT. The refusal used to read the literal
+// subcommand token, and `git -c alias.bootstrap=init bootstrap` passed it with
+// shell and network granted and created a repository the profile carves nothing
+// out for. The alias is resolved to the subcommand git runs; a chained alias
+// follows the chain; a shell alias, which this analyzer cannot classify, counts
+// as creation under this guard and nowhere else.
+func TestNestedWorkspaceRefusesAnInlineGitAliasForInit(t *testing.T) {
+	ancestor, workspace := nestedGitWorkspace(t)
+	policy := DefaultPolicy()
+	policy.Network = NetworkAllow
+	engine := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: policy, Backend: nativeWrappingBackend})
+	for _, command := range []string{
+		"git init",
+		"git -c alias.bootstrap=init bootstrap",
+		"git -calias.bootstrap=init bootstrap",
+		"git -c alias.mk=init-db mk",
+		"git -c alias.get=clone get https://example.invalid/repo.git .",
+		"git -c alias.two=bootstrap -c alias.bootstrap=init two",
+		"git -C . -c alias.bootstrap=init bootstrap",
+		"git -c alias.sh=!sh -c 'git init' sh",
+	} {
+		request := gitCommandRequest(workspace, command)
+		request.Permission = PermissionAllow
+		request.PermissionGranted = true
+		decision := engine.Evaluate(context.Background(), request)
+		if decision.Action != ActionDeny || decision.Block == nil || decision.Block.Code != BlockNestedGitInit {
+			t.Fatalf("%q inside the repository at %s was not refused as nested repository creation: action=%s block=%#v", command, ancestor, decision.Action, decision.Block)
+		}
+	}
+	// CONTROLS: a harmless alias, an unrelated -c setting, and ordinary use.
+	for _, command := range []string{
+		"git -c alias.st=status st",
+		"git -c core.autocrlf=false status",
+		"git -c alias.bootstrap=init status",
+		"git -c alias.lg=log lg --oneline",
+	} {
+		request := gitCommandRequest(workspace, command)
+		request.Permission = PermissionAllow
+		request.PermissionGranted = true
+		if decision := engine.Evaluate(context.Background(), request); decision.Action == ActionDeny && decision.Block != nil && decision.Block.Code == BlockNestedGitInit {
+			t.Fatalf("%q was refused as nested repository creation; it creates no repository", command)
+		}
+	}
+	// And a standalone workspace is not governed at all, alias or not.
+	standalone := t.TempDir()
+	request := gitCommandRequest(standalone, "git -c alias.bootstrap=init bootstrap")
+	request.Permission = PermissionAllow
+	request.PermissionGranted = true
+	if decision := gitWorkspaceEngine(t, standalone).Evaluate(context.Background(), request); decision.Block != nil && decision.Block.Code == BlockNestedGitInit {
+		t.Fatalf("an aliased init in a standalone workspace was refused as nested: %#v", decision)
+	}
+}

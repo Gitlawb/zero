@@ -338,12 +338,77 @@ func commandCreatesGitRepository(prog string, args []*syntax.Word) bool {
 	if prog != "git" {
 		return false
 	}
-	switch gitSubcommand(literalWordTexts(args)) {
+	words := literalWordTexts(args)
+	return gitSubcommandCreatesRepository(gitSubcommand(words), gitInlineAliases(words), 0)
+}
+
+// gitSubcommandCreatesRepository classifies the subcommand git will actually
+// run. The literal token is not always it: `git -c alias.bootstrap=init
+// bootstrap` runs init, and the nested-repository refusal that reasons about
+// the literal token let that spelling create a repository with a writable
+// config and hooks under the workspace grant. An inline alias is resolved to
+// the git subcommand it names, through a short chain of aliases if it points
+// at another one. A shell alias (`!...`) runs an arbitrary program that this
+// analyzer cannot classify, so under this guard it counts as creation: the
+// guard only applies in an ancestor-governed workspace with no local .git,
+// where the safe answer to "could this make one" is yes.
+func gitSubcommandCreatesRepository(subcommand string, aliases map[string]string, depth int) bool {
+	switch subcommand {
 	case "init", "init-db", "clone":
 		return true
-	default:
+	}
+	expansion, ok := aliases[subcommand]
+	if !ok || depth >= 4 {
 		return false
 	}
+	expansion = strings.TrimSpace(expansion)
+	if strings.HasPrefix(expansion, "!") {
+		return true
+	}
+	fields := strings.Fields(expansion)
+	if len(fields) == 0 {
+		return false
+	}
+	return gitSubcommandCreatesRepository(fields[0], aliases, depth+1)
+}
+
+// gitInlineAliases collects the alias.NAME=EXPANSION settings supplied on the
+// command line before the subcommand, in the spellings git accepts: `-c k=v`
+// and `-ck=v`. Other global options that take a
+// value are stepped over the way gitSubcommand steps over them, so a value
+// that happens to look like a subcommand does not end the scan early.
+func gitInlineAliases(words []string) map[string]string {
+	aliases := map[string]string{}
+	for index := 0; index < len(words); index++ {
+		word := words[index]
+		if word == "" {
+			continue
+		}
+		if !strings.HasPrefix(word, "-") {
+			break
+		}
+		setting := ""
+		switch {
+		case word == "-c":
+			if index+1 < len(words) {
+				index++
+				setting = words[index]
+			}
+		case strings.HasPrefix(word, "-c") && !strings.HasPrefix(word, "--"):
+			setting = strings.TrimPrefix(word, "-c")
+		case strings.HasPrefix(word, "--") && strings.Contains(word, "="):
+			continue
+		case gitGlobalOptionsTakingValue[word]:
+			index++
+			continue
+		}
+		name, expansion, found := strings.Cut(setting, "=")
+		if !found || !strings.HasPrefix(name, "alias.") {
+			continue
+		}
+		aliases[strings.TrimPrefix(name, "alias.")] = expansion
+	}
+	return aliases
 }
 
 func gitUsesNetwork(words []string) bool {
