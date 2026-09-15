@@ -41,6 +41,11 @@ type windowsACLPathGroup struct {
 type windowsACLChainStep struct {
 	Name string
 	Made bool
+	// ID is the identity of the directory this run created at Name, read from
+	// the handle that created it. Rollback removes only an object with this
+	// identity: a created name says the parent is unchanged, not that the
+	// child has not been renamed aside and replaced since.
+	ID windowsFileIdentity
 }
 
 // windowsACLMaterialization is exactly what materialization created, recorded in
@@ -63,6 +68,8 @@ type windowsACLMaterialization struct {
 	// for the .git/config carveout. Empty when the target is a directory.
 	File     string
 	FileMade bool
+	// FileID identifies the leaf file this run created, for the same reason.
+	FileID windowsFileIdentity
 }
 
 func (materialization windowsACLMaterialization) createdAnything() bool {
@@ -926,8 +933,11 @@ func materializeWindowsACLTarget(path string, asFile bool) (windowsACLMaterializ
 	// materialization needed. createWindowsACLChildFile reports that as
 	// created=false, so rollback will not delete a file the sandbox did not make.
 	created.File = leaf
-	madeFile, err := createWindowsACLChildFile(parent, leaf)
+	madeFile, fileID, err := createWindowsACLChildFile(parent, leaf)
 	created.FileMade = madeFile
+	if madeFile {
+		created.FileID = fileID
+	}
 	return created, err
 }
 
@@ -1009,6 +1019,21 @@ func rollbackWindowsACLMaterialization(materialization windowsACLMaterialization
 			}
 			return false, fmt.Errorf("unwind windows ACL materialization under %s: %w", materialization.AnchorPath, openErr)
 		}
+		// A component this run created has to still be the object it created
+		// before anything beneath it is touched: an ordinary directory renamed
+		// into its place beneath the unchanged anchor is not ours to descend
+		// into, let alone delete.
+		if step := materialization.Chain[depth]; step.Made {
+			got, identityErr := windowsIdentityOfHandle(child)
+			if identityErr != nil {
+				_ = windows.CloseHandle(child)
+				return false, fmt.Errorf("unwind windows ACL materialization under %s: identify %s: %w", materialization.AnchorPath, step.Name, identityErr)
+			}
+			if got != step.ID {
+				_ = windows.CloseHandle(child)
+				return false, fmt.Errorf("refusing to unwind windows ACL materialization under %s: %s is no longer the directory setup created", materialization.AnchorPath, step.Name)
+			}
+		}
 		handles = append(handles, child)
 	}
 
@@ -1018,7 +1043,7 @@ func rollbackWindowsACLMaterialization(materialization windowsACLMaterialization
 	// The file leaf lives inside the deepest chain directory, so it goes first
 	// and only if the descent actually reached that far.
 	if materialization.FileMade && depth == needed {
-		if err := deleteWindowsACLChildFile(handles[len(handles)-1], materialization.File); err != nil {
+		if err := deleteWindowsACLChildFileAs(handles[len(handles)-1], materialization.File, materialization.FileID); err != nil {
 			errs = append(errs, fmt.Errorf("remove materialized windows ACL file %s: %w", materialization.File, err))
 		} else {
 			targetRemoved = true
@@ -1041,7 +1066,7 @@ func rollbackWindowsACLMaterialization(materialization windowsACLMaterialization
 		if !materialization.Chain[index].Made {
 			continue
 		}
-		if err := deleteWindowsACLChildDirectory(handles[index], materialization.Chain[index].Name); err != nil {
+		if err := deleteWindowsACLChildDirectoryAs(handles[index], materialization.Chain[index].Name, materialization.Chain[index].ID); err != nil {
 			errs = append(errs, fmt.Errorf("remove materialized windows ACL directory %s: %w", materialization.Chain[index].Name, err))
 			continue
 		}
@@ -1137,7 +1162,15 @@ func makeWindowsACLDirChainNoFollow(dir string) (windowsACLMaterialization, wind
 			_ = windows.CloseHandle(parent)
 			return created, 0, err
 		}
-		created.Chain = append(created.Chain, windowsACLChainStep{Name: name, Made: madeNow})
+		step := windowsACLChainStep{Name: name, Made: madeNow}
+		if madeNow {
+			if step.ID, err = windowsIdentityOfHandle(child); err != nil {
+				_ = windows.CloseHandle(parent)
+				_ = windows.CloseHandle(child)
+				return created, 0, fmt.Errorf("identify materialized windows ACL directory %s: %w", name, err)
+			}
+		}
+		created.Chain = append(created.Chain, step)
 		_ = windows.CloseHandle(parent)
 		parent = child
 	}

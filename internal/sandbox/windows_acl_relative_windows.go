@@ -271,13 +271,13 @@ func openWindowsACLChildDirectory(parent windows.Handle, name string) (handle wi
 // match, so porting it literally would have turned that tolerated race into a
 // hard failure. FILE_OPEN_IF keeps the old behaviour and reports the truth in
 // created, which rollback needs so it never deletes a file it did not make.
-func createWindowsACLChildFile(parent windows.Handle, name string) (created bool, err error) {
+func createWindowsACLChildFile(parent windows.Handle, name string) (created bool, identity windowsFileIdentity, err error) {
 	if err := validateWindowsACLComponent(name); err != nil {
-		return false, err
+		return false, windowsFileIdentity{}, err
 	}
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
-		return false, fmt.Errorf("encode windows ACL file component %s: %w", name, err)
+		return false, windowsFileIdentity{}, fmt.Errorf("encode windows ACL file component %s: %w", name, err)
 	}
 	attributes := windows.OBJECT_ATTRIBUTES{
 		RootDirectory: parent,
@@ -301,17 +301,22 @@ func createWindowsACLChildFile(parent windows.Handle, name string) (created bool
 		0,
 		0,
 	); err != nil {
-		return false, fmt.Errorf("create windows ACL file component %s: %w", name, err)
+		return false, windowsFileIdentity{}, fmt.Errorf("create windows ACL file component %s: %w", name, err)
 	}
 	if err := rejectWindowsACLReparseHandle(handle, name); err != nil {
 		_ = windows.CloseHandle(handle)
-		return false, err
+		return false, windowsFileIdentity{}, err
 	}
 	createdNow := status.Information == windowsFileCreated
-	if err := windows.CloseHandle(handle); err != nil {
-		return createdNow, fmt.Errorf("close windows ACL file component %s: %w", name, err)
+	identity, err = windowsIdentityOfHandle(handle)
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return createdNow, windowsFileIdentity{}, fmt.Errorf("identify windows ACL file component %s: %w", name, err)
 	}
-	return createdNow, nil
+	if err := windows.CloseHandle(handle); err != nil {
+		return createdNow, identity, fmt.Errorf("close windows ACL file component %s: %w", name, err)
+	}
+	return createdNow, identity, nil
 }
 
 // deleteWindowsACLChildDirectory removes one directory directly beneath parent.
@@ -325,7 +330,19 @@ func createWindowsACLChildFile(parent windows.Handle, name string) (created bool
 // A missing child is not an error: rollback runs on failure paths where the
 // object may never have been created.
 func deleteWindowsACLChildDirectory(parent windows.Handle, name string) error {
-	return deleteWindowsACLChild(parent, name, true)
+	return deleteWindowsACLChild(parent, name, true, windowsFileIdentity{})
+}
+
+// deleteWindowsACLChildDirectoryAs and deleteWindowsACLChildFileAs remove the
+// child only if the object at name is still want. The identity is read from
+// the very handle the delete disposition is set on, so a replacement renamed
+// in between a check and the unlink cannot be the thing removed.
+func deleteWindowsACLChildDirectoryAs(parent windows.Handle, name string, want windowsFileIdentity) error {
+	return deleteWindowsACLChild(parent, name, true, want)
+}
+
+func deleteWindowsACLChildFileAs(parent windows.Handle, name string, want windowsFileIdentity) error {
+	return deleteWindowsACLChild(parent, name, false, want)
 }
 
 // deleteWindowsACLChildFile removes one file directly beneath parent, for the
@@ -334,7 +351,7 @@ func deleteWindowsACLChildDirectory(parent windows.Handle, name string) error {
 // stat-ing the pathname, because a stat is another pathname resolution and this
 // whole file exists to avoid those.
 func deleteWindowsACLChildFile(parent windows.Handle, name string) error {
-	return deleteWindowsACLChild(parent, name, false)
+	return deleteWindowsACLChild(parent, name, false, windowsFileIdentity{})
 }
 
 // deleteWindowsACLChild opens one child relative to parent and deletes it by
@@ -355,7 +372,7 @@ func deleteWindowsACLChildFile(parent windows.Handle, name string) error {
 //
 // FILE_DIRECTORY_FILE / FILE_NON_DIRECTORY_FILE also make the open refuse an
 // object of the wrong shape rather than deleting it.
-func deleteWindowsACLChild(parent windows.Handle, name string, directory bool) error {
+func deleteWindowsACLChild(parent windows.Handle, name string, directory bool, want windowsFileIdentity) error {
 	if err := validateWindowsACLComponent(name); err != nil {
 		return err
 	}
@@ -386,7 +403,7 @@ func deleteWindowsACLChild(parent windows.Handle, name string, directory bool) e
 	var status windows.IO_STATUS_BLOCK
 	if err := windows.NtCreateFile(
 		&handle,
-		windows.DELETE,
+		windows.DELETE|windows.FILE_READ_ATTRIBUTES,
 		&attributes,
 		&status,
 		nil,
@@ -403,6 +420,15 @@ func deleteWindowsACLChild(parent windows.Handle, name string, directory bool) e
 		return fmt.Errorf("open windows ACL component %s for delete: %w", name, err)
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
+	if !want.empty() {
+		got, err := windowsIdentityOfHandle(handle)
+		if err != nil {
+			return fmt.Errorf("identify windows ACL component %s before delete: %w", name, err)
+		}
+		if got != want {
+			return fmt.Errorf("refusing to remove %s: it is no longer the object setup created", name)
+		}
+	}
 
 	// One BOOLEAN: FILE_DISPOSITION_INFORMATION.DeleteFile = TRUE.
 	disposition := byte(1)

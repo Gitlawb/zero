@@ -394,7 +394,7 @@ func TestChildOperationsRefuseNamesThatAreNotSingleComponents(t *testing.T) {
 			}
 		})
 		t.Run("create file "+name, func(t *testing.T) {
-			if _, err := createWindowsACLChildFile(parent, name); err == nil {
+			if _, _, err := createWindowsACLChildFile(parent, name); err == nil {
 				t.Fatalf("accepted %q for file creation", name)
 			}
 		})
