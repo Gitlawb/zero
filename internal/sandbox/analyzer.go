@@ -339,7 +339,7 @@ func commandCreatesGitRepository(prog string, args []*syntax.Word) bool {
 		return false
 	}
 	words := literalWordTexts(args)
-	return gitSubcommandCreatesRepository(gitSubcommand(words), gitInlineAliases(words), 0)
+	return gitSubcommandCreatesRepository(gitSubcommand(words), gitInlineAliases(words))
 }
 
 // gitSubcommandCreatesRepository classifies the subcommand git will actually
@@ -352,24 +352,37 @@ func commandCreatesGitRepository(prog string, args []*syntax.Word) bool {
 // analyzer cannot classify, so under this guard it counts as creation: the
 // guard only applies in an ancestor-governed workspace with no local .git,
 // where the safe answer to "could this make one" is yes.
-func gitSubcommandCreatesRepository(subcommand string, aliases map[string]string, depth int) bool {
-	switch subcommand {
-	case "init", "init-db", "clone":
-		return true
+func gitSubcommandCreatesRepository(subcommand string, aliases map[string]string) bool {
+	// Resolved all the way to a terminal subcommand, the way git resolves it,
+	// with the names already visited kept so a cycle cannot spin. Under this
+	// guard the two ways to run out, a cycle or a chain that never reaches a
+	// real subcommand, are refusals: an alias this analyzer cannot follow to
+	// its end is not evidence that nothing gets created. A depth cap that gave
+	// up with "false" let a five-link chain ending in init through.
+	visited := map[string]bool{}
+	for {
+		switch subcommand {
+		case "init", "init-db", "clone":
+			return true
+		}
+		expansion, ok := aliases[subcommand]
+		if !ok {
+			return false
+		}
+		if visited[subcommand] {
+			return true
+		}
+		visited[subcommand] = true
+		expansion = strings.TrimSpace(expansion)
+		if strings.HasPrefix(expansion, "!") {
+			return true
+		}
+		fields := strings.Fields(expansion)
+		if len(fields) == 0 {
+			return true
+		}
+		subcommand = fields[0]
 	}
-	expansion, ok := aliases[subcommand]
-	if !ok || depth >= 4 {
-		return false
-	}
-	expansion = strings.TrimSpace(expansion)
-	if strings.HasPrefix(expansion, "!") {
-		return true
-	}
-	fields := strings.Fields(expansion)
-	if len(fields) == 0 {
-		return false
-	}
-	return gitSubcommandCreatesRepository(fields[0], aliases, depth+1)
 }
 
 // gitInlineAliases collects the alias.NAME=EXPANSION settings supplied on the

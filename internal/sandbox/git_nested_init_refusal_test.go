@@ -282,6 +282,9 @@ func TestNestedWorkspaceRefusesAnInlineGitAliasForInit(t *testing.T) {
 		"git -c alias.mk=init-db mk",
 		"git -c alias.get=clone get https://example.invalid/repo.git .",
 		"git -c alias.two=bootstrap -c alias.bootstrap=init two",
+		"git -c alias.a=b -c alias.b=c -c alias.c=d -c alias.d=e -c alias.e=init a .",
+		"git -c alias.a=b -c alias.b=a a",
+		"git -c alias.dangling=nowhere -c alias.nowhere= dangling",
 		"git -C . -c alias.bootstrap=init bootstrap",
 		"git -c alias.sh=!sh -c 'git init' sh",
 	} {
@@ -299,6 +302,7 @@ func TestNestedWorkspaceRefusesAnInlineGitAliasForInit(t *testing.T) {
 		"git -c core.autocrlf=false status",
 		"git -c alias.bootstrap=init status",
 		"git -c alias.lg=log lg --oneline",
+		"git -c alias.a=b -c alias.b=c -c alias.c=d -c alias.d=e -c alias.e=status a",
 	} {
 		request := gitCommandRequest(workspace, command)
 		request.Permission = PermissionAllow
