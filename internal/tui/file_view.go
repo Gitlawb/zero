@@ -1010,9 +1010,14 @@ type fileViewState struct {
 	path               string // workspace-relative, as carried by changedFiles
 	mode               int    // fileViewDiff | fileViewFull
 	parentScrollOffset int
-	// preservedScrollOffset holds the reader's offset while an async reload
-	// swaps the body for the one-line loading placeholder.
+	// preservedScrollOffset holds the reader's latest scroll intent while an
+	// async reload swaps the body for the one-line loading placeholder. Scroll
+	// actions and prompt submission update it during the pending window, and
+	// handleFileViewLoaded reconciles it against the real body.
 	preservedScrollOffset int
+	// completedBodyLines is the rendered body height of the last accepted
+	// snapshot, including screen wrapping. A loading placeholder never updates it.
+	completedBodyLines int
 
 	// View session lifetime identity (UUIDv7 RFC 9562 0-alloc)
 	lifetimeToken [16]byte
@@ -1222,16 +1227,18 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	m.fileView.loadedRev = msg.requiredSourceRev
 	m.fileView.hasError = (msg.err != nil)
 	// Reconcile the held reading offset against the real body now that the
-	// loading placeholder is gone; clamp in case the file shrank.
+	// loading placeholder is gone. Apply the height delta exactly once to
+	// preserve the absolute position, while offset zero keeps following the tail.
+	current, maxOffset := m.chatScrollMetrics()
 	if m.fileView.preservedScrollOffset > 0 {
-		current, maxOffset := m.chatScrollMetrics()
-		m.chatScrollOffset = clampInt(m.fileView.preservedScrollOffset, 0, maxOffset)
+		m.chatScrollOffset = clampInt(m.fileView.preservedScrollOffset+current-m.fileView.completedBodyLines, 0, maxOffset)
 		if m.chatScrollOffset > 0 {
 			m.chatBodyLines = current
 		} else {
 			m.chatBodyLines = 0
 		}
 	}
+	m.fileView.completedBodyLines = current
 	return m, nil
 }
 
@@ -1354,4 +1361,47 @@ func (m model) fileViewChangedLines() map[string]bool {
 		}
 	}
 	return changed
+}
+
+// toolResultMayMutateUnknownScope reports tools that can change workspace files
+// but do not reliably report the affected paths (ChangedFiles). Their completion
+// must trigger the conservative unknown-scope refresh so an open file view
+// cannot keep rendering a stale snapshot. Task/TaskOutput successful results are
+// suppressed from the transcript, so their completion boundaries carry this
+// refresh separately.
+func toolResultMayMutateUnknownScope(name string) bool {
+	switch name {
+	case "bash", "exec_command", "terminal_session", "write_stdin",
+		"swarm_collect", "swarm_status", "Task", "TaskOutput":
+		return true
+	}
+	return false
+}
+
+// invalidateFileViewForUnknownMutation performs the conservative refresh used
+// when a completed action may have changed workspace files but no exact path is
+// known: purge the shared render cache and, when a full file view is open,
+// schedule an async reload so its snapshot cannot stay stale.
+func (m model) invalidateFileViewForUnknownMutation() (model, tea.Cmd) {
+	defaultFileViewCache.invalidateUnknownScope()
+	if m.fileView.active && m.fileView.mode == fileViewFull {
+		return m.startFileViewRefreshCmd(m.chatColumnWidth())
+	}
+	return m, nil
+}
+
+// recoverInvalidatedFileView schedules a snapshot for a surface whose shared
+// cache generation changed while another BTW surface handled the invalidation.
+func (m model) recoverInvalidatedFileView() (model, tea.Cmd) {
+	if !m.fileView.active || m.fileView.mode != fileViewFull {
+		return m, nil
+	}
+	generation := m.fileView.loadedGen
+	if m.fileView.loading {
+		generation = m.fileView.desiredGen
+	}
+	if generation == defaultFileViewCache.generation() {
+		return m, nil
+	}
+	return m.startFileViewLoadCmd(m.chatColumnWidth())
 }

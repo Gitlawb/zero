@@ -763,6 +763,13 @@ type specialistCompleteMsg struct {
 	errorMsg       string
 }
 
+// unknownScopeMutationMsg carries the completion of a suppressed tool result
+// (e.g. TaskOutput) that may have mutated workspace files without reporting the
+// affected paths. It triggers the conservative file-view refresh.
+type unknownScopeMutationMsg struct {
+	runID int
+}
+
 // swarmSessionsMsg carries swarm task_id -> member session_id pairs (from
 // swarm_collect's Meta) so the AGENTS sidebar rows can drill into a member's
 // session like a specialist card.
@@ -2801,6 +2808,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// complete once the turn settles.
 		var sweepCmd tea.Cmd
 		m, sweepCmd = m.maybeGitSweep()
+		// The sweep is a no-op outside a git workspace, so an open full-file view
+		// still needs the conservative invalidation to pick up mutations whose
+		// paths were never reported (e.g. a hidden TaskOutput success).
+		var fileRefreshCmd tea.Cmd
+		m, fileRefreshCmd = m.invalidateFileViewForUnknownMutation()
 		// If this run was a loop iteration, advance that loop (schedule its next wake
 		// or stop it). Done before launchQueuedMessageIfReady so a user's queued prompt
 		// still wins the immediate re-launch; the loop fires on the next idle tick.
@@ -2832,7 +2844,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.goalAware && !hadQueuedMessage && peerCmd == nil && next.pendingPermission == nil && msg.specReview == nil {
 			next, goalCmd = next.launchGoalContinuationIfReady()
 		}
-		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, peerCmd, peerApprovalCmd, loopTickCmd, goalCmd)
+		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, fileRefreshCmd, queuedCmd, peerCmd, peerApprovalCmd, loopTickCmd, goalCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapIdleMsg:
@@ -2860,6 +2872,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastCompactResult = &msg.result
 		m = m.setCompactStatusRow(m.compactText(true))
+		if msg.hasSessionSnapshot {
+			return m.refreshFileViewMarkers()
+		}
 		return m, nil
 	case planUpdateMsg:
 		if msg.runID != m.activeRunID {
@@ -2938,7 +2953,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.transcript = appendTranscriptRow(m.transcript, cardRow)
 		}
-		return m, nil
+		// A specialist (Task) works in a separate workspace-visible process and
+		// its successful result is suppressed from the transcript, so this is the
+		// only boundary that sees the mutation. Conservatively invalidate the open
+		// snapshot: the child may have changed files without a path report.
+		var refresh tea.Cmd
+		m, refresh = m.invalidateFileViewForUnknownMutation()
+		return m, refresh
 	case specialistProgressMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -2997,21 +3018,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if isPlanCommandTool(msg.row.tool) {
 				var sweep tea.Cmd
 				m, sweep = m.maybeGitSweep()
-				defaultFileViewCache.invalidateUnknownScope()
-				if m.fileView.active {
-					target := m.fileView.path
-					if !filepath.IsAbs(target) {
-						target = filepath.Join(m.cwd, target)
-					}
-					defaultFileViewCache.invalidatePath(target)
-					m.fileView.requiredSourceRev++
-					if m.fileView.mode == fileViewFull {
-						var loadCmd tea.Cmd
-						m, loadCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
-						return m, tea.Batch(sweep, loadCmd)
-					}
-				}
-				return m, sweep
+				var refresh tea.Cmd
+				m, refresh = m.invalidateFileViewForUnknownMutation()
+				return m, batchCommands(sweep, refresh)
 			}
 			var loadCmds []tea.Cmd
 			for _, p := range msg.row.changedFiles {
@@ -3038,6 +3047,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(loadCmds) > 0 {
 				return m, tea.Batch(loadCmds...)
 			}
+			// A tool that can mutate files but reports no exact paths (terminal
+			// sessions, swarm status/collect) must still invalidate an open
+			// snapshot, falling back to the conservative unknown-scope refresh.
+			if toolResultMayMutateUnknownScope(msg.row.tool) {
+				var sweep tea.Cmd
+				m, sweep = m.maybeGitSweep()
+				var refresh tea.Cmd
+				m, refresh = m.invalidateFileViewForUnknownMutation()
+				return m, batchCommands(sweep, refresh)
+			}
 		}
 		return m, nil
 	case swarmSessionsMsg:
@@ -3053,6 +3072,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case unknownScopeMutationMsg:
+		// A suppressed mutating result (TaskOutput) completed. Its success row is
+		// hidden, so trigger the conservative refresh on the owning surface.
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		return m.invalidateFileViewForUnknownMutation()
 	case doctorCommandResultMsg:
 		if msg.id == 0 || msg.id == m.doctorCommandSeq {
 			m.doctorInFlight = false
@@ -3097,14 +3123,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
-		defaultFileViewCache.invalidateUnknownScope()
-		if m.fileView.active {
-			m.fileView.requiredSourceRev++
-			if m.fileView.mode == fileViewFull {
-				return m.startFileViewRefreshCmd(m.chatColumnWidth())
-			}
-		}
-		return m, nil
+		// invalidateFileViewForUnknownMutation schedules startFileViewRefreshCmd when fileView is active
+		return m.invalidateFileViewForUnknownMutation()
 	case providerModelsDiscoveredMsg:
 		return m.applyProviderModelsDiscovered(msg), nil
 	case setupModelsDiscoveredMsg:
@@ -3740,6 +3760,16 @@ func (m model) scrollChat(delta int) model {
 	if !m.altScreen || delta == 0 {
 		return m
 	}
+	// A pending full-file reload renders a one-line placeholder whose geometry
+	// cannot represent the reader's position. Apply the delta to the pending
+	// intent against the last completed body instead, so a Page Down, arrow, or
+	// wheel during the reload is not discarded by the placeholder's zero height.
+	if m.fileView.active && m.fileView.mode == fileViewFull && m.fileView.loading {
+		maxOffset := maxInt(0, m.fileView.completedBodyLines-m.chatViewportHeight())
+		m.fileView.preservedScrollOffset = clampInt(m.fileView.preservedScrollOffset+delta, 0, maxOffset)
+		m.chatScrollOffset = m.fileView.preservedScrollOffset
+		return m
+	}
 	viewport, ok := m.chatTranscriptViewport()
 	if !ok {
 		return m
@@ -3747,6 +3777,28 @@ func (m model) scrollChat(delta int) model {
 	m.chatScrollOffset = viewport.scroll(delta).offset
 	if m.chatScrollOffset == 0 {
 		m.chatBodyLines = 0
+	}
+	return m
+}
+
+// chatViewportHeight returns the height of the transcript body viewport, or 0
+// when it cannot be measured. It lets pending-scroll math run against the last
+// completed body even while the visible body is the loading placeholder.
+func (m model) chatViewportHeight() int {
+	viewport, ok := m.chatTranscriptViewport()
+	if !ok {
+		return 0
+	}
+	return viewport.height
+}
+
+// resetChatScrollToBottom snaps the viewport to the tail for a real submission
+// and, if a full-file reload is pending, records the same intent so completion
+// cannot restore the reader's pre-submission position.
+func (m model) resetChatScrollToBottom() model {
+	m.chatScrollOffset = 0
+	if m.fileView.loading {
+		m.fileView.preservedScrollOffset = 0
 	}
 	return m
 }
@@ -3787,8 +3839,9 @@ func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
 func (m model) syncChatScroll() model {
 	// A pending full-file reload temporarily renders a one-line loading
 	// placeholder. Measuring it would clamp the reader's offset to 0 and lose
-	// their place, so hold the preserved offset until handleFileViewLoaded
-	// reconciles it against the real body.
+	// their place, so hold the pending intent — which scroll actions and prompt
+	// submission keep up to date — until handleFileViewLoaded reconciles it
+	// against the real body.
 	if m.altScreen && m.fileView.active && m.fileView.mode == fileViewFull &&
 		m.fileView.loading && m.fileView.preservedScrollOffset > 0 {
 		m.chatScrollOffset = m.fileView.preservedScrollOffset
@@ -4653,13 +4706,12 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	case pickerSession:
 		// item.Value is the chosen session id; handleResumeCommand hydrates it and
 		// rebuilds the transcript (returning "" on success, an error note on failure).
-		previousSessionID := m.activeSession.SessionID
 		text := ""
 		m, text = m.handleResumeCommand(item.Value)
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
-		if m.activeSession.SessionID != previousSessionID {
+		if text == "" {
 			m, cmd = m.refreshFileViewMarkers()
 		}
 	case pickerSkill:
@@ -4769,9 +4821,10 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	m.clearSuggestions()
 	// Snap the viewport back to the bottom for a real submission, but not for an
 	// empty Enter (a no-op) — that would yank the user away from wherever they
-	// had scrolled without anything actually being submitted.
+	// had scrolled without anything actually being submitted. A pending file
+	// reload records the same intent so its completion cannot undo the reset.
 	if command.kind != commandEmpty {
-		m.chatScrollOffset = 0
+		m = m.resetChatScrollToBottom()
 	}
 
 	return m.dispatchCommand(command)
@@ -4979,7 +5032,6 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
 		return m, nil
 	case commandResume:
-		previousSessionID := m.activeSession.SessionID
 		if m.pending {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
@@ -5008,7 +5060,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
 		var resumeCmd tea.Cmd
-		if m.activeSession.SessionID != previousSessionID {
+		if text == "" {
 			m, resumeCmd = m.refreshFileViewMarkers()
 		}
 		return m, resumeCmd
@@ -5261,7 +5313,7 @@ func (m model) executeSlash(input string) (tea.Model, tea.Cmd) {
 	}
 	m.rememberInput(input)
 	m.clearSuggestions()
-	m.chatScrollOffset = 0
+	m = m.resetChatScrollToBottom()
 	return m.dispatchCommand(command)
 }
 
@@ -6035,6 +6087,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			if !toolResultCardSuppressedInTranscript(result.Name, result.Status) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
+			} else if result.Name != "Task" && toolResultMayMutateUnknownScope(result.Name) && m.runtimeMessageSink != nil {
+				// A hidden successful mutating result (TaskOutput) still needs the
+				// conservative refresh; Task completion carries it via
+				// specialistCompleteMsg.
+				m.runtimeMessageSink(unknownScopeMutationMsg{runID: runID})
 			}
 			// Keep the latest plan state in sync for run details and step drill-in.
 			if result.Name == "update_plan" && m.registry != nil {

@@ -3516,3 +3516,418 @@ func TestFileViewLifecycle_VariantAccountingConsistency(t *testing.T) {
 		t.Fatalf("a purged entry must not charge retained: retained=%d items=%d", retainedAfterPurge, purgedItems)
 	}
 }
+
+func TestFileViewReviewBTWInvalidation(t *testing.T) {
+	for _, parentResult := range []bool{false, true} {
+		scenario := "side_result_after_closing_inherited_view"
+		if parentResult {
+			scenario = "parent_result_with_distinct_visible_side_file"
+		}
+		t.Run(scenario, func(t *testing.T) {
+			resetFileViewCacheForTest()
+			m := newBTWTestModel(t)
+			m.cwd = t.TempDir()
+			write := func(name, content string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(m.cwd, name), []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("parent.txt", "parent before\n")
+			write("side.txt", "side before\n")
+			m.activeRunID = 1
+			m = testOpenFile(m, "parent.txt")
+			side, cmd := m.handleBTWCommand("")
+			if !side.btw.active {
+				t.Fatal("fork failed")
+			}
+			side = deliverCommandMessages(t, side, cmd)
+			side = side.exitFileView()
+			if parentResult {
+				side = testOpenFile(side, "side.txt")
+			}
+			write("parent.txt", "parent after\n")
+			write("side.txt", "side after\n")
+			var msg tea.Msg = bashResultMsg{output: "done"}
+			if parentResult {
+				msg = agentRowMsg{runID: 1, row: transcriptRow{kind: rowToolResult, tool: "bash", status: tools.StatusOK}}
+			}
+			next, cmd := side.Update(msg)
+			side = deliverCommandMessages(t, next.(model), cmd)
+			if parentResult && !strings.Contains(plainRender(t, side.renderFileViewFull(80)), "side after") {
+				t.Fatal("visible side did not recover after parent result")
+			}
+			parent, cmd := side.leaveBTW()
+			parent = deliverCommandMessages(t, parent, cmd)
+			if !strings.Contains(plainRender(t, parent.renderFileViewFull(80)), "parent after") {
+				t.Fatal("restored parent did not recover")
+			}
+		})
+	}
+}
+
+func TestFileViewReviewAbsolutePosition(t *testing.T) {
+	for _, count := range []int{220, 60, 200} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			resetFileViewCacheForTest()
+			m := filesPanelTestModel()
+			m.cwd = t.TempDir()
+			m.altScreen = true
+			m.width = 100
+			m.height = 30
+			write := func(n int) {
+				t.Helper()
+				var body strings.Builder
+				for i := 0; i < n; i++ {
+					fmt.Fprintf(&body, "numbered-line-%03d\n", i)
+				}
+				if err := os.WriteFile(filepath.Join(m.cwd, "lines.txt"), []byte(body.String()), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(200)
+			m = testOpenFile(m, "lines.txt")
+			// The shell is still running; the reader scrolls before its result arrives.
+			m.pending = true
+			m = m.scrollChat(50)
+			m = m.syncChatScroll()
+			before := plainRender(t, m.View().Content)
+			if !strings.Contains(before, "numbered-line-149") {
+				t.Fatal("scrolled viewport must visibly include line 149 before refresh")
+			}
+			write(count)
+			next, cmd := m.Update(bashResultMsg{output: "done"})
+			m = deliverCommandMessages(t, next.(model), cmd)
+			want := maxInt(0, 50+count-200)
+			if m.chatScrollOffset != want {
+				t.Fatalf("offset=%d want=%d", m.chatScrollOffset, want)
+			}
+			after := plainRender(t, m.View().Content)
+			if count >= 200 {
+				for i := 0; i < 200; i++ {
+					line := fmt.Sprintf("numbered-line-%03d", i)
+					if strings.Contains(before, line) != strings.Contains(after, line) {
+						t.Fatalf("visible line changed: %s", line)
+					}
+				}
+			} else if !strings.Contains(after, "numbered-line-059") {
+				t.Fatal("shrink must clamp to tail")
+			}
+			next, cmd = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+			m = deliverCommandMessages(t, next.(model), cmd)
+			if m.chatScrollOffset != want {
+				t.Fatalf("same height resize changed offset to %d", m.chatScrollOffset)
+			}
+		})
+	}
+}
+
+func TestFileViewReviewMarkerReplacement(t *testing.T) {
+	for _, entry := range []string{"compact", "resume", "picker"} {
+		t.Run(entry, func(t *testing.T) {
+			resetFileViewCacheForTest()
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", home)
+			t.Setenv("XDG_CACHE_HOME", home)
+			t.Setenv("XDG_STATE_HOME", home)
+			t.Setenv("APPDATA", home)
+			t.Setenv("LOCALAPPDATA", home)
+			m := newBTWTestModel(t)
+			m.cwd = t.TempDir()
+			if err := os.WriteFile(filepath.Join(m.cwd, "marked.go"), []byte("var markedValue = 42\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			preview := "--- a/marked.go\n+++ b/marked.go\n@@ -1,1 +1,1 @@\n-old value\n+var markedValue = 42"
+			_, err := m.sessionStore.AppendEvent(m.activeSession.SessionID, sessions.AppendEventInput{Type: sessions.EventToolResult, Payload: map[string]any{"changedFiles": []string{"marked.go"}, "toolCallId": "edit-review", "name": "edit_file", "status": "ok", "output": "Successfully edited marked.go (replaced 1 occurrence).", "displayPreview": preview}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m, text := m.handleResumeCommand(m.activeSession.SessionID)
+			if text != "" {
+				t.Fatal(text)
+			}
+			m = testOpenFile(m, "marked.go")
+			m = testSetMode(m, fileViewFull)
+			marker := func(m model) bool { return strings.Contains(plainRender(t, m.renderFileViewFull(80)), "▎") }
+			if !marker(m) {
+				t.Fatal("initial gutter marker missing")
+			}
+			var next tea.Model
+			var cmd tea.Cmd
+			if entry == "compact" {
+				m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+				stale := cmd()
+				m.compactInFlight = true
+				next, cmd = m.Update(compactResultMsg{hasSessionSnapshot: true, activeSession: m.activeSession, transcript: initialTranscript()})
+				m = deliverCommandMessages(t, next.(model), cmd)
+				next, _ = m.Update(stale)
+				m = next.(model)
+				if marker(m) || len(m.fileViewChangedLines()) != 0 {
+					t.Fatal("compaction retained obsolete gutter")
+				}
+			} else {
+				next, cmd = m.dispatchCommand(parsedCommand{kind: commandClear})
+				m = deliverCommandMessages(t, next.(model), cmd)
+				if marker(m) {
+					t.Fatal("clear retained marker")
+				}
+				m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+				stale := cmd()
+				if entry == "resume" {
+					next, cmd = m.dispatchCommand(parsedCommand{kind: commandResume, text: m.activeSession.SessionID})
+				} else {
+					m.picker = &commandPicker{kind: pickerSession, items: []pickerItem{{Value: m.activeSession.SessionID}}}
+					next, cmd = m.choosePicker()
+				}
+				m = deliverCommandMessages(t, next.(model), cmd)
+				next, _ = m.Update(stale)
+				m = next.(model)
+				if !marker(m) || !m.fileViewChangedLines()["var markedValue = 42"] {
+					t.Fatal("same-session resume did not restore gutter")
+				}
+			}
+		})
+	}
+}
+
+// TestFileViewSpecialistCompletionRefreshesUnknownScope covers the hidden
+// successful Task result: specialistCompleteMsg is the only boundary that sees
+// the child's mutation, so it must conservatively reload an open full view even
+// outside a git workspace.
+func TestFileViewSpecialistCompletionRefreshesUnknownScope(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "specialist_mut.go"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 9
+	// Non-git workspace: the end-of-turn sweep cannot help here.
+	m.gitFileBaseline = nil
+	m.gitSweepUnavailable = true
+	m = testOpenFile(m, name)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package old") {
+		t.Fatal("initial snapshot must render package old")
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd := m.Update(specialistCompleteMsg{
+		runID:          9,
+		toolCallID:     "call-specialist",
+		childSessionID: "sess-specialist",
+		status:         specialistCompleted,
+	})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("specialist completion must schedule a conservative refresh")
+	}
+	m = deliverCommandMessages(t, m, cmd)
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package new") {
+		t.Fatalf("hidden specialist mutation left a stale snapshot: %s", got)
+	}
+}
+
+// TestFileViewTerminalSessionResultRefreshesUnknownScope covers tool results
+// that mutate the workspace but report no ChangedFiles.
+func TestFileViewTerminalSessionResultRefreshesUnknownScope(t *testing.T) {
+	for _, tool := range []string{"terminal_session", "write_stdin", "swarm_collect", "swarm_status"} {
+		t.Run(tool, func(t *testing.T) {
+			resetFileViewCacheForTest()
+			dir := t.TempDir()
+			name := "terminal_mut.go"
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("package old\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			m := filesPanelTestModel()
+			m.cwd = dir
+			m.activeRunID = 11
+			m.gitFileBaseline = nil
+			m.gitSweepUnavailable = true
+			m = testOpenFile(m, name)
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("package new\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			updated, cmd := m.Update(agentRowMsg{
+				runID: 11,
+				row: transcriptRow{
+					kind:   rowToolResult,
+					tool:   tool,
+					status: tools.StatusOK,
+				},
+			})
+			m = updated.(model)
+			if cmd == nil {
+				t.Fatalf("%s result with no changedFiles must still invalidate the open view", tool)
+			}
+			m = deliverCommandMessages(t, m, cmd)
+			got := plainRender(t, m.renderFileViewFull(80))
+			if !strings.Contains(got, "package new") {
+				t.Fatalf("%s mutation left a stale snapshot: %s", tool, got)
+			}
+		})
+	}
+}
+
+// TestFileViewTaskOutputSuppressedResultRefreshesUnknownScope covers the hidden
+// TaskOutput success boundary delivered as unknownScopeMutationMsg.
+func TestFileViewTaskOutputSuppressedResultRefreshesUnknownScope(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "taskoutput_mut.go"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 13
+	m.gitFileBaseline = nil
+	m.gitSweepUnavailable = true
+	m = testOpenFile(m, name)
+	if !toolResultCardSuppressedInTranscript("TaskOutput", tools.StatusOK) || !toolResultMayMutateUnknownScope("TaskOutput") {
+		t.Fatal("TaskOutput must be classified as a suppressed unknown-scope mutator")
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd := m.Update(unknownScopeMutationMsg{runID: 13})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("suppressed TaskOutput completion must schedule a conservative refresh")
+	}
+	m = deliverCommandMessages(t, m, cmd)
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package new") {
+		t.Fatalf("hidden TaskOutput mutation left a stale snapshot: %s", got)
+	}
+}
+
+// TestFileViewTurnEndRefreshesInNonGitWorkspace verifies the end-of-turn
+// fallback: maybeGitSweep does nothing outside git, but an open view still
+// reloads so an unreported mutation cannot stay stale.
+func TestFileViewTurnEndRefreshesInNonGitWorkspace(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "turn_end.go"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 17
+	m.pending = true
+	m.gitFileBaseline = nil
+	m.gitSweepUnavailable = true
+	m = testOpenFile(m, name)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd := m.Update(agentResponseMsg{
+		runID: 17,
+		rows:  []transcriptRow{{kind: rowAssistant, text: "done", final: true}},
+	})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("turn end must schedule a conservative refresh even without git")
+	}
+	m = deliverCommandMessages(t, m, cmd)
+	got := plainRender(t, m.renderFileViewFull(80))
+	if !strings.Contains(got, "package new") {
+		t.Fatalf("turn-end mutation left a stale snapshot outside git: %s", got)
+	}
+}
+
+// TestFileViewPendingReloadAcceptsScrollInput verifies that scrolling while an
+// async reload is in flight updates the pending intent against the last
+// completed body, so a Page Down is not discarded by the one-line placeholder.
+func TestFileViewPendingReloadAcceptsScrollInput(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "pending_scroll.go"
+	var body strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&body, "line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.altScreen = true
+	m.width = 100
+	m.height = 30
+	m = testOpenFile(m, name)
+	if !m.fileView.snapshotReady {
+		t.Fatal("expected the initial full-file snapshot")
+	}
+	m.chatScrollOffset = 50
+	// Trigger an async reload via resize, exactly like the review scenario.
+	updated, batchCmd := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(model)
+	if !m.fileView.loading {
+		t.Fatal("reload should be pending after the resize")
+	}
+	before := m.fileView.preservedScrollOffset
+	// Page Down while the reload is in flight: intent must move toward the tail.
+	updated, _ = m.Update(testKey(tea.KeyPgDown))
+	m = updated.(model)
+	if m.fileView.preservedScrollOffset >= before {
+		t.Fatalf("Page Down during a pending reload must lower the intent: before=%d after=%d", before, m.fileView.preservedScrollOffset)
+	}
+	if m.chatScrollOffset != m.fileView.preservedScrollOffset {
+		t.Fatalf("syncChatScroll must hold the updated intent: offset=%d intent=%d", m.chatScrollOffset, m.fileView.preservedScrollOffset)
+	}
+	want := m.fileView.preservedScrollOffset
+	m = deliverCommandMessages(t, m, batchCmd)
+	if m.fileView.loading {
+		t.Fatal("expected the reload to complete")
+	}
+	if m.chatScrollOffset != want && want > 0 {
+		t.Fatalf("completed reload must apply the latest intent: got %d, want %d", m.chatScrollOffset, want)
+	}
+}
+
+// TestFileViewPendingReloadPromptSubmissionReturnsToBottom verifies that a real
+// prompt submitted while a reload is pending records the bottom intent, so
+// completion cannot restore the reader's pre-submission position.
+func TestFileViewPendingReloadPromptSubmissionReturnsToBottom(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "pending_submit.go"
+	var body strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&body, "line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.altScreen = true
+	m.width = 100
+	m.height = 30
+	m = testOpenFile(m, name)
+	m.chatScrollOffset = 50
+	updated, batchCmd := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(model)
+	if !m.fileView.loading {
+		t.Fatal("reload should be pending after the resize")
+	}
+	m.input.SetValue("/help")
+	updated, _ = m.handleSubmit()
+	m = updated.(model)
+	if m.fileView.preservedScrollOffset != 0 {
+		t.Fatalf("prompt submission during a pending reload must record the bottom intent, got %d", m.fileView.preservedScrollOffset)
+	}
+	if m.chatScrollOffset != 0 {
+		t.Fatalf("prompt submission must snap the viewport to the bottom, got %d", m.chatScrollOffset)
+	}
+	m = deliverCommandMessages(t, m, batchCmd)
+	if m.chatScrollOffset != 0 {
+		t.Fatalf("completed reload must respect the bottom intent, got %d", m.chatScrollOffset)
+	}
+}

@@ -195,6 +195,10 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	if m.compactInFlight {
 		return m.appendSystemNotice("BTW compaction is still running. Wait for it to finish before returning."), nil
 	}
+	// The side surface is being discarded. Revoke its file-view lifetime token so
+	// a load still queued behind BTW cannot run or land after the view closes.
+	// The restored parent keeps its own request and snapshot untouched.
+	m.revokeFileViewRequest()
 	m, _ = m.clearLoopsForSessionSwitch()
 	parent := *m.btw.parent
 	parent.goalContinuationsSuspended = false
@@ -221,7 +225,9 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	parent.resetFlushFrontier("· returned from btw ·")
 	var goalCmd tea.Cmd
 	parent, goalCmd = parent.launchGoalContinuationIfReady()
-	return parent, batchCommands(sweepCmd, spinnerCmd, goalCmd)
+	var fileCmd tea.Cmd
+	parent, fileCmd = parent.recoverInvalidatedFileView()
+	return parent, batchCommands(sweepCmd, spinnerCmd, goalCmd, fileCmd)
 }
 
 func btwCommandUnavailable(command parsedCommand) bool {
@@ -325,7 +331,9 @@ func (m model) routeBTWMessageToParent(msg tea.Msg) (model, tea.Cmd, bool) {
 	case agentResponseMsg:
 		m.btw.parentNeedsInput = parent.pendingPermission != nil || parent.pendingAskUser != nil
 	}
-	return m, cmd, true
+	var fileCmd tea.Cmd
+	m, fileCmd = m.recoverInvalidatedFileView()
+	return m, batchCommands(cmd, fileCmd), true
 }
 
 func btwMessageRunID(msg tea.Msg) (int, bool) {
@@ -355,6 +363,8 @@ func btwMessageRunID(msg tea.Msg) (int, bool) {
 	case specialistCompleteMsg:
 		return typed.runID, true
 	case specialistProgressMsg:
+		return typed.runID, true
+	case unknownScopeMutationMsg:
 		return typed.runID, true
 	case swarmSessionsMsg:
 		return typed.runID, true
