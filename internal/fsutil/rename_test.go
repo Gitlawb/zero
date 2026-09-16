@@ -115,7 +115,10 @@ func TestRenameWithRetryNonRetryableError(t *testing.T) {
 	}
 }
 
-func TestWriteFileAtomicLeavesDestinationOnReplaceFailure(t *testing.T) {
+func TestWriteFileAtomicRefusesDirectoryBeforeStaging(t *testing.T) {
+	previous := privateCreationObserver
+	privateCreationObserver = func(string) { t.Fatal("directory validation reached staging creation") }
+	defer func() { privateCreationObserver = previous }()
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
 	if err := os.Mkdir(target, 0o755); err != nil {
@@ -126,8 +129,8 @@ func TestWriteFileAtomicLeavesDestinationOnReplaceFailure(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if err := WriteFileAtomic(target, []byte("should-not-land"), 0o644); err == nil {
-		t.Fatal("expected replace failure when destination is a directory")
+	if err := WriteFileAtomic(target, []byte("should-not-land"), 0o644); !errors.Is(err, ErrNonRegularDestination) {
+		t.Fatalf("expected directory validation failure, got %v", err)
 	}
 
 	got, err := os.ReadFile(marker)
@@ -178,5 +181,43 @@ func TestWriteFileAtomicRefusesNonWritableTarget(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got&0o222 != 0 {
 		t.Fatalf("destination became writable: perm=%04o", got)
+	}
+}
+
+func TestWriteFileAtomicLeavesDestinationOnReplaceFailure(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected replacement failure")
+	var owned string
+	err := writeFileAtomic(target, []byte("complete replacement"), 0o644, func(src, dst string) error {
+		owned = src
+		if dst != target {
+			t.Fatalf("destination = %q", dst)
+		}
+		got, err := os.ReadFile(src)
+		if err != nil || string(got) != "complete replacement" {
+			t.Fatalf("replacement did not receive complete staging: %q, %v", got, err)
+		}
+		return injected
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("error = %v, want replacement failure", err)
+	}
+	if owned == "" {
+		t.Fatal("replacement was never reached")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "original" {
+		t.Fatalf("original destination changed: %q, %v", got, err)
+	}
+	if _, err := os.Lstat(owned); !os.IsNotExist(err) {
+		t.Fatalf("owned staging was not cleaned: %s: %v", owned, err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dir, ".zero-tmp-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("staging leftovers: %v, %v", leftovers, err)
 	}
 }

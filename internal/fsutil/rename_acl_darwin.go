@@ -18,9 +18,6 @@ func preserveNativeACL(f *os.File, srcPath string) error {
 	if err != nil {
 		return err
 	}
-	if acl == nil {
-		return nil
-	}
 	if err := applyNativeACL(f.Name(), acl); err != nil {
 		return fmt.Errorf("fsutil: preserving native ACL on replacement for %s: %w", srcPath, err)
 	}
@@ -38,17 +35,14 @@ func readNativeACL(path string) ([]byte, error) {
 	al := extendedSecurityAttrlist()
 	buf := make([]byte, 4096)
 	if err := getattrlist(path, &al, buf, 0); err != nil {
-		if isXattrNotFound(err) || isXattrUnsupported(err) {
+		if isXattrNotFound(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("fsutil: reading native ACL of %s: %w", path, err)
 	}
-	if len(buf) < 12 {
-		return nil, nil
-	}
 	total := binary.LittleEndian.Uint32(buf[:4])
 	if total < 12 {
-		return nil, nil
+		return nil, fmt.Errorf("fsutil: invalid native ACL response for %s", path)
 	}
 	off := int32(binary.LittleEndian.Uint32(buf[4:8]))
 	length := binary.LittleEndian.Uint32(buf[8:12])
@@ -66,6 +60,12 @@ func readNativeACL(path string) ([]byte, error) {
 }
 
 func applyNativeACL(path string, blob []byte) error {
+	// A nil ACL is a verified absence, not permission to retain inherited ACEs.
+	if blob == nil {
+		blob = make([]byte, 44)
+		binary.LittleEndian.PutUint32(blob, 0x012cc16d)      // KAUTH_FILESEC_MAGIC
+		binary.LittleEndian.PutUint32(blob[36:], 0xffffffff) // KAUTH_FILESEC_NOACL
+	}
 	al := extendedSecurityAttrlist()
 	buf := make([]byte, 8+len(blob))
 	binary.LittleEndian.PutUint32(buf[0:4], 8)

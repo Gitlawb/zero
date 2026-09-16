@@ -4,9 +4,11 @@ package fsutil
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -112,5 +114,110 @@ func TestWriteFileAtomicDropsInheritedAccessACL(t *testing.T) {
 	}
 	if namedUserACLPresent(after) {
 		t.Fatalf("access ACL inherited from the directory default survived the replacement\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// Observe the creation boundary, not only the metadata-ready or publication state.
+func TestPrivateStagingCreationMasksInheritedPOSIXGrants(t *testing.T) {
+	for _, commandName := range []string{"setfacl", "getfacl"} {
+		if _, err := exec.LookPath(commandName); err != nil {
+			t.Skip(commandName + " not installed")
+		}
+	}
+	for _, denied := range []bool{false, true} {
+		t.Run(map[bool]string{false: "source-without-acl", true: "source-named-deny"}[denied], func(t *testing.T) {
+			dir := t.TempDir()
+			if out, err := exec.Command("setfacl", "-d", "-m", "u:65534:r-x", dir).CombinedOutput(); err != nil {
+				t.Fatalf("default ACL: %s: %v", out, err)
+			}
+			target := filepath.Join(dir, "target")
+			mode := os.FileMode(0o640)
+			if denied {
+				mode = 0o644
+			}
+			if err := os.WriteFile(target, []byte("old"), mode); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command("setfacl", "-b", target).CombinedOutput(); err != nil {
+				t.Fatalf("clear ACL: %s: %v", out, err)
+			}
+			if err := os.Chmod(target, mode); err != nil {
+				t.Fatal(err)
+			}
+			if denied {
+				if out, err := exec.Command("setfacl", "-m", "u:65534:---", target).CombinedOutput(); err != nil {
+					t.Fatalf("deny ACL: %s: %v", out, err)
+				}
+			}
+			info, err := os.Stat(target)
+			if err != nil || info.Mode().Perm() != mode {
+				t.Fatalf("fixture destination mode: %v, %v, want %04o", info, err, mode)
+			}
+			count := 0
+			previous := privateCreationObserver
+			privateCreationObserver = func(path string) {
+				count++
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if info.Mode().Perm()&0o077 != 0 {
+					t.Fatalf("initial staging exposed inherited access: mode %04o", info.Mode().Perm())
+				}
+				acl, err := exec.Command("getfacl", "-cpn", path).CombinedOutput()
+				if err != nil {
+					t.Fatalf("creation ACL: %s: %v", acl, err)
+				}
+				if !strings.Contains(string(acl), "mask::---") {
+					t.Fatalf("initial inherited named grant is not masked: %s", acl)
+				}
+				if !info.IsDir() && info.Size() != 0 {
+					t.Fatal("creation observer ran after content write")
+				}
+			}
+			t.Cleanup(func() { privateCreationObserver = previous })
+			if err := WriteFileAtomic(target, []byte("new"), mode); err != nil {
+				t.Fatal(err)
+			}
+			failure := errors.New("replace failed")
+			err = writeFileAtomic(target, []byte("must not land"), mode, func(string, string) error { return failure })
+			if !errors.Is(err, failure) {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(target)
+			if err != nil || string(got) != "new" {
+				t.Fatalf("destination = %q, %v", got, err)
+			}
+			acl, err := exec.Command("getfacl", "-cpn", target).CombinedOutput()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if denied && !namedUserACLDenied(acl) || !denied && namedUserACLPresent(acl) {
+				t.Fatalf("destination ACL changed: %s", acl)
+			}
+			fmtDir, err := CreatePrivateTempDir(dir, ".zero-fmt-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(fmtDir); err != nil {
+				t.Fatal(err)
+			}
+			if count != 3 {
+				t.Fatalf("creation observations = %d, want 3", count)
+			}
+			leftovers, err := filepath.Glob(filepath.Join(dir, ".zero-*"))
+			if err != nil || len(leftovers) != 0 {
+				t.Fatalf("staging leftovers: %v, %v", leftovers, err)
+			}
+			// Genuinely new publications still receive the ordinary inherited ACL.
+			fresh := filepath.Join(dir, "fresh")
+			if err := WriteFileAtomic(fresh, []byte("public"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			acl, err = exec.Command("getfacl", "-cpn", fresh).CombinedOutput()
+			if err != nil || !namedUserACLPresent(acl) || strings.Contains(string(acl), "#effective:---") {
+				t.Fatalf("new file lost normal inheritance: %s, %v", acl, err)
+			}
+		})
 	}
 }

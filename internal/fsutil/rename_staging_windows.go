@@ -10,27 +10,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// protectStaging copies the destination's DACL onto the freshly created staging
-// file f before any replacement bytes are written through it. A temporary file
-// created in the destination's directory inherits the directory's DACL, not the
-// destination's, and os.File.Chmod cannot express a Windows DACL (Go maps only
-// the owner-write bit). Without this step the replacement content is readable by
-// every principal the directory grants access to during the window between the
-// first Write and ReplaceFileW, even though ReplaceFileW later restores the
-// restrictive destination DACL onto the published file.
-//
-// The DACL is read from destPath and written to the staging object. The handle
-// os.OpenFile returned for f was opened with GENERIC_READ|GENERIC_WRITE, which
-// does not include WRITE_DAC, so a second handle is opened with the write-DAC
-// access and checked to name the same object as f before the descriptor is
-// applied. That keeps the transfer bound to the object this process created
-// instead of a pathname a writer in the directory could redirect.
-//
-// When the destination's descriptor is protected (its DACL does not inherit),
-// the staging DACL is marked protected too, so re-inherited directory ACEs
-// cannot widen it. A failure is returned rather than ignored: WriteFileAtomic
-// then abandons the staging file and leaves the destination untouched, instead
-// of writing content under a broader descriptor.
+// protectStaging applies the destination DACL after the complete content was
+// written under the creation-time owner-only descriptor. Keep inheritance
+// disabled on staging even when the source DACL is unprotected: its effective
+// ACEs are copied explicitly, and parent grants must not be re-added here.
+// ReplaceFileW preserves the destination security descriptor on publication.
 func protectStaging(f *os.File, destPath string) error {
 	descriptor, err := windows.GetNamedSecurityInfo(destPath, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -54,10 +38,7 @@ func protectStaging(f *os.File, destPath string) error {
 		// Setting a NULL DACL here would only widen the staging file.
 		return nil
 	}
-	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION)
-	if control, _, controlErr := descriptor.Control(); controlErr == nil && control&windows.SE_DACL_PROTECTED != 0 {
-		info |= windows.PROTECTED_DACL_SECURITY_INFORMATION
-	}
+	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	handle, err := openStagingForDACL(f)
 	if err != nil {
 		return err

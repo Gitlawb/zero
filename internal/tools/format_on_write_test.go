@@ -491,3 +491,53 @@ func installFakeGofmt(t *testing.T, script string) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+func TestFormatOnWriteRuffUsesLogicalDestinationForWriteAndEdit(t *testing.T) {
+	if _, err := exec.LookPath("ruff"); err != nil {
+		t.Skip("ruff not installed")
+	}
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	for _, toolName := range []string{"write_file", "edit_file"} {
+		t.Run(toolName, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "ruff.toml"), []byte("force-exclude = true\n[format]\nexclude = [\"special.py\"]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"special.py", "adjacent.py"} {
+				t.Run(name, func(t *testing.T) {
+					original := "x=  [1,2]\n"
+					target := filepath.Join(dir, name)
+					if err := os.WriteFile(target, []byte(original), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					tracker := NewFileTracker()
+					read := NewScopedReadFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{"path": name}, RunOptions{FileTracker: tracker})
+					if read.Status != StatusOK {
+						t.Fatalf("read_file: %s", read.Output)
+					}
+					input := original
+					want := "x = [1, 2]\n"
+					var result Result
+					if toolName == "write_file" {
+						result = NewScopedWriteFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{"path": name, "content": input, "overwrite": true}, RunOptions{FileTracker: tracker})
+					} else {
+						input = "y=  [3,4]\n"
+						want = "y = [3, 4]\n"
+						result = NewScopedEditFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{"path": name, "old_string": original, "new_string": input}, RunOptions{FileTracker: tracker})
+					}
+					if result.Status != StatusOK {
+						t.Fatalf("%s: %s", toolName, result.Output)
+					}
+					if name == "special.py" {
+						want = input
+					}
+					got, err := os.ReadFile(target)
+					if err != nil || string(got) != want {
+						t.Fatalf("%s logical filename lost: got %q, want %q, err %v", toolName, got, want, err)
+					}
+					assertTrackerMatchesDisk(t, tracker, target)
+				})
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@
 package fsutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,14 +12,15 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// TestProtectStagingCopiesRestrictiveDACL pins the Windows pre-publish DACL
-// contract: while the replacement bytes are still staged under an inherited
-// directory DACL, the staging file must already carry the destination's
-// restrictive DACL. A file created in a directory inherits that directory's
-// DACL, and Chmod cannot express an owner-only Windows ACL, so without
-// protectStaging the content is exposed to every principal the directory grants
-// access to even though ReplaceFileW later restores the destination DACL.
+// The creation observer checks the initial descriptor; the publication observer
+// checks the destination DACL transfer. Both boundaries must exclude Everyone.
 func TestProtectStagingCopiesRestrictiveDACL(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid.String()
+	destinationACE := "(A;;FA;;;" + sid + ")"
 	dir := t.TempDir()
 
 	// Make the parent more permissive than the destination so an inherited
@@ -31,7 +33,7 @@ func TestProtectStagingCopiesRestrictiveDACL(t *testing.T) {
 	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	restricted, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;OW)")
+	restricted, err := windows.SecurityDescriptorFromString("D:P" + destinationACE)
 	if err != nil {
 		t.Skipf("cannot build the restrictive test descriptor: %v", err)
 	}
@@ -49,10 +51,24 @@ func TestProtectStagingCopiesRestrictiveDACL(t *testing.T) {
 	}
 	if got, err := readDACLString(target); err != nil {
 		t.Skipf("cannot read back the restrictive destination DACL: %v", err)
-	} else if !strings.Contains(got, "(A;;FA;;;OW)") {
+	} else if !strings.Contains(got, destinationACE) {
 		t.Skipf("the restrictive DACL did not take effect on this filesystem: %q", got)
 	}
 
+	observedCreation := 0
+	previousCreation := privateCreationObserver
+	privateCreationObserver = func(path string) {
+		observedCreation++
+		acl, err := readDACLString(path)
+		if err != nil || !strings.Contains(acl, ";;;"+sid+")") || strings.Contains(acl, ";;;WD)") || !strings.Contains(acl, "D:P") {
+			t.Fatalf("initial staging DACL = %q, %v", acl, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() && info.Size() != 0 {
+			t.Fatalf("observer did not run at creation: %v, %v", info, err)
+		}
+	}
+	defer func() { privateCreationObserver = previousCreation }()
 	var (
 		stagingDACL string
 		captureErr  error
@@ -67,30 +83,60 @@ func TestProtectStagingCopiesRestrictiveDACL(t *testing.T) {
 		t.Fatalf("WriteFileAtomic: %v", err)
 	}
 	if captureErr != nil {
-		t.Fatalf("reading the staging DACL before the write: %v", captureErr)
+		t.Fatalf("reading the staging DACL before publication: %v", captureErr)
 	}
 	if stagingDACL == "" {
-		t.Fatal("staging DACL was not observed: the protection hook did not run before the write")
+		t.Fatal("staging DACL was not observed: the protection hook did not run before publication")
 	}
-	if !strings.Contains(stagingDACL, "(A;;FA;;;OW)") {
-		t.Fatalf("staging DACL = %q, want the owner-only destination DACL", stagingDACL)
+	if !strings.Contains(stagingDACL, destinationACE) {
+		t.Fatalf("staging DACL = %q, want the current-user-only destination DACL", stagingDACL)
 	}
 	if strings.Contains(stagingDACL, ";;;WD)") {
 		t.Fatalf("staging DACL = %q is broader than the destination (inherited Everyone)", stagingDACL)
 	}
 
+	failure := errors.New("replace failed")
+	if err := writeFileAtomic(target, []byte("must not land"), 0o600, func(string, string) error { return failure }); !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "new" {
+		t.Fatalf("failure changed destination: %q, %v", got, err)
+	}
+	stagingDir, err := CreatePrivateTempDir(dir, ".zero-fmt-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stagingDir); err != nil {
+		t.Fatal(err)
+	}
+	if observedCreation != 3 {
+		t.Fatalf("initial creation observations: %d", observedCreation)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dir, ".zero-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("staging leftovers: %v, %v", leftovers, err)
+	}
+	fresh := filepath.Join(dir, "fresh")
+	if err := WriteFileAtomic(fresh, []byte("public"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inherited, err := readDACLString(fresh)
+	if err != nil || !strings.Contains(inherited, ";;;WD)") {
+		t.Fatalf("new file lost inheritance: %q, %v", inherited, err)
+	}
 	after, err := readDACLString(target)
 	if err != nil {
 		t.Fatalf("reading the destination DACL after replacement: %v", err)
 	}
-	if !strings.Contains(after, "(A;;FA;;;OW)") || strings.Contains(after, ";;;WD)") {
-		t.Fatalf("destination DACL after replacement = %q, want the original owner-only DACL", after)
+	if !strings.Contains(after, destinationACE) || strings.Contains(after, ";;;WD)") {
+		t.Fatalf("destination DACL after replacement = %q, want the original current-user-only DACL", after)
 	}
 }
 
 // grantEveryoneInheritableDACL replaces path's DACL with a single inheritable
 // grant of full control to Everyone (S-1-1-0), making it broader than any
-// owner-only destination inside it.
+// current-user-only destination inside it.
 func grantEveryoneInheritableDACL(path string) error {
 	everyone, err := windows.StringToSid("S-1-1-0")
 	if err != nil {

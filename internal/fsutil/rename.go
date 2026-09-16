@@ -23,7 +23,7 @@ var stagingModeObserver func(os.FileMode)
 
 // stagingProtectionObserver, when non-nil, receives the path of the staging
 // file after protectStaging has copied the destination's authorization metadata
-// onto it, still before any replacement bytes are written. Tests use it to
+// onto the completed content, before publication. Tests use it to
 // assert that a replacement is staged no broader than its destination on
 // platforms (Windows) where the mode bits do not carry that answer.
 var stagingProtectionObserver func(stagingPath string)
@@ -43,6 +43,11 @@ var stagingProtectionObserver func(stagingPath string)
 // ReplaceFileW refuses symlink destinations outright and returns an error.
 // Hard links to destination files are broken by design (temp-and-rename publishes a new inode).
 func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
+	return writeFileAtomic(filename, data, perm, nil)
+}
+
+// The replacement dependency is local to the call, so failure tests need no global hook.
+func writeFileAtomic(filename string, data []byte, perm os.FileMode, replace func(string, string) error) error {
 	dir := filepath.Dir(filename)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -68,11 +73,12 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		return err
 	}
 
-	stagePerm := perm
+	var tmpFile *os.File
 	if existingMode != nil {
-		stagePerm = *existingMode
+		tmpFile, err = CreatePrivateTemp(dir, ".zero-tmp-*")
+	} else {
+		tmpFile, err = createTempFile(dir, perm)
 	}
-	tmpFile, err := createTempFile(dir, stagePerm)
 	if err != nil {
 		return err
 	}
@@ -90,28 +96,29 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmpName)
 	}()
 
+	if _, err := tmpFile.Write(data); err != nil {
+		return err
+	}
 	if existingMode != nil {
-		if err := tmpFile.Chmod(*existingMode); err != nil {
+		if err := preserveOwner(tmpFile, info); err != nil {
 			return err
 		}
-		if err := preserveOwner(tmpFile, info); err != nil {
+		// Remove/copy inherited authorization before broadening mode bits.
+		if err := preserveNativeACL(tmpFile, filename); err != nil {
 			return err
 		}
 		if err := preserveXattrs(tmpFile, filename); err != nil {
 			return err
 		}
-		if err := preserveNativeACL(tmpFile, filename); err != nil {
+		if err := protectStaging(tmpFile, filename); err != nil {
 			return err
 		}
-		if err := protectStaging(tmpFile, filename); err != nil {
+		if err := tmpFile.Chmod(*existingMode); err != nil {
 			return err
 		}
 		if stagingProtectionObserver != nil {
 			stagingProtectionObserver(tmpName)
 		}
-	}
-	if _, err := tmpFile.Write(data); err != nil {
-		return err
 	}
 	if err := tmpFile.Sync(); err != nil {
 		return err
@@ -121,7 +128,7 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 		return err
 	}
 
-	replaceErr := ReplaceWithRetry(tmpName, filename, nil)
+	replaceErr := ReplaceWithRetry(tmpName, filename, replace)
 	if replaceErr == nil || isCommittedReplacement(replaceErr) {
 		syncDir(dir)
 	}

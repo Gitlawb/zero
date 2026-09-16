@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 // Format-on-write for the mutating file tools. When enabled, a successful
@@ -18,7 +20,7 @@ import (
 // ZERO_FORMAT_ON_WRITE=1): auto-reformatting changes bytes the model did not
 // write, which strict workflows may not want.
 //
-// Ordering matters: formatting runs on a sibling temporary file BEFORE
+// Ordering matters: formatting runs on an isolated temporary copy BEFORE
 // publication and BEFORE the FileTracker re-baseline. The caller records the
 // POST-format content that was actually published. Formatting the destination
 // in place after publication would reintroduce partial-file writes.
@@ -79,8 +81,11 @@ func (result formatOnWriteResult) notice(relativePath string) string {
 }
 
 // formatterCommands maps a file extension to the formatter argv; the file path
-// is appended as the final argument. Only in-place, config-respecting,
-// community-standard formatters — a missing binary silently skips formatting.
+// is appended for physical-file adapters. Ruff and Prettier instead receive
+// the logical destination with stdin. Physical adapters keep the original
+// basename inside an owner-only sibling directory (including auxiliary files),
+// and retain the destination directory as their working directory. A missing
+// binary silently skips formatting.
 var formatterCommands = map[string][]string{
 	".go":    {"gofmt", "-w"},
 	".rs":    {"rustfmt"},
@@ -118,7 +123,7 @@ func formatOnWriteEnabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
-// maybeFormatWrittenFile runs the configured formatter on a sibling copy of
+// maybeFormatWrittenFile runs the configured formatter on an isolated copy of
 // writtenContent (when enabled and on PATH) and returns the bytes to publish.
 // The destination path is never opened or rewritten here. Best-effort
 // throughout: any failure — no formatter, formatter error, timeout, unreadable
@@ -143,7 +148,15 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	if command[0] == "prettier" {
 		return formatWithPrettier(ctx, command[0], binaryPath, command[1:], absolutePath, writtenContent)
 	}
-	staging, err := os.CreateTemp(dir, ".zero-fmt-*"+ext)
+	if command[0] == "ruff" {
+		return formatWithStdin(ctx, command[0], binaryPath, append(append([]string(nil), command[1:]...), "--stdin-filename", absolutePath, "-"), absolutePath, writtenContent)
+	}
+	stagingDir, err := fsutil.CreatePrivateTempDir(dir, ".zero-fmt-*")
+	if err != nil {
+		return unformatted
+	}
+	defer func() { _ = os.RemoveAll(stagingDir) }()
+	staging, err := os.OpenFile(filepath.Join(stagingDir, filepath.Base(absolutePath)), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return unformatted
 	}
@@ -176,18 +189,9 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	return formatOnWriteResult{Content: string(formatted), Formatter: command[0]}
 }
 
-// formatWithPrettier runs Prettier in stdin mode. Prettier is the one formatter
-// here whose behaviour depends on the file name rather than the file's
-// extension: it resolves .prettierrc from the file's directory and applies its
-// .prettierignore rules. Staging the bytes under ".zero-fmt-*.js" would hide
-// the real destination name from both, so the content travels on stdin while
-// --stdin-filepath carries the real path. The formatted bytes are read back
-// from stdout; Prettier is not asked to --write the staging file. Config
-// resolution still needs the working directory set to the destination's
-// directory. Any formatter failure (including an ignored path that yields no
-// usable stdout) falls back to writtenContent.
+// formatWithPrettier preserves config overrides and ignore rules by transmitting
+// the logical destination alongside stdin, without physical destination writes.
 func formatWithPrettier(ctx context.Context, formatterName, binaryPath string, formatterArgs []string, absolutePath, writtenContent string) formatOnWriteResult {
-	unformatted := formatOnWriteResult{Content: writtenContent}
 	arguments := make([]string, 0, len(formatterArgs)+2)
 	for _, arg := range formatterArgs {
 		if arg == "--write" {
@@ -196,6 +200,11 @@ func formatWithPrettier(ctx context.Context, formatterName, binaryPath string, f
 		arguments = append(arguments, arg)
 	}
 	arguments = append(arguments, "--stdin-filepath", absolutePath)
+	return formatWithStdin(ctx, formatterName, binaryPath, arguments, absolutePath, writtenContent)
+}
+
+func formatWithStdin(ctx context.Context, formatterName, binaryPath string, arguments []string, absolutePath, writtenContent string) formatOnWriteResult {
+	unformatted := formatOnWriteResult{Content: writtenContent}
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
 	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
