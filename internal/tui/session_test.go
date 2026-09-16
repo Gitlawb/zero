@@ -1342,8 +1342,13 @@ func TestResumePickerDetailRendersOnlyAtMediumWidth(t *testing.T) {
 	}
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /resume to start asynchronous session discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
 	if next.picker == nil || next.picker.kind != pickerSession {
 		t.Fatalf("expected /resume to open the session picker, got %#v", next.picker)
 	}
@@ -1377,8 +1382,13 @@ func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
 
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /resume to start asynchronous session discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
 	if next.picker == nil {
 		t.Fatal("expected /resume to open the session picker")
 	}
@@ -1413,8 +1423,13 @@ func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
 	}
 	m := newModel(context.Background(), Options{SessionStore: store, Cwd: "/repo"})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /resume to start asynchronous session discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
 	if next.picker == nil || len(next.picker.items) != 1 {
 		t.Fatalf("expected one picker item, got %#v", next.picker)
 	}
