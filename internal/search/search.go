@@ -248,12 +248,42 @@ func RedactResult(result Result) Result {
 
 func redactMetadata(session sessions.Metadata, options redaction.Options) sessions.Metadata {
 	session.SessionID = redaction.RedactString(session.SessionID, options)
+	session.SessionKind = sessions.SessionKind(redaction.RedactString(string(session.SessionKind), options))
 	session.Title = redaction.RedactString(session.Title, options)
 	session.Cwd = redaction.RedactString(session.Cwd, options)
+	// WorkspaceKey is exact operational identity, not a presentation field. It
+	// may intentionally retain bytes removed from display-safe Cwd, so omit it
+	// from the copy embedded in CLI/JSON search results rather than corrupting the
+	// persisted value or attempting a lossy field-by-field projection here.
+	session.WorkspaceKey = ""
 	session.ModelID = redaction.RedactString(session.ModelID, options)
+	session.SourceModelID = redaction.RedactString(session.SourceModelID, options)
 	session.Provider = redaction.RedactString(session.Provider, options)
+	session.Tag = redaction.RedactString(session.Tag, options)
 	session.ParentSessionID = redaction.RedactString(session.ParentSessionID, options)
+	session.RootSessionID = redaction.RedactString(session.RootSessionID, options)
+	session.AgentName = redaction.RedactString(session.AgentName, options)
+	session.TaskID = redaction.RedactString(session.TaskID, options)
 	session.ForkedFromEventID = redaction.RedactString(session.ForkedFromEventID, options)
+	session.SpawnedFromEventID = redaction.RedactString(session.SpawnedFromEventID, options)
+	session.SpecID = redaction.RedactString(session.SpecID, options)
+	session.SpecFilePath = redaction.RedactString(session.SpecFilePath, options)
+	session.SpecStatus = sessions.SpecStatus(redaction.RedactString(string(session.SpecStatus), options))
+	session.SpecDraftModelID = redaction.RedactString(session.SpecDraftModelID, options)
+	session.SpecDraftReasoning = redaction.RedactString(session.SpecDraftReasoning, options)
+	session.SpecUserComment = redaction.RedactString(session.SpecUserComment, options)
+	session.SpecRejectReason = redaction.RedactString(session.SpecRejectReason, options)
+	session.SpecSourceSessionID = redaction.RedactString(session.SpecSourceSessionID, options)
+	session.SpecImplSessionID = redaction.RedactString(session.SpecImplSessionID, options)
+	if session.Goal != nil {
+		goal := *session.Goal
+		goal.Objective = redaction.RedactString(goal.Objective, options)
+		goal.Status = sessions.GoalStatus(redaction.RedactString(string(goal.Status), options))
+		goal.StatusReason = redaction.RedactString(goal.StatusReason, options)
+		goal.CreatedAt = redaction.RedactString(goal.CreatedAt, options)
+		goal.UpdatedAt = redaction.RedactString(goal.UpdatedAt, options)
+		session.Goal = &goal
+	}
 	session.CreatedAt = redaction.RedactString(session.CreatedAt, options)
 	session.UpdatedAt = redaction.RedactString(session.UpdatedAt, options)
 	session.LastEventType = sessions.EventType(redaction.RedactString(string(session.LastEventType), options))
