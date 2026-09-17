@@ -5593,6 +5593,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ContextWindowFor = func(modelID string) int {
 			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
 		}
+		// And make that switch reachable, when the operator asked for it. The
+		// consequences of an escalation were already handled here (the window
+		// above, and the summarizer resolved against the active profile) while
+		// nothing on this surface could cause one: escalate_model was registered
+		// only by exec.
+		//
+		// BUILT FROM THE ACTIVE PROFILE, NOT THE STARTUP ONE. A TUI session can
+		// change models with /model, so escalating from the profile captured at
+		// launch would switch from whatever the session began with rather than
+		// from what is in force now, and would carry that stale profile's base URL
+		// and credential with it. m.providerProfile tracks the switches, which is
+		// why this is built per turn rather than once in the caller.
 		if m.allowEscalation {
 			options.ModelSwitcher, options.ModelSessionSwitcher = providers.EscalationSwitchers(
 				m.providerProfile, m.provider, m.newProvider,

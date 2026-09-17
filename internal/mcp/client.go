@@ -752,47 +752,6 @@ func TextContent(content []Content) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-// DroppedContentSummary describes the blocks that were not forwarded, e.g.
-// "1 audio/wav block" or "2 resource blocks, 1 image/png block". It returns ""
-// when every block is text or an image that ImageBlocks successfully
-// forwarded, so a caller adds nothing to the ordinary case.
-//
-// Image payloads ride Result.Images. Audio, embedded resources, structured
-// content, and image blocks whose data cannot be decoded still have nowhere
-// to go. Images skipped because they would exceed the aggregate byte budget
-// are also named so the model hears that a valid screenshot was dropped.
-//
-// Only images actually kept by ImageBlocks are omitted from the note. An
-// image that would decode in isolation but was skipped by the aggregate cap
-// is still named, otherwise the model would not hear that a valid screenshot
-// was dropped.
-//
-// Counts are grouped by mime type and ordered by first appearance, so the same
-// result always produces the same sentence.
-func DroppedContentSummary(content []Content) string {
-	_, disp := forwardImages(content)
-	return droppedContentNote(content, disp, dispDropped, dispBudgetExceeded, dispUninspected)
-}
-
-// ImageBlocks converts MCP image content into the same ImageBlock channel
-// capture tools already use. Blocks that cannot be decoded, exceed
-// imageinput.MaxImageBytes individually, sniff to a type outside the provider
-// allow-list, or would push the result over an aggregate
-// imageinput.MaxImageBytes budget or maxForwardedImages count, are left for
-// DroppedContentSummary to name.
-//
-// The aggregate cap is the same 10 MiB as the per-image cap: a server that
-// returns many individually valid images must not retain all of them in
-// Result.Images. Once the next valid image would exceed the remaining
-// budget it is skipped; a later smaller image may still fit. Later image
-// payloads are not decoded once remaining is zero, the count cap is reached,
-// or maxInspectedImages candidates have been inspected. Within that inspection
-// limit, a leftover residue still permits later smaller images to fit.
-func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
-	images, _ := forwardImages(content)
-	return images
-}
-
 // itemDisp is the per-item forwarding/drop disposition produced by the
 // single-pass conversion. DroppedContentSummary is built from this so a
 // valid image is never base64-decoded a second time just to name what was
