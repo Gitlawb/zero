@@ -27,6 +27,13 @@ import (
 func TestARecordedFallbackSurvivesATempChange(t *testing.T) {
 	home := t.TempDir()
 	workspace := canonicalSandboxWorkspaceRoot(t.TempDir())
+	// The cache is an input of the preferred candidate, so it is owned as well.
+	// Left alone it made the result depend on the machine, and gave this test two
+	// more ways to skip instead of asserting.
+	cacheRoot := t.TempDir()
+	originalCacheDir := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = originalCacheDir })
 
 	// EVERY temp variable, in both phases. With only TMP and TEMP set this
 	// changed nothing on Unix: the fallback derived from the ambient TMPDIR, the
@@ -80,11 +87,11 @@ func preferredRuntimeRootFor(t *testing.T, workspace string) string {
 	t.Helper()
 	cacheRoot, err := sandboxUserCacheDir()
 	if err != nil {
-		t.Skipf("no user cache directory here: %v", err)
+		t.Fatalf("SETUP INVALID: no user cache directory: %v", err)
 	}
 	root, err := sandboxRuntimeRootFor(workspace, canonicalSandboxWorkspaceRoot(cacheRoot))
 	if err != nil {
-		t.Skipf("no preferred runtime root here: %v", err)
+		t.Fatalf("SETUP INVALID: no preferred runtime root under a cache this test owns: %v", err)
 	}
 	return root
 }

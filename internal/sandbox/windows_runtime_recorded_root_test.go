@@ -19,11 +19,11 @@ func blockCacheRuntimeRoot(t *testing.T, workspaceRoot string) (string, func()) 
 	t.Helper()
 	cacheRoot, err := sandboxUserCacheDir()
 	if err != nil {
-		t.Skipf("no user cache directory in this environment: %v", err)
+		t.Fatalf("SETUP INVALID: no user cache directory: %v", err)
 	}
 	preferred, err := sandboxRuntimeRootFor(canonicalSandboxWorkspaceRoot(workspaceRoot), canonicalSandboxWorkspaceRoot(cacheRoot))
 	if err != nil {
-		t.Skipf("no cache-derived runtime root in this environment: %v", err)
+		t.Fatalf("SETUP INVALID: no cache-derived runtime root: %v", err)
 	}
 	blocker := filepath.Dir(preferred)
 	if err := os.MkdirAll(filepath.Dir(blocker), 0o700); err != nil {

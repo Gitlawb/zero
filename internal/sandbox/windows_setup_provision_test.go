@@ -39,7 +39,10 @@ func windowsRuntimeTestRoots(t *testing.T) (string, []string) {
 
 	candidates := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{workspaceRoot})
 	if len(candidates) == 0 {
-		t.Skip("no runtime candidates derivable in this environment")
+		// Every input is owned by this point, so nothing about the machine can
+		// explain an empty answer, and skipping would quietly switch off every test
+		// built on this fixture.
+		t.Fatal("SETUP INVALID: no runtime candidates derivable from a workspace, cache and temp this test owns")
 	}
 	// Belt and braces: refuse to run rather than touch anything the test does not
 	// own, so a later change to the derivation cannot quietly reintroduce this.
