@@ -227,3 +227,65 @@ func TestKnownCredentialTailsOnlyFollowAuthenticationShapes(t *testing.T) {
 		t.Errorf("an oversized bearer lost its tail: %d candidates", len(got))
 	}
 }
+
+// PADDING IS NOT PART OF WHAT MAKES A VALUE SECRET.
+//
+// A server that normalizes base64 before it echoes drops the "==". Exact-value
+// redaction then knows the padded spelling, the message carries the body, and
+// the whole recoverable credential is displayed for the sake of two characters.
+// Every form a known value is taken apart into gets the same treatment, because
+// "Bearer <base64>==" is the usual shape and its TAIL is what gets echoed.
+func TestUnpaddedEchoOfAPaddedCredentialIsRedacted(t *testing.T) {
+	const credential = "YWJjZGVmZ2hpag=="
+	const body = "YWJjZGVmZ2hpag"
+	for _, tc := range []struct {
+		name   string
+		server config.MCPServerConfig
+	}{
+		{"bearer tail", config.MCPServerConfig{
+			Type: "http", URL: "https://host.invalid/mcp",
+			Headers: map[string]string{"Authorization": "Bearer " + credential},
+		}},
+		{"environment value", config.MCPServerConfig{
+			Type: "stdio", Command: "bridge", Env: map[string]string{"API_TOKEN": credential},
+		}},
+		{"query value under an ordinary key", config.MCPServerConfig{
+			Type: "http", URL: "https://host.invalid/mcp?workspace=" + credential,
+		}},
+		{"header argument tail", config.MCPServerConfig{
+			Type: "stdio", Command: "bridge", Args: []string{"--header", "Authorization: Bearer " + credential},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{"docs": tc.server}}
+			failure := errors.New("upstream rejected " + body + " while mode=sse was negotiated")
+			panel, detail := failedServerSurfaces(t, cfg, "docs", []mcp.SkippedServer{{Name: "docs", Err: failure}})
+			for surface, text := range map[string]string{"panel": panel, "manager detail": detail} {
+				if strings.Contains(text, body) {
+					t.Errorf("%s shows the unpadded credential:\n%s", surface, text)
+				}
+				if !strings.Contains(text, "upstream rejected") || !strings.Contains(text, "mode=sse") {
+					t.Errorf("%s lost the diagnostic:\n%s", surface, text)
+				}
+			}
+		})
+	}
+
+	// The floor still belongs to the ambiguous values. "abcdef==" is long enough
+	// to be collected, and what is left without its padding is an ordinary six
+	// bytes that must not start disappearing from messages.
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "http", URL: "https://host.invalid/mcp?pad=abcdef=="},
+	}}
+	failure := errors.New("the abcdef route is not enabled")
+	panel, detail := failedServerSurfaces(t, cfg, "docs", []mcp.SkippedServer{{Name: "docs", Err: failure}})
+	for surface, text := range map[string]string{"panel": panel, "manager detail": detail} {
+		if !strings.Contains(text, "the abcdef route is not enabled") {
+			t.Errorf("%s lost an ordinary short word to a padded ambiguous value:\n%s", surface, text)
+		}
+	}
+
+	if got := withUnpaddedSpellings([]string{"==", "abc=", "plain"}, 1); len(got) != 4 || got[2] != "abc" {
+		t.Errorf("withUnpaddedSpellings = %q, want one extra spelling for the padded candidate only", got)
+	}
+}

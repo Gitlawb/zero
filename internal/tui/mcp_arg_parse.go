@@ -167,6 +167,30 @@ func knownCredentialTails(value string) []string {
 	return nil
 }
 
+// withUnpaddedSpellings returns candidates with, beside each one that ends in
+// "=", the same value without that padding, provided what is left is at least
+// floor bytes long.
+//
+// Base64 padding is not part of what makes a value secret, and a server that
+// normalizes before echoing drops it. Exact-value redaction knows
+// "YWJjZGVmZ2hpag==", the message says "YWJjZGVmZ2hpag", nothing matches, and
+// the whole recoverable body is displayed for the sake of two characters.
+//
+// The floor is the caller's: one byte for known credential material, and the
+// readability floor for ambiguous values, so an ordinary short string does not
+// enter the redaction set by losing its padding. At most one spelling is added
+// per candidate, so the bounded expansion stays bounded.
+func withUnpaddedSpellings(candidates []string, floor int) []string {
+	out := make([]string, 0, len(candidates)+1)
+	for _, candidate := range candidates {
+		out = append(out, candidate)
+		if body := strings.TrimRight(candidate, "="); body != candidate && len(body) >= floor && body != "" {
+			out = append(out, body)
+		}
+	}
+	return out
+}
+
 // mcpSchemeLikeWord reports whether word reads as a scheme or header name:
 // letters, digits, "-" and "_" only. A credential fragment with other
 // punctuation in front of a space is not a scheme, and refusing it keeps this

@@ -168,7 +168,7 @@ func redactMCPFailureReason(err error, raw config.MCPServerConfig, tokenSecrets 
 	// pattern will recognise it.
 	for _, value := range tokenSecrets {
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			secrets = append(secrets, trimmed)
+			secrets = append(secrets, withUnpaddedSpellings([]string{trimmed}, 1)...)
 		}
 	}
 	options := redaction.Options{ExtraSecretValues: secrets}
@@ -862,7 +862,7 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	// redaction set. That floor is a readability trade-off, and it is only
 	// defensible while the value might not be a credential at all.
 	add := func(value string) {
-		values = append(values, credentialCandidates(value)...)
+		values = append(values, withUnpaddedSpellings(credentialCandidates(value), shortestMCPSecret)...)
 	}
 	// KNOWN values skip the floor. Provenance has already settled that these are
 	// secret: a field named ClientSecret, or the value of a credential-bearing
@@ -882,18 +882,15 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	// credential, and taking it apart does not make the credential ambiguous
 	// again: the tail keeps the provenance of the value it came from.
 	addKnown := func(value string) {
+		forms := make([]string, 0, 4)
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			values = append(values, trimmed)
-			// Base64 padding is not part of what makes the value secret, and a
-			// server that normalizes before echoing drops it. Matching only the
-			// padded spelling would let the whole body through for the sake of
-			// two "=" characters.
-			if body := strings.TrimRight(trimmed, "="); body != "" && body != trimmed {
-				values = append(values, body)
-			}
+			forms = append(forms, trimmed)
 		}
-		values = append(values, credentialCandidates(value)...)
-		values = append(values, knownCredentialTails(value)...)
+		forms = append(forms, credentialCandidates(value)...)
+		forms = append(forms, knownCredentialTails(value)...)
+		// Every form, not only the whole value: "Bearer <base64>==" is the usual
+		// shape, and its padded TAIL is the credential a server echoes.
+		values = append(values, withUnpaddedSpellings(forms, 1)...)
 	}
 	// addClassified keeps a key/value pair together long enough to decide which
 	// of the two applies. A key the sensitive-name list recognises has already
