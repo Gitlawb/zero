@@ -216,6 +216,9 @@ func (client *networkClient) request(ctx context.Context, method string, params 
 	if err != nil {
 		return err
 	}
+	if message.isRequestOrNotification() {
+		return fmt.Errorf("MCP %s expected a response from server %s, got method %q instead", method, client.server.Name, message.Method)
+	}
 	if !rpcIDMatches(message.ID, id) {
 		return fmt.Errorf("MCP %s response id mismatch for server %s", method, client.server.Name)
 	}

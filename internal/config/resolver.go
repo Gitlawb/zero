@@ -166,6 +166,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Providers:           providers,
 		Provider:            active,
 		MaxTurns:            cfg.MaxTurns,
+		MaxTurnsSet:         cfg.maxTurnsSet,
 		MCP:                 cfg.MCP,
 		Sandbox:             cfg.Sandbox,
 		Notify:              cfg.Notify,
@@ -234,6 +235,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 	if src.MaxTurns > 0 {
 		dst.MaxTurns = src.MaxTurns
+		dst.maxTurnsSet = true
 	}
 	for _, provider := range src.Providers {
 		mergeProvider(dst, provider)
@@ -294,6 +296,7 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	}
 	if src.MaxTurns > 0 {
 		dst.MaxTurns = src.MaxTurns
+		dst.maxTurnsSet = true
 	}
 	for _, provider := range src.Providers {
 		candidate := providerMergeCandidate(*dst, provider)
@@ -606,6 +609,7 @@ func applyEnv(cfg *FileConfig, env map[string]string) {
 				n = MaxTurnsCeiling
 			}
 			cfg.MaxTurns = n
+			cfg.maxTurnsSet = true
 		}
 	}
 
@@ -726,6 +730,7 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns
+		cfg.maxTurnsSet = true
 	}
 	if overrides.Sandbox.Enabled != nil {
 		cfg.Sandbox.Enabled = overrides.Sandbox.Enabled

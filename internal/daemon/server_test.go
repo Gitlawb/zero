@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/observability"
+	"github.com/Gitlawb/zero/internal/testutil"
 )
 
 func TestServeSupportsReadOnlyCustomRuntimeDirectory(t *testing.T) {
@@ -34,7 +35,7 @@ func TestServeSupportsReadOnlyCustomRuntimeDirectory(t *testing.T) {
 	srv := newTestServerWithPaths(t, launcher, paths)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
-	waitForFile(t, paths.Status)
+	testutil.WaitFor(t, "file "+paths.Status, func() bool { _, err := os.Stat(paths.Status); return err == nil })
 	srv.Shutdown()
 	if err := <-serveErr; err != nil {
 		t.Fatalf("Serve with 0755 custom runtime directory: %v", err)
@@ -212,18 +213,6 @@ func newTestServerWithPaths(t *testing.T, launcher Launcher, paths Paths) *Serve
 	return srv
 }
 
-func waitForFile(t *testing.T, path string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("file %s did not appear within timeout", path)
-}
-
 func TestServerEndToEnd(t *testing.T) {
 	out := []string{`{"type":"event","seq":1}`, `{"type":"event","seq":2}`}
 	launcher, _ := seqLauncher(&fakeWorker{pid: 1, out: out, exitCode: 0})
@@ -231,7 +220,7 @@ func TestServerEndToEnd(t *testing.T) {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
-	waitForFile(t, paths.Status)
+	testutil.WaitFor(t, "file "+paths.Status, func() bool { _, err := os.Stat(paths.Status); return err == nil })
 
 	// --- run a session and collect its stream-json output ---
 	runClient, err := Dial(paths.Socket)
@@ -384,7 +373,8 @@ func TestServeCleansStatusThroughBoundDirectoryAfterSwap(t *testing.T) {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
-	waitForFile(t, filepath.Join(movedDir, "d.status"))
+	movedStatus := filepath.Join(movedDir, "d.status")
+	testutil.WaitFor(t, "file "+movedStatus, func() bool { _, err := os.Stat(movedStatus); return err == nil })
 	srv.Shutdown()
 	select {
 	case err := <-serveErr:
@@ -472,7 +462,7 @@ func TestServerSecondInstanceFails(t *testing.T) {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv1.Serve() }()
-	waitForFile(t, paths.Status)
+	testutil.WaitFor(t, "file "+paths.Status, func() bool { _, err := os.Stat(paths.Status); return err == nil })
 
 	// A second server on the same paths must refuse to start (single instance).
 	pool2, _ := NewPool(PoolOptions{Size: 1, Launcher: launcher})
@@ -493,7 +483,7 @@ func TestServerRejectsUnknownCommand(t *testing.T) {
 	srv, paths := newTestServer(t, launcher)
 	go func() { _ = srv.Serve() }()
 	defer srv.Shutdown()
-	waitForFile(t, paths.Status)
+	testutil.WaitFor(t, "file "+paths.Status, func() bool { _, err := os.Stat(paths.Status); return err == nil })
 
 	client, err := Dial(paths.Socket)
 	if err != nil {
