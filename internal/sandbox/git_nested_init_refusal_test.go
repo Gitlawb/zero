@@ -278,7 +278,6 @@ func TestNestedWorkspaceRefusesAnInlineGitAliasForInit(t *testing.T) {
 	for _, command := range []string{
 		"git init",
 		"git -c alias.bootstrap=init bootstrap",
-		"git -calias.bootstrap=init bootstrap",
 		"git -c alias.mk=init-db mk",
 		"git -c alias.get=clone get https://example.invalid/repo.git .",
 		"git -c alias.two=bootstrap -c alias.bootstrap=init two",
@@ -287,6 +286,31 @@ func TestNestedWorkspaceRefusesAnInlineGitAliasForInit(t *testing.T) {
 		"git -c alias.dangling=nowhere -c alias.nowhere= dangling",
 		"git -C . -c alias.bootstrap=init bootstrap",
 		"git -c alias.sh=!sh -c 'git init' sh",
+		// THE EXPANSION IS PARSED THE WAY GIT PARSES IT. A -c inside the
+		// expansion defines the alias the next lookup uses, and quotes are
+		// stripped before the subcommand is read; both of the first two
+		// spellings created a repository while only the first whitespace
+		// field of the expansion was classified.
+		"git -c alias.a='-c alias.b=init b' a .",
+		"git -c 'alias.a=\"init\"' a .",
+		"git -c 'alias.a=in\"it\"' a",
+		"git -c 'alias.a=in\\it' a",
+		"git -c alias.a='--no-pager init' a",
+		"git -c alias.a='-c alias.a=init a' a",
+		// Git dies on these before running anything; refusing them costs
+		// nothing and keeps the rule that an expansion this analyzer cannot
+		// read is not evidence of safety.
+		"git -c 'alias.a=\"in' a",
+		"git -c 'alias.a=-C . init' a",
+		// An alias defined by reference, or through the environment the call
+		// sets, is the same command with its definition moved out of sight.
+		"git --config-env=alias.a=zz a .",
+		"git --config-env alias.a=zz a .",
+		"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.a GIT_CONFIG_VALUE_0=init git a .",
+		"env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.a GIT_CONFIG_VALUE_0=init git a .",
+		"GIT_CONFIG_PARAMETERS=\"'alias.a=init'\" git a .",
+		"GIT_CONFIG_PARAMETERS=$params git a .",
+		"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.a GIT_CONFIG_VALUE_0=$cmd git a .",
 	} {
 		request := gitCommandRequest(workspace, command)
 		request.Permission = PermissionAllow
@@ -296,13 +320,24 @@ func TestNestedWorkspaceRefusesAnInlineGitAliasForInit(t *testing.T) {
 			t.Fatalf("%q inside the repository at %s was not refused as nested repository creation: action=%s block=%#v", command, ancestor, decision.Action, decision.Block)
 		}
 	}
-	// CONTROLS: a harmless alias, an unrelated -c setting, and ordinary use.
+	// CONTROLS: a harmless alias, an unrelated -c setting, ordinary use, and
+	// the quoted, option-bearing and environment-defined spellings of an alias
+	// that runs something harmless.
 	for _, command := range []string{
 		"git -c alias.st=status st",
 		"git -c core.autocrlf=false status",
 		"git -c alias.bootstrap=init status",
 		"git -c alias.lg=log lg --oneline",
 		"git -c alias.a=b -c alias.b=c -c alias.c=d -c alias.d=e -c alias.e=status a",
+		"git -c alias.st='-c color.ui=always status' st",
+		"git -c 'alias.st=\"status\"' st",
+		"git -c 'alias.st=sta\"tus\"' st",
+		"git -c alias.l='--no-pager log --oneline' l",
+		"git -c alias.s=st -c 'alias.st=\"status\"' s",
+		"git --config-env=core.pager=p status",
+		"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.st GIT_CONFIG_VALUE_0=status git st",
+		"GIT_CONFIG_PARAMETERS=\"'alias.st=status'\" git st",
+		"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=$pager git log",
 	} {
 		request := gitCommandRequest(workspace, command)
 		request.Permission = PermissionAllow
@@ -313,10 +348,17 @@ func TestNestedWorkspaceRefusesAnInlineGitAliasForInit(t *testing.T) {
 	}
 	// And a standalone workspace is not governed at all, alias or not.
 	standalone := t.TempDir()
-	request := gitCommandRequest(standalone, "git -c alias.bootstrap=init bootstrap")
-	request.Permission = PermissionAllow
-	request.PermissionGranted = true
-	if decision := gitWorkspaceEngine(t, standalone).Evaluate(context.Background(), request); decision.Block != nil && decision.Block.Code == BlockNestedGitInit {
-		t.Fatalf("an aliased init in a standalone workspace was refused as nested: %#v", decision)
+	for _, command := range []string{
+		"git -c alias.bootstrap=init bootstrap",
+		"git -c alias.a='-c alias.b=init b' a .",
+		"git -c 'alias.a=\"init\"' a .",
+		"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.a GIT_CONFIG_VALUE_0=init git a .",
+	} {
+		request := gitCommandRequest(standalone, command)
+		request.Permission = PermissionAllow
+		request.PermissionGranted = true
+		if decision := gitWorkspaceEngine(t, standalone).Evaluate(context.Background(), request); decision.Block != nil && decision.Block.Code == BlockNestedGitInit {
+			t.Fatalf("%q in a standalone workspace was refused as nested: %#v", command, decision)
+		}
 	}
 }
