@@ -62,8 +62,8 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		t.Fatalf("Mkdir blocked: %v", err)
 	}
 
-	policy := DefaultPolicy()
-	policy.DenyRead = []string{secretDir}
+	policy := testPolicyWithSSHDirectoryDeny(t, credentialHome)
+	policy.DenyRead = append(policy.DenyRead, secretDir)
 	policy.DenyWrite = []string{blockedDir}
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Backend: backend})
 	output, runErr := runLinuxSandboxSmokeCommand(t, engine, CommandSpec{
@@ -93,7 +93,9 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 	t.Run("fresh home and non-git workspace launch", func(t *testing.T) {
 		freshRoot := t.TempDir()
 		freshHome := t.TempDir()
-		freshEngine := NewEngine(EngineOptions{WorkspaceRoot: freshRoot, Policy: DefaultPolicy(), Backend: backend})
+		t.Setenv("HOME", freshHome)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(freshHome, ".config"))
+		freshEngine := NewEngine(EngineOptions{WorkspaceRoot: freshRoot, Policy: testPolicyWithSSHDirectoryDeny(t, freshHome), Backend: backend})
 		output, runErr := runLinuxSandboxSmokeCommand(t, freshEngine, CommandSpec{
 			Name: "/bin/sh",
 			Args: []string{"-c", "echo ok > launched"},
@@ -109,7 +111,11 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		commandRoot := filepath.Join(tempDirOutsideDefaultTemp(t), "missing-command-home")
 		commandConfig := filepath.Join(commandRoot, "config")
 		launched := filepath.Join(root, "command-credential-root-launched")
-		engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: backend})
+		missingPolicy := testPolicyWithSSHDirectoryDeny(t, credentialHome)
+		// Exercise the absent credential-directory check without the independent
+		// selective SSH refusal rejecting this command first. No path is created.
+		missingPolicy.AllowRead = append(missingPolicy.AllowRead, filepath.Join(commandRoot, ".ssh"))
+		engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: missingPolicy, Backend: backend})
 		_, err := engine.BuildCommandPlan(CommandSpec{
 			Name: "/bin/sh",
 			Args: []string{"-c", "echo launched > " + shellQuote(launched)},

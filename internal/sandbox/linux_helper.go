@@ -59,6 +59,7 @@ type linuxSandboxBwrapPlan struct {
 }
 
 type linuxBwrapFilesystemPlan struct {
+	Err                    error
 	Args                   []string
 	ProtectedCreateTargets []string
 }
@@ -189,6 +190,9 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 		"--die-with-parent",
 	}
 	filesystemPlan := buildLinuxBwrapFilesystemPlan(config.PermissionProfile)
+	if filesystemPlan.Err != nil {
+		return linuxSandboxBwrapPlan{}, filesystemPlan.Err
+	}
 	args = append(args, filesystemPlan.Args...)
 	if pathExists(helperPath) {
 		args = append(args, "--ro-bind", helperPath, helperPath)
@@ -221,6 +225,22 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 }
 
 func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
+	if problems := profile.FileSystem.CredentialDiscoveryErrors; len(problems) > 0 {
+		return fmt.Errorf("cannot guarantee credential protection: %s", strings.Join(problems, "; "))
+	}
+	for _, path := range profile.FileSystem.DenyRead {
+		if _, err := os.Lstat(path); err != nil {
+			return fmt.Errorf("bubblewrap cannot guarantee an explicit deny for %s: %w", path, err)
+		}
+	}
+	if len(profile.FileSystem.SSHDenyReadFiles) > 0 {
+		return fmt.Errorf("bubblewrap cannot guarantee selective SSH key protection across concurrent path replacement; deny the containing directory explicitly or use a pathname-policy backend")
+	}
+	for _, path := range append(append([]string{}, profile.FileSystem.DenyRead...), profile.FileSystem.DenyReadIfExists...) {
+		if linuxNonPlatformSymlinkInPath(path) {
+			return fmt.Errorf("bubblewrap cannot guarantee deny-read protection through a mutable symlink: %s", path)
+		}
+	}
 	if files := profile.FileSystem.ProcessTrustedDenyReadFiles; len(files) > 0 {
 		return fmt.Errorf("bubblewrap cannot securely deny credential files outside the Zero config directory across atomic replacement: %s; move the store under $XDG_CONFIG_HOME/zero or add its path to sandbox allowRead", strings.Join(files, ", "))
 	}
@@ -303,26 +323,35 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 	for _, path := range fs.DenyWrite {
 		args = appendReadOnlyLinuxPathArgs(args, path)
 	}
-	for _, path := range fs.DenyRead {
-		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
-	}
+	var unreadable []string
+	unreadable = append(unreadable, fs.DenyRead...)
 	// The profile includes only trusted, process-environment-derived directories
 	// here. Command-controlled credential roots remain deny-if-present and must
 	// never cause host filesystem mutations before sandbox launch.
 	ensureLinuxDenyReadDirs(fs.EnsureDenyReadDirs)
 	for _, path := range fs.DenyReadIfExists {
-		if !pathExists(path) {
+		if !pathExists(path) && !pathExistsNoFollow(path) {
 			// A baseline credential path is emitted for every run, so an absent
 			// entry is the common case on a fresh machine — a third-party store
 			// such as ~/.aws that Zero must not create. The read-all profile starts
 			// from a read-only host-root bind where bubblewrap cannot create a
 			// missing mount destination, and masking the nearest existing parent
 			// could hide HOME, /tmp, or the workspace. Path-based backends
-			// (seatbelt) still deny these paths before they exist.
+			// (seatbelt) still deny these paths before they exist. A dangling
+			// symlink still exists as a pathname and must be masked so a later
+			// retarget cannot reopen it.
 			continue
 		}
-		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
+		unreadable = append(unreadable, path)
 	}
+	classified := classifyUnreadableLinuxPaths(unreadable)
+	if classified.err != nil {
+		return linuxBwrapFilesystemPlan{Err: classified.err}
+	}
+	if len(classified.links) > 0 {
+		return linuxBwrapFilesystemPlan{Err: errors.New("bubblewrap cannot guarantee deny-read protection through a mutable symlink")}
+	}
+	args = appendClassifiedUnreadableLinuxPaths(args, classified, fs.DenyReadCarveouts)
 	return linuxBwrapFilesystemPlan{
 		Args:                   args,
 		ProtectedCreateTargets: dedupeStrings(protectedCreateTargets),
@@ -397,14 +426,111 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 	return append(args, "--perms", "555", "--tmpfs", path, "--remount-ro", path)
 }
 
-func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
-	path = normalizeProfilePath(path)
-	if path == "" {
-		return args
+// Denies are classified once; uncertain entries abort planning before args are used.
+func appendClassifiedUnreadableLinuxPaths(args []string, classified linuxUnreadableClassified, carveouts []string) []string {
+	for _, dir := range classified.dirs {
+		args = appendUnreadableLinuxDirArgs(args, dir, carveouts)
 	}
-	if info, err := os.Stat(path); err == nil && !info.IsDir() {
-		return append(args, "--ro-bind", "/dev/null", path)
+	for _, file := range classified.files {
+		args = append(args, "--ro-bind", "/dev/null", file)
 	}
+	return args
+}
+
+type linuxUnreadableClassified struct {
+	err   error
+	files []string
+	dirs  []string
+	links []string
+}
+
+func classifyUnreadableLinuxPaths(paths []string) linuxUnreadableClassified {
+	var out linuxUnreadableClassified
+	seen := make(map[string]struct{}, len(paths))
+	add := func(bucket *[]string, path string) {
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		*bucket = append(*bucket, path)
+	}
+	for _, path := range paths {
+		lexical := normalizeProfilePathLexically(path)
+		canonical := normalizeProfilePath(path)
+		inspect := lexical
+		if inspect == "" {
+			inspect = canonical
+		}
+		if inspect == "" {
+			out.err = fmt.Errorf("cannot classify deny-read path %q", path)
+			return out
+		}
+		info, err := os.Lstat(inspect)
+		if err != nil && canonical != "" && canonical != inspect {
+			info, err = os.Lstat(canonical)
+			inspect = canonical
+		}
+		if err != nil {
+			out.err = fmt.Errorf("cannot classify deny-read path %s: %w", path, err)
+			return out
+		}
+		switch {
+		case info.Mode().Type() == os.ModeSymlink:
+			// Keep the lexical dentry so a later retarget still hits the dest.
+			add(&out.links, inspect)
+		case info.IsDir():
+			dest := inspect
+			if canonical != "" && !linuxNonPlatformSymlinkInPath(inspect) {
+				dest = canonical
+			}
+			add(&out.dirs, dest)
+		default:
+			dest := inspect
+			if canonical != "" && !linuxNonPlatformSymlinkInPath(inspect) {
+				dest = canonical
+			}
+			add(&out.files, dest)
+		}
+	}
+	return out
+}
+
+// linuxNonPlatformSymlinkInPath reports a symlink in path's resolution other
+// than host aliases such as macOS /var -> /private/var. Those aliases should
+// use the canonical bwrap dest so overlay and file binds name the same place.
+// A credential directory symlink (for example ~/.ssh -> a store) must keep the
+// lexical dest so a later retarget is still denied.
+func linuxNonPlatformSymlinkInPath(path string) bool {
+	current := normalizeProfilePathLexically(path)
+	if current == "" {
+		current = filepath.Clean(path)
+	}
+	for {
+		info, err := os.Lstat(current)
+		if err == nil && info.Mode().Type() == os.ModeSymlink && !linuxPlatformPrefixSymlink(current) {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
+}
+
+func linuxPlatformPrefixSymlink(path string) bool {
+	switch filepath.Clean(path) {
+	case "/var", "/etc", "/tmp", "/private/var", "/private/etc", "/private/tmp":
+		return true
+	default:
+		return false
+	}
+}
+
+func appendUnreadableLinuxDirArgs(args []string, path string, carveouts []string) []string {
 	nested := nestedCarveoutPaths(path, carveouts)
 	if len(nested) == 0 {
 		return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)
@@ -416,7 +542,7 @@ func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []strin
 	// --remount-ro, which is what freezes the tmpfs.
 	args = append(args, "--perms", "111", "--tmpfs", path)
 	for _, carveout := range nested {
-		if info, err := os.Lstat(carveout); err == nil && info.IsDir() {
+		if info, err := os.Lstat(carveout); err == nil && info.Mode()&os.ModeSymlink == 0 {
 			args = append(args, "--ro-bind", carveout, carveout)
 		}
 	}
@@ -468,6 +594,14 @@ func pathExists(path string) bool {
 		return false
 	}
 	_, err := os.Stat(path)
+	return err == nil
+}
+
+func pathExistsNoFollow(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Lstat(path)
 	return err == nil
 }
 

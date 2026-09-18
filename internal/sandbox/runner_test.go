@@ -20,7 +20,7 @@ func TestBuildCommandPlanWrapsLinuxHelper(t *testing.T) {
 	resolvedNested := resolvedTestPath(t, nested)
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
-		Policy:        DefaultPolicy(),
+		Policy:        testPolicyWithSSHDirectoryDeny(t),
 		Backend: Backend{
 			Name:       BackendLinuxBwrap,
 			Available:  true,
@@ -38,6 +38,7 @@ func TestBuildCommandPlanWrapsLinuxHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
+	t.Cleanup(plan.Cleanup)
 
 	if !plan.Wrapped || plan.Name != "/usr/bin/zero-linux-sandbox" || plan.Backend.Name != BackendLinuxBwrap {
 		t.Fatalf("plan backend = %#v, want wrapped Linux helper", plan)
@@ -758,7 +759,7 @@ func TestLinuxHelperPlanCarriesExtraWriteRoots(t *testing.T) {
 	}
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
-		Policy:        DefaultPolicy(),
+		Policy:        testPolicyWithSSHDirectoryDeny(t),
 		Scope:         scope,
 		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
@@ -766,6 +767,7 @@ func TestLinuxHelperPlanCarriesExtraWriteRoots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
+	t.Cleanup(plan.Cleanup)
 	config, err := ParseLinuxSandboxHelperArgs(plan.Args)
 	if err != nil {
 		t.Fatalf("ParseLinuxSandboxHelperArgs: %v", err)
@@ -806,7 +808,7 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 	}
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
-		Policy:        DefaultPolicy(),
+		Policy:        testPolicyWithSSHDirectoryDeny(t),
 		Scope:         scope,
 		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
@@ -815,6 +817,7 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
+	t.Cleanup(plan.Cleanup)
 	if filepath.Clean(plan.SandboxDir) != filepath.Clean(resolvedExtra) {
 		t.Fatalf("SandboxDir=%q want real extra-root path %q", plan.SandboxDir, resolvedExtra)
 	}
@@ -880,7 +883,7 @@ func TestEngineScrubsConfiguredSensitiveEnvKeys(t *testing.T) {
 	workspace := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot:    workspace,
-		Policy:           DefaultPolicy(),
+		Policy:           testPolicyWithSSHDirectoryDeny(t),
 		Backend:          Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 		SensitiveEnvKeys: []string{"COMPANY_LLM_SECRET"},
 	})
@@ -896,6 +899,7 @@ func TestEngineScrubsConfiguredSensitiveEnvKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
+	t.Cleanup(plan.Cleanup)
 	for _, entry := range plan.Env {
 		key, _, _ := strings.Cut(entry, "=")
 		if strings.EqualFold(key, "COMPANY_LLM_SECRET") || strings.EqualFold(key, "ZERO_OAUTH_CUSTOM_CLIENT_SECRET") {
