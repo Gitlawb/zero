@@ -519,7 +519,7 @@ func TestImageBudgetNonZeroResidueAllowsSmallerLaterImage(t *testing.T) {
 		{Type: "image", MimeType: "image/png", Data: img1},
 	}
 
-	images, disp := forwardImages(content)
+	images, disp, _ := forwardImages(content)
 	if len(images) != 2 {
 		t.Fatalf("forwardImages len = %d, want 2 (8 MiB + 1 MiB)", len(images))
 	}
@@ -589,7 +589,7 @@ func TestImageInspectionBudgetBoundsRejectedCandidates(t *testing.T) {
 		content[i] = Content{Type: "image", MimeType: "image/png", Data: tinyPNGBase64}
 	}
 	content = append(content, Content{Type: "text", Text: "trailing text"})
-	images, disp := forwardImages(content)
+	images, disp, _ := forwardImages(content)
 	if decodes != 32 || len(images) != 1 {
 		t.Fatalf("got %d decodes and %d forwarded images, want 32 and 1", decodes, len(images))
 	}
@@ -618,6 +618,53 @@ func BenchmarkForwardImagesFourHalfBudget(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = forwardImages(content)
+		_, _, _ = forwardImages(content)
 	}
+}
+
+func TestMCPResultUninspectedImageLimitingReasonNotes(t *testing.T) {
+	t.Run("forwarded count limit reached", func(t *testing.T) {
+		content := make([]Content, 20)
+		for i := range content {
+			content[i] = Content{Type: "image", MimeType: "image/png", Data: tinyPNGBase64}
+		}
+		result := registryTool{
+			client: &nonTextClient{content: content},
+			server: Server{Name: "shots"},
+			remote: RemoteTool{Name: "screenshot"},
+		}.Run(context.Background(), map[string]any{})
+		if len(result.Images) != 16 {
+			t.Fatalf("expected 16 forwarded images, got %d", len(result.Images))
+		}
+		if !strings.Contains(result.Output, "which were not inspected because the maximum forwarded image count was reached.") {
+			t.Fatalf("expected maximum forwarded image count message, got:\n%s", result.Output)
+		}
+	})
+
+	t.Run("inspection limit reached", func(t *testing.T) {
+		previous := decodeImageBase64
+		large := make([]byte, 1024)
+		rejected := make([]byte, imageinput.MaxImageBytes+1)
+		decodes := 0
+		decodeImageBase64 = func(s string) ([]byte, error) {
+			decodes++
+			if decodes == 1 {
+				return large, nil
+			}
+			return rejected, nil
+		}
+		t.Cleanup(func() { decodeImageBase64 = previous })
+		content := make([]Content, 35)
+		for i := range content {
+			content[i] = Content{Type: "image", MimeType: "image/png", Data: tinyPNGBase64}
+		}
+		result := registryTool{
+			client: &nonTextClient{content: content},
+			server: Server{Name: "shots"},
+			remote: RemoteTool{Name: "screenshot"},
+		}.Run(context.Background(), map[string]any{})
+		if !strings.Contains(result.Output, "which were not inspected because the maximum image inspection limit was reached.") {
+			t.Fatalf("expected maximum image inspection limit message, got:\n%s", result.Output)
+		}
+	})
 }

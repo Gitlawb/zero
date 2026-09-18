@@ -7,13 +7,13 @@ import "github.com/Gitlawb/zero/internal/zeroruntime"
 // when every block is text or an image that ImageBlocks successfully
 // forwarded, so a caller adds nothing to the ordinary case.
 func DroppedContentSummary(content []Content) string {
-	_, disp := forwardImages(content)
+	_, disp, _ := forwardImages(content)
 	return droppedContentNote(content, disp, dispDropped, dispBudgetExceeded, dispUninspected)
 }
 
 // ImageBlocks converts MCP image content into the same ImageBlock channel
 // capture tools already use.
 func ImageBlocks(content []Content) []zeroruntime.ImageBlock {
-	images, _ := forwardImages(content)
+	images, _, _ := forwardImages(content)
 	return images
 }

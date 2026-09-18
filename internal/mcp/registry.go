@@ -331,7 +331,7 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 		status = tools.StatusError
 	}
 	output := TextContent(result.Content)
-	images, disp := forwardImages(result.Content)
+	images, disp, limitReason := forwardImages(result.Content)
 	// Image blocks with valid data ride Result.Images, the same channel capture
 	// tools already use. Everything else non-text is still named rather than
 	// silently dropped, because Zero still has nowhere to put audio, embedded
@@ -367,8 +367,16 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 		if dispCount(disp, dispUninspected) == 1 {
 			verb = ", which was not inspected"
 		}
-		output = appendServerNote(output, uninspected,
-			verb+" because the aggregate image budget was reached.")
+		var cause string
+		switch limitReason {
+		case imageLimitForwardCount:
+			cause = " because the maximum forwarded image count was reached."
+		case imageLimitInspectionCount:
+			cause = " because the maximum image inspection limit was reached."
+		default:
+			cause = " because the aggregate image budget was reached."
+		}
+		output = appendServerNote(output, uninspected, verb+cause)
 	}
 	if dropped := droppedContentNote(result.Content, disp, dispDropped); dropped != "" {
 		output = appendServerNote(output, dropped,

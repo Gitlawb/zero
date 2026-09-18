@@ -777,19 +777,46 @@ const maxForwardedImages = 16
 // do not consume the forwarding budgets.
 const maxInspectedImages = 32
 
-func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
+type imageLimitReason int
+
+const (
+	imageLimitNone imageLimitReason = iota
+	imageLimitBudget
+	imageLimitForwardCount
+	imageLimitInspectionCount
+)
+
+func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp, imageLimitReason) {
 	disp := make([]itemDisp, len(content))
 	var images []zeroruntime.ImageBlock
 	remaining := imageinput.MaxImageBytes
 	inspected := 0
+	var limitReason imageLimitReason
 	for i, item := range content {
 		if item.Type == "text" {
 			disp[i] = dispText
 			continue
 		}
 		if item.Type == "image" {
-			if remaining == 0 || len(images) >= maxForwardedImages || inspected >= maxInspectedImages {
+			if remaining == 0 {
 				disp[i] = dispUninspected
+				if limitReason == imageLimitNone {
+					limitReason = imageLimitBudget
+				}
+				continue
+			}
+			if len(images) >= maxForwardedImages {
+				disp[i] = dispUninspected
+				if limitReason == imageLimitNone {
+					limitReason = imageLimitForwardCount
+				}
+				continue
+			}
+			if inspected >= maxInspectedImages {
+				disp[i] = dispUninspected
+				if limitReason == imageLimitNone {
+					limitReason = imageLimitInspectionCount
+				}
 				continue
 			}
 			inspected++
@@ -806,7 +833,7 @@ func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp) {
 		}
 		disp[i] = dispDropped
 	}
-	return images, disp
+	return images, disp, limitReason
 }
 
 func droppedContentNote(content []Content, disp []itemDisp, kinds ...itemDisp) string {
