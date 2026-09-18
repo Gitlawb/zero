@@ -165,3 +165,86 @@ func TestLinuxAbsentSSHKeyRefusesCommandBeforeCreation(t *testing.T) {
 		})
 	}
 }
+
+func TestSSHDiscoverySymlinkDirectoryBounds(t *testing.T) {
+	t.Run("symlink directory limit exceeded", func(t *testing.T) {
+		sshDir := filepath.Join(t.TempDir(), ".ssh")
+		mustWriteFile(t, filepath.Join(sshDir, "known_hosts"), "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...")
+		external := t.TempDir()
+		curr := external
+		for i := 0; i <= sshSymlinkMaxDirs; i++ {
+			curr = filepath.Join(curr, fmt.Sprintf("dir-%03d", i))
+			if err := os.Mkdir(curr, 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(external, filepath.Join(sshDir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		scanner := &sshDiscovery{}
+		_ = scanner.walkPrivateKeyFiles(sshDir)
+		if len(scanner.errors) == 0 {
+			t.Fatal("expected discovery error for symlink directory limit exceeded, got none")
+		}
+		var matched bool
+		for _, e := range scanner.errors {
+			if strings.Contains(e, "symlink directory limit exceeded") {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("expected symlink directory limit exceeded, got %v", scanner.errors)
+		}
+	})
+
+	t.Run("symlink entry limit exceeded", func(t *testing.T) {
+		sshDir := filepath.Join(t.TempDir(), ".ssh")
+		if err := os.MkdirAll(sshDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		external := t.TempDir()
+		for i := 0; i <= sshSymlinkMaxEntries; i++ {
+			mustWriteFile(t, filepath.Join(external, fmt.Sprintf("file-%04d", i)), "data")
+		}
+		if err := os.Symlink(external, filepath.Join(sshDir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		scanner := &sshDiscovery{}
+		_ = scanner.walkPrivateKeyFiles(sshDir)
+		if len(scanner.errors) == 0 {
+			t.Fatal("expected discovery error for symlink entry limit exceeded, got none")
+		}
+		var matched bool
+		for _, e := range scanner.errors {
+			if strings.Contains(e, "symlink entry limit exceeded") {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("expected symlink entry limit exceeded, got %v", scanner.errors)
+		}
+	})
+
+	t.Run("symlink within budget succeeds", func(t *testing.T) {
+		sshDir := filepath.Join(t.TempDir(), ".ssh")
+		if err := os.MkdirAll(sshDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		external := t.TempDir()
+		keyFile := filepath.Join(external, "custom_key")
+		mustWriteFile(t, keyFile, sshPrivateKeyFixture())
+		if err := os.Symlink(external, filepath.Join(sshDir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		scanner := &sshDiscovery{}
+		keys := scanner.walkPrivateKeyFiles(sshDir)
+		if len(scanner.errors) != 0 {
+			t.Fatalf("unexpected discovery errors: %v", scanner.errors)
+		}
+		if len(keys) == 0 {
+			t.Fatal("expected discovered key in symlinked directory, got none")
+		}
+	})
+}

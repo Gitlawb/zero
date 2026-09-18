@@ -22,6 +22,13 @@ const sshPrivateKeyWalkPageSize = 256
 
 const sshPrivateKeySniffBytes = 128
 
+// sshSymlinkMaxDirs and sshSymlinkMaxEntries bound traversal of directory
+// trees reached through symlinks inside ~/.ssh. Real ~/.ssh directory trees
+// remain unbounded.
+const sshSymlinkMaxDirs = 64
+
+const sshSymlinkMaxEntries = 1024
+
 // sshWellKnownPrivateKeyNames are the OpenSSH default private-key basenames.
 // They are emitted even when ~/.ssh is absent so pathname-policy backends can
 // reserve them; mount-based Linux must refuse unprotected future key paths.
@@ -85,10 +92,19 @@ func (s *sshDiscovery) privateKeyDenyCandidates(home string) []string {
 var testSSHWalkChildHook func(dir string)
 
 func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
+	type pendingDir struct {
+		path       string
+		viaSymlink bool
+	}
+
 	var out []string
 	visitedDirs := make(map[string]bool)
-	pending := []string{sshDir}
-	walk := func(dir string) {
+	pending := []pendingDir{{path: sshDir, viaSymlink: false}}
+	var symlinkDirsVisited int
+	var symlinkEntriesSeen int
+
+	walk := func(item pendingDir) {
+		dir := item.path
 		realDir := dir
 		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 			realDir = resolved
@@ -97,6 +113,14 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 			return
 		}
 		visitedDirs[realDir] = true
+
+		if item.viaSymlink {
+			symlinkDirsVisited++
+			if symlinkDirsVisited > sshSymlinkMaxDirs {
+				s.fail(dir, "symlink directory limit exceeded")
+				return
+			}
+		}
 
 		root, err := os.OpenRoot(dir)
 		if err != nil {
@@ -122,6 +146,13 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 			if err != nil && err != io.EOF {
 				s.fail(dir, err.Error())
 				return
+			}
+			if item.viaSymlink {
+				symlinkEntriesSeen += len(entries)
+				if symlinkEntriesSeen > sshSymlinkMaxEntries {
+					s.fail(dir, "symlink entry limit exceeded")
+					return
+				}
 			}
 			if testSSHWalkChildHook != nil {
 				testSSHWalkChildHook(dir)
@@ -156,7 +187,7 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 					}
 					targetStat, err := os.Stat(targetPath)
 					if err == nil && targetStat.IsDir() {
-						pending = append(pending, targetPath)
+						pending = append(pending, pendingDir{path: targetPath, viaSymlink: true})
 						continue
 					}
 					// Inspect leaf symlinks (bounded, specials rejected) so a
@@ -170,7 +201,7 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 					continue
 				}
 				if info.IsDir() {
-					pending = append(pending, path)
+					pending = append(pending, pendingDir{path: path, viaSymlink: item.viaSymlink})
 					continue
 				}
 				if !mode.IsRegular() {
@@ -188,9 +219,9 @@ func (s *sshDiscovery) walkPrivateKeyFiles(sshDir string) []string {
 	// Iteration keeps open directory handles and call-stack depth constant even
 	// for deeply nested layouts. The physical-path set still breaks link cycles.
 	for len(pending) > 0 {
-		dir := pending[len(pending)-1]
+		item := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
-		walk(dir)
+		walk(item)
 	}
 	return out
 }
