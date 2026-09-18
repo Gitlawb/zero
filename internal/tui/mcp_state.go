@@ -192,7 +192,17 @@ func redactMCPFailureReason(err error, raw config.MCPServerConfig, tokenSecrets 
 	// configured secret. It costs one comparison per secret against a bounded
 	// window and does not care how long the secret is, which is the property the
 	// overlap could not give.
-	if truncated {
+	//
+	// THE CUT DOES NOT HAVE TO BE OURS. The HTTP client keeps 1024 bytes of a
+	// failing response body, far under this function's own bound, so an error it
+	// sliced arrives here whole as far as `truncated` can tell. A body that
+	// spends that budget on erase-line sequences and then echoes a header value
+	// puts the first 24 bytes of a 32-byte credential at the end of the message;
+	// normalization removes the sequences and the prefix is what is left to
+	// read. The producer says when it cut (mcp.ErrorDetailTruncated), and the
+	// tail is treated the same way whoever made it. Read off the ORIGINAL error,
+	// because the bound above flattens an oversized one. Reported by @jatmn.
+	if truncated || mcp.ErrorDetailTruncated(err) {
 		rendered = dropTrailingSecretPrefix(rendered, secrets)
 	}
 	return rendered
@@ -502,47 +512,38 @@ func redactedCommandArgs(values []string) []string {
 				}
 				continue
 			}
-			if key, rest, ok := strings.Cut(value, "="); ok {
-				switch {
-				case isMCPHeaderFlag(key):
-					trimmed = append(trimmed, key+"="+redactMCPHeaderValue(rest))
-					continue
-				case isSensitiveMCPDisplayKey(key):
-					trimmed = append(trimmed, key+"="+mcpDisplayRedacted)
-					continue
-				case looksLikeMCPDisplayURLValue(rest):
-					trimmed = append(trimmed, key+"="+redactMCPDisplayURL(rest))
-					continue
-				}
-			}
-			// A FLAG AND ITS VALUE PACKED INTO ONE ELEMENT.
+			// AN ELEMENT THAT CARRIES ITS OWN VALUE, in the one shape both this row
+			// and the failure collector read: "--key=value", a packed "--key value",
+			// and every header spelling including the attached "-HName: value".
 			//
-			// The collector already splits this shape; the display did not, and
-			// classification without parsing is worse than neither. It recognised
-			// "--api-key sk-live-..." as sensitive further down, printed the whole
-			// element verbatim, and then redacted the NEXT argument, so the Target
-			// row showed the credential and blanked an unrelated "--verbose". That
-			// row sits directly under the reason this PR redacts, in both /mcp
-			// surfaces, and is persisted to the transcript.
-			if flag, rest, ok := strings.Cut(value, " "); ok {
-				switch {
-				case isMCPHeaderFlag(flag):
-					trimmed = append(trimmed, flag+" "+redactMCPHeaderValue(rest))
-					continue
-				case isSensitiveMCPDisplayFlag(flag):
-					// The flag name stays: it is what tells the operator which
-					// credential the child rejected.
-					trimmed = append(trimmed, flag+" "+mcpDisplayRedacted)
-					continue
+			// This used to cut at the first "=" before looking for a packed or
+			// attached boundary, so "--api-key YWJjZGVmZ2hpag==" printed the
+			// recoverable body followed by "=[REDACTED]": the "=" it cut at was the
+			// credential's own padding. splitMCPArgValue finds the boundary first.
+			// The flag name stays in every case: it is what tells the operator which
+			// credential the child rejected.
+			if parts, ok := splitMCPArgValue(value); ok {
+				if parts.header {
+					trimmed = append(trimmed, parts.flag+parts.separator+redactMCPHeaderValue(parts.value))
+				} else {
+					trimmed = append(trimmed, parts.flag+parts.separator+mcpDisplayRedacted)
 				}
+				continue
 			}
-			if flag, carried, ok := mcpHeaderArgument(value); ok {
-				if carried != "" {
-					// Attached "-HName: value": the credential is in THIS
-					// argument, so there is no next one to claim.
-					trimmed = append(trimmed, flag+redactMCPHeaderValue(carried))
-					continue
-				}
+			// An element that IS an endpoint is read as one, whole, before any
+			// reader below can take its first "=" for a flag boundary.
+			if mcpArgIsEndpoint(value) {
+				trimmed = append(trimmed, redactMCPDisplayURL(value))
+				continue
+			}
+			// A flag that is not itself sensitive can still carry an endpoint, in
+			// either spelling, and the boundary is found the same way.
+			if flag, separator, rest, ok := splitMCPArgBoundary(value); ok && looksLikeMCPDisplayURLValue(rest) {
+				trimmed = append(trimmed, flag+separator+redactMCPDisplayURL(rest))
+				continue
+			}
+			if isMCPHeaderFlag(value) {
+				// A bare header flag: the header text is the NEXT element.
 				trimmed = append(trimmed, value)
 				redactNext = true
 				redactNextHeader = true
@@ -679,12 +680,12 @@ func mcpArgURLCandidates(args []string) []string {
 			candidates = append(candidates, arg)
 			continue
 		}
-		if _, rest, ok := strings.Cut(arg, "="); ok && looksLikeMCPDisplayURLValue(rest) {
-			candidates = append(candidates, strings.TrimSpace(rest))
-			continue
-		}
-		if _, rest, ok := strings.Cut(arg, " "); ok && looksLikeMCPDisplayURLValue(rest) {
-			candidates = append(candidates, strings.TrimSpace(rest))
+		// The same boundary the Target row uses: whichever of "=" and whitespace
+		// comes first. Cutting at "=" unconditionally took the tail of a query
+		// string ("--url https://h/cb?next=https://other") for the endpoint and
+		// lost the endpoint itself.
+		if _, _, rest, ok := splitMCPArgBoundary(arg); ok && looksLikeMCPDisplayURLValue(rest) {
+			candidates = append(candidates, rest)
 		}
 	}
 	return candidates
@@ -875,11 +876,24 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	// The candidate walk still runs, so the "<scheme> <credential>" shape is
 	// split as before; what changes is that the whole value is kept regardless
 	// of length.
+	//
+	// knownCredentialTails is the part the floor used to undo. A known value in
+	// an authentication shape, "Bearer s3cr3t", is the scheme plus the actual
+	// credential, and taking it apart does not make the credential ambiguous
+	// again: the tail keeps the provenance of the value it came from.
 	addKnown := func(value string) {
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
 			values = append(values, trimmed)
+			// Base64 padding is not part of what makes the value secret, and a
+			// server that normalizes before echoing drops it. Matching only the
+			// padded spelling would let the whole body through for the sake of
+			// two "=" characters.
+			if body := strings.TrimRight(trimmed, "="); body != "" && body != trimmed {
+				values = append(values, body)
+			}
 		}
 		values = append(values, credentialCandidates(value)...)
+		values = append(values, knownCredentialTails(value)...)
 	}
 	// addClassified keeps a key/value pair together long enough to decide which
 	// of the two applies. A key the sensitive-name list recognises has already
@@ -1069,10 +1083,26 @@ func mcpURLSecretValues(rawURL string) (known []string, ambiguous []string) {
 		if rawUserinfo := rawURLUserinfo(trimmed); rawUserinfo != "" {
 			values = append(values, rawUserinfo)
 			if rawUser, rawPassword, found := strings.Cut(rawUserinfo, ":"); found {
-				values = append(values, rawUser, rawPassword)
+				values = append(values, rawUser)
+				// THE ESCAPED PASSWORD IS THE SAME CREDENTIAL IN ANOTHER SPELLING,
+				// and it keeps the classification of the one it spells. The
+				// decoded password above is known by position; this one went into
+				// the ambiguous list, where the readability floor discarded
+				// "%73crt" for being six bytes. A child that reports the password
+				// it was handed reports THIS spelling, alone, with no URL around
+				// it for the generic userinfo masking to recognise. Reported by
+				// @jatmn. The username stays ambiguous: an ordinary short login is
+				// exactly what the floor is for.
+				if rawPassword != "" {
+					known = append(known, rawPassword)
+				}
 			}
 		}
 	}
+	// The fragment, classified the way the Target row classifies it.
+	fragmentKnown, fragmentAmbiguous := mcpURLFragmentSecretValues(trimmed)
+	known = append(known, fragmentKnown...)
+	values = append(values, fragmentAmbiguous...)
 	// Raw query values, taken from RawQuery before any decoding.
 	for _, pair := range strings.Split(parsed.RawQuery, "&") {
 		if pair == "" {
@@ -1222,39 +1252,52 @@ func credentialCandidates(value string) []string {
 // consume the next argument after "-h" and blank an unrelated word out of every
 // message that mentions it.
 func mcpHeaderArgument(value string) (flag string, carried string, ok bool) {
+	flag, _, carried, ok = mcpHeaderArgumentParts(value)
+	return flag, carried, ok
+}
+
+// mcpHeaderArgumentParts is mcpHeaderArgument with the separator kept, so the
+// Target row can print the element back in the spelling it was written in. The
+// separator is "=", " ", or "" for the attached "-HName: value" form.
+//
+// Every shape is recognised by its PREFIX, and nothing after the prefix is read
+// to find where the header text starts. That is what keeps an "=" inside the
+// value, base64 padding for one, from being taken for the boundary.
+func mcpHeaderArgumentParts(value string) (flag string, separator string, carried string, ok bool) {
 	trimmed := strings.TrimSpace(value)
 	if !strings.HasPrefix(trimmed, "-") {
-		return "", "", false
+		return "", "", "", false
 	}
 	// Long form first, so "--header..." is never mistaken for the short "-H".
 	if rest, matched := cutFoldPrefix(trimmed, "--header"); matched {
+		written := trimmed[:len(trimmed)-len(rest)]
 		switch {
 		case rest == "":
-			return trimmed, "", true
+			return trimmed, "", "", true
 		case strings.HasPrefix(rest, "="):
-			return trimmed[:len(trimmed)-len(rest)], strings.TrimSpace(rest[1:]), true
-		case strings.HasPrefix(rest, " "):
-			return trimmed[:len(trimmed)-len(rest)], strings.TrimSpace(rest), true
+			return written, "=", strings.TrimSpace(rest[1:]), true
+		case strings.HasPrefix(rest, " "), strings.HasPrefix(rest, "\t"):
+			return written, " ", strings.TrimSpace(rest), true
 		}
-		return "", "", false
+		return "", "", "", false
 	}
 	if !strings.HasPrefix(trimmed, "-H") {
-		return "", "", false
+		return "", "", "", false
 	}
 	rest := trimmed[len("-H"):]
 	switch {
 	case rest == "":
-		return trimmed, "", true
+		return trimmed, "", "", true
 	case strings.HasPrefix(rest, "="):
-		return "-H", strings.TrimSpace(rest[1:]), true
-	case strings.HasPrefix(rest, " "):
-		return "-H", strings.TrimSpace(rest), true
+		return "-H", "=", strings.TrimSpace(rest[1:]), true
+	case strings.HasPrefix(rest, " "), strings.HasPrefix(rest, "\t"):
+		return "-H", " ", strings.TrimSpace(rest), true
 	case strings.HasPrefix(rest, "-"):
 		// "-H-something" is not a header spelling; refuse rather than guess.
-		return "", "", false
+		return "", "", "", false
 	}
 	// Attached: "-HName: value".
-	return "-H", rest, true
+	return "-H", "", rest, true
 }
 
 // cutFoldPrefix reports whether s begins with prefix under case folding, and
@@ -1331,34 +1374,17 @@ func sensitiveMCPArgValues(args []string) []string {
 			}
 			// Otherwise fall through: this argument is a flag in its own right.
 		}
-		// Cut at the FIRST "=" and keep the whole tail, so base64 padding and
-		// values that themselves contain "=" survive intact.
-		if key, rest, ok := strings.Cut(arg, "="); ok && (isSensitiveMCPDisplayKey(key) || isMCPHeaderFlag(key)) {
-			collected := strings.TrimSpace(rest)
-			if isMCPHeaderFlag(key) {
+		// An element that carries its own value: "--key=value", a packed
+		// "--key value", and every header spelling including the attached
+		// "-HName: value". splitMCPArgValue finds the boundary BEFORE anything
+		// inside the value is read, so base64 padding and values that contain "="
+		// survive whole, and redactedCommandArgs reads the same result.
+		if parts, ok := splitMCPArgValue(arg); ok {
+			collected := parts.value
+			if parts.header {
 				collected = headerValue(collected)
 			}
 			values = append(values, collected)
-			continue
-		}
-		// A flag and its value packed into a single argument. The display pass
-		// gets this shape wrong in the other direction (it prints the whole thing
-		// verbatim, then redacts the following, unrelated argument), so this
-		// cannot be delegated to it.
-		if flag, rest, ok := strings.Cut(arg, " "); ok && (isSensitiveMCPDisplayFlag(flag) || isMCPHeaderFlag(flag)) {
-			collected := strings.TrimSpace(rest)
-			if isMCPHeaderFlag(flag) {
-				collected = headerValue(collected)
-			}
-			values = append(values, collected)
-			continue
-		}
-		// The attached header spelling, "-HName: value", carries its value in
-		// this same argument. Neither pass recognised it: the flag name parsed
-		// as "HName:..." and matched nothing, so the value was never collected
-		// here and printed whole one row below.
-		if _, carried, ok := mcpHeaderArgument(arg); ok && carried != "" {
-			values = append(values, headerValue(carried))
 			continue
 		}
 		// Only an actual FLAG claims the next argument. isSensitiveMCPDisplayFlag

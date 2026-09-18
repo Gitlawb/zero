@@ -363,8 +363,21 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 		return writeAppError(stderr, fmt.Sprintf("MCP server %q is disabled", serverName), exitCrash)
 	}
 	scoped := config.MCPConfig{Servers: map[string]config.MCPServerConfig{serverName: raw}}
-	if _, err := mcp.NormalizeConfig(scoped); err != nil {
+	normalized, err := mcp.NormalizeConfig(scoped)
+	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	// TWO IDENTITIES, CONVERTED ON PURPOSE AT THIS BOUNDARY. serverName is the
+	// exact configuration KEY, which is what addresses the stored entry above.
+	// Registration reports its outcome under the RUNTIME name, which
+	// normalization derives from that key, so a key such as " docs " registers
+	// and fails as "docs". Matching the failure below against the key skipped it,
+	// and the command printed "is reachable" with exit 0 for a server that never
+	// started. The manager made that reachable when it began dispatching the
+	// exact key. Reported by @jatmn.
+	runtimeName := serverName
+	if len(normalized) == 1 {
+		runtimeName = normalized[0].Name
 	}
 
 	store, err := deps.newMCPStore()
@@ -389,7 +402,7 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 	// a server is misbehaving, and reporting "is reachable" for a server that never
 	// started sends them looking somewhere else.
 	for _, skipped := range mcpRuntime.Skipped() {
-		if skipped.Name != serverName {
+		if skipped.Name != runtimeName {
 			continue
 		}
 		message := fmt.Sprintf("MCP server %s is not reachable", serverName)
@@ -892,6 +905,30 @@ func (cfg *mcpWritableConfig) setServerDisabled(name string, disabled bool) (boo
 	current := false
 	if rawDisabled, ok := server["disabled"]; ok && len(rawDisabled) > 0 && string(rawDisabled) != "null" {
 		if err := json.Unmarshal(rawDisabled, &current); err != nil {
+			return false, false, err
+		}
+	}
+	// ENABLING CLAIMS A RUNTIME IDENTITY, SO IT IS VALIDATED LIKE AN ADD.
+	//
+	// A disabled entry claims no active name, which is why "docs" and a disabled
+	// " docs" may sit in one file. Clearing the flag is the moment that stops
+	// being true, and this setter cleared it unchecked: `zero mcp enable ' docs'`
+	// persisted two enabled keys that both resolve to "docs" and reported
+	// success, and the next load refused the file and aborted startup. The rule
+	// is the one upsertServer already applies, handed the PROSPECTIVE entry, and
+	// it runs before anything below is written, so a refused enable leaves the
+	// configuration exactly as it was. Disabling is never refused: it is how a
+	// colliding file is repaired. Reported by @jatmn.
+	if !disabled {
+		prospective := cfg.file.MCP.Servers[name]
+		if len(raw) > 0 && string(raw) != "null" {
+			var decoded config.MCPServerConfig
+			if err := json.Unmarshal(raw, &decoded); err == nil {
+				prospective = decoded
+			}
+		}
+		prospective.Disabled = false
+		if err := cfg.refuseColliding(name, prospective); err != nil {
 			return false, false, err
 		}
 	}
