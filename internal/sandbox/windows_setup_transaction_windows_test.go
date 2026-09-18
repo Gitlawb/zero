@@ -290,3 +290,42 @@ func TestSetupReportsABusySandboxHomeAndChangesNothing(t *testing.T) {
 	// And the home is usable again the moment the holder lets go.
 	publishThroughTheSetupTransaction(t, config)
 }
+
+// THE LOCK IS ADDED TO THE LEASE, NOT TRADED FOR IT. Ordering setups against each
+// other says nothing to an eviction, which takes the runtime lease exclusively
+// and never looks at the setup lock. A setup parked in the middle of its
+// transaction has to keep that eviction out exactly as before.
+func TestARunningSetupStillExcludesEviction(t *testing.T) {
+	workspace, _ := windowsRuntimeTestRoots(t)
+	home := t.TempDir()
+	config := preparedWindowsSetupConfig(t, workspace, home, bareWindowsProfile(workspace))
+	root := windowsSandboxSelectedRuntimeRoot(config.PermissionProfile)
+	if root == "" {
+		t.Fatal("SETUP INVALID: setup selected no runtime root")
+	}
+
+	paused := startSetupsWithTheFirstPaused(t, config)
+
+	lease, inUse, err := tryAcquireSandboxRuntimeCleanupLease(root)
+	if lease != nil {
+		lease.release()
+	}
+	if err != nil {
+		t.Errorf("eviction failed against a root a setup legitimately holds: %v", err)
+	}
+	if !inUse {
+		t.Error("eviction found the runtime root free while a setup was between its stamp and its marker")
+	}
+
+	paused.resume <- nil
+	<-paused.done
+	if paused.code != 0 {
+		t.Fatalf("setup exited %d:\n%s", paused.code, paused.output)
+	}
+
+	lease, inUse, err = tryAcquireSandboxRuntimeCleanupLease(root)
+	if err != nil || inUse || lease == nil {
+		t.Fatalf("the root is still held after setup returned (inUse %v, err %v)", inUse, err)
+	}
+	lease.release()
+}
