@@ -4614,6 +4614,7 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
 			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
 		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerNotify:
 		// The picker item's Value is "<mode> <focus>"; reusing the text handler
 		// keeps validation, persistence, and the user-facing message in one
