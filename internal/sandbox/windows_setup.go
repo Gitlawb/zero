@@ -414,6 +414,13 @@ func WriteWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 	if err != nil {
 		return WindowsSandboxSetupMarker{}, err
 	}
+	// Every writer of the stamp and marker pair holds the same lock, this one
+	// included, so it cannot land between the two halves of an elevated setup.
+	unlock, err := lockWindowsSandboxSetup(config.SandboxHome)
+	if err != nil {
+		return WindowsSandboxSetupMarker{}, err
+	}
+	defer unlock()
 	// Stamped alongside the marker, because this is the one place setup records
 	// that it completed and the two have to be recorded together: a marker whose
 	// stamp is missing reports setup as current when the tree it provisioned is
@@ -800,7 +807,11 @@ const (
 )
 
 type windowsSandboxStampSnapshot struct {
-	path  string
+	path string
+	// name is the stamp's own file name inside root. It is derived from the plan
+	// this setup is applying, so compensation can only ever reach that plan's
+	// attestation and never the one another sandbox home left in the same tree.
+	name  string
 	prior []byte
 	// priorState is what was actually observed. See runtimeStampState: an
 	// encoding, directory-open, identity, child-open or read failure stays
@@ -825,22 +836,24 @@ type windowsSandboxStampSnapshot struct {
 // stamp are applied: the writer can replace an existing stamp even when the
 // earlier read was denied, and compensation would then delete it with nothing
 // recorded to restore.
-func snapshotWindowsSandboxRuntimeStamp(root string) (windowsSandboxStampSnapshot, error) {
+func snapshotWindowsSandboxRuntimeStamp(root string, planHash string) (windowsSandboxStampSnapshot, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return windowsSandboxStampSnapshot{}, nil
 	}
-	path := windowsSandboxRuntimeStampPath(root)
+	name := windowsSandboxRuntimeStampName(planHash)
+	path := windowsSandboxRuntimeStampPath(root, planHash)
 	// ONE HANDLE FOR BOTH FACTS. Taking the identity and then re-resolving the
 	// pathname to read the stamp let a rename in between pair one directory's
 	// identity with another's bytes, so a rollback could verify the right object
 	// and then write the wrong contents into it.
-	rootIdentity, rootIdentified, prior, state, err := snapshotRuntimeStampBound(root)
+	rootIdentity, rootIdentified, prior, state, err := snapshotRuntimeStampBound(root, name)
 	if err != nil {
 		return windowsSandboxStampSnapshot{}, fmt.Errorf("record the sandbox runtime stamp at %s before changing it: %w", path, err)
 	}
 	return windowsSandboxStampSnapshot{
 		path:           path,
+		name:           name,
 		prior:          prior,
 		priorState:     state,
 		root:           root,
@@ -884,7 +897,7 @@ func (snapshot windowsSandboxStampSnapshot) restore() error {
 	}
 	// BOUND TO THE OBJECT, not to the name. The identity check and the mutation
 	// now share one handle, so a rename and replacement cannot land between them.
-	return compensateRuntimeStampBound(snapshot.root, snapshot.rootIdentity, snapshot.prior, snapshot.priorState == runtimeStampPresent)
+	return compensateRuntimeStampBound(snapshot.root, snapshot.rootIdentity, snapshot.name, snapshot.prior, snapshot.priorState == runtimeStampPresent)
 }
 
 // run removes what was created, innermost first.
@@ -1174,12 +1187,42 @@ func PermissionProfileWithRuntimeRoot(profile PermissionProfile, root string) Pe
 	return permissionProfileWithRuntime(profile, SandboxRuntime{Root: root})
 }
 
-// windowsSandboxRuntimeStampName marks a runtime root that ELEVATED SETUP
-// actually provisioned and applied the capability ACL to.
-const windowsSandboxRuntimeStampName = ".zero-sandbox-setup"
+// windowsSandboxRuntimeStampPrefix begins the name of every stamp: a file marking
+// a runtime root that ELEVATED SETUP actually provisioned and applied the
+// capability ACL to.
+const windowsSandboxRuntimeStampPrefix = ".zero-sandbox-setup."
 
-func windowsSandboxRuntimeStampPath(root string) string {
-	return filepath.Join(root, windowsSandboxRuntimeStampName)
+// windowsSandboxRuntimeStampName names the stamp for ONE plan.
+//
+// THE ATTESTATION IS STORED AT THE SCOPE OF WHAT IT PROVES. The stamp says "this
+// tree carries the capability ACL for this exact plan", and it used to live in
+// one fixed file per runtime root. The runtime root is chosen per WORKSPACE,
+// while the plan is specific to a sandbox HOME: the capability SIDs in it come
+// from that home's own store, so two homes for one workspace share a root and
+// can never share a plan hash. Setup for home B then overwrote the one file with
+// the hash for B, and home A, whose marker and configuration had not changed,
+// was rejected as "provisioned for a different configuration". Re-running setup
+// for A only moved the breakage to B. Reported by @jatmn.
+//
+// Naming the file after the plan removes the shared slot instead of arbitrating
+// it. Each plan's attestation is its own object: a setup for B cannot replace
+// the one for A, and a failed setup's compensation can only reach the stamp of
+// the plan it was applying. Eviction still takes every stamp with the tree,
+// which is the property the stamp exists for.
+//
+// A digest of the hash rather than the hash itself, so the name has a fixed
+// length and is a safe single path component whatever a caller passes in.
+//
+// A stamp for a plan nobody uses any more stays until the tree is evicted. It is
+// inert: validation reads a stamp only after the home's marker has named the
+// same plan, so a leftover proves nothing to anyone.
+func windowsSandboxRuntimeStampName(planHash string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(planHash)))
+	return windowsSandboxRuntimeStampPrefix + hex.EncodeToString(digest[:16])
+}
+
+func windowsSandboxRuntimeStampPath(root string, planHash string) string {
+	return filepath.Join(root, windowsSandboxRuntimeStampName(planHash))
 }
 
 // writeWindowsSandboxRuntimeStamp records, INSIDE the runtime root, that this
@@ -1216,7 +1259,7 @@ func writeWindowsSandboxRuntimeStamp(root string, planHash string) error {
 	} else if !errors.Is(err, errRuntimeTailNotOwned) && !errors.Is(err, errNoRootedStampWriter) {
 		return err
 	}
-	if err := os.WriteFile(windowsSandboxRuntimeStampPath(root), []byte(planHash), 0o600); err != nil {
+	if err := os.WriteFile(windowsSandboxRuntimeStampPath(root, planHash), []byte(planHash), 0o600); err != nil {
 		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
 	}
 	return nil
@@ -1236,13 +1279,18 @@ func validateWindowsSandboxRuntimeStamp(profile PermissionProfile, planHash stri
 	if root == "" {
 		return nil
 	}
-	recorded, err := os.ReadFile(windowsSandboxRuntimeStampPath(root))
+	recorded, err := os.ReadFile(windowsSandboxRuntimeStampPath(root, planHash))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("the sandbox runtime directory for this workspace was removed since setup ran, so it no longer carries the permissions the sandbox needs — run `zero sandbox setup` from an elevated (Administrator) terminal (%s)", root)
 		}
 		return fmt.Errorf("read sandbox runtime setup stamp: %w", err)
 	}
+	// The name already says which plan this stamp is for, so a mismatch here is no
+	// longer "another setup got here last". It means the file for THIS plan does
+	// not hold this plan, which only damage or tampering produces. The contents
+	// are still compared because they are the claim itself; the name is only a
+	// digest that says where to look for it.
 	if strings.TrimSpace(string(recorded)) != strings.TrimSpace(planHash) {
 		return fmt.Errorf("the sandbox runtime directory for this workspace was provisioned for a different configuration — run `zero sandbox setup` from an elevated (Administrator) terminal (%s)", root)
 	}

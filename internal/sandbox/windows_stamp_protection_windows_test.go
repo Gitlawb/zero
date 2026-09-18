@@ -101,7 +101,7 @@ func TestTheStampDoesNotInheritTheCapabilityGrant(t *testing.T) {
 	if err := writeWindowsRuntimeStampThroughHandle(root, "planhash"); err != nil {
 		t.Fatalf("write the stamp: %v", err)
 	}
-	stamp := windowsSandboxRuntimeStampPath(root)
+	stamp := windowsSandboxRuntimeStampPath(root, testStampPlanHash)
 
 	granted, inherits := stampDACLGrants(t, stamp, capability)
 	if granted {

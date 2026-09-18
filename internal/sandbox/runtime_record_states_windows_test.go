@@ -102,7 +102,7 @@ func TestCreatedRuntimeDirRefusesAnExistingName(t *testing.T) {
 func TestRuntimeStampSnapshotSeparatesAbsentPresentAndUnknown(t *testing.T) {
 	t.Run("absent", func(t *testing.T) {
 		root := t.TempDir()
-		_, _, prior, state, err := snapshotRuntimeStampBound(root)
+		_, _, prior, state, err := snapshotRuntimeStampBound(root, windowsSandboxRuntimeStampName(testStampPlanHash))
 		if err != nil {
 			t.Fatalf("a readable root with no stamp is not an error: %v", err)
 		}
@@ -117,10 +117,10 @@ func TestRuntimeStampSnapshotSeparatesAbsentPresentAndUnknown(t *testing.T) {
 	t.Run("present", func(t *testing.T) {
 		root := t.TempDir()
 		want := []byte("prior-attestation")
-		if err := os.WriteFile(filepath.Join(root, windowsSandboxRuntimeStampName), want, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, windowsSandboxRuntimeStampName(testStampPlanHash)), want, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, _, prior, state, err := snapshotRuntimeStampBound(root)
+		_, _, prior, state, err := snapshotRuntimeStampBound(root, windowsSandboxRuntimeStampName(testStampPlanHash))
 		if err != nil {
 			t.Fatalf("snapshot: %v", err)
 		}
@@ -136,10 +136,10 @@ func TestRuntimeStampSnapshotSeparatesAbsentPresentAndUnknown(t *testing.T) {
 	// reason that is emphatically not "not found", which is the whole distinction.
 	t.Run("unknown", func(t *testing.T) {
 		root := t.TempDir()
-		if err := os.Mkdir(filepath.Join(root, windowsSandboxRuntimeStampName), 0o700); err != nil {
+		if err := os.Mkdir(filepath.Join(root, windowsSandboxRuntimeStampName(testStampPlanHash)), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		_, _, prior, state, err := snapshotRuntimeStampBound(root)
+		_, _, prior, state, err := snapshotRuntimeStampBound(root, windowsSandboxRuntimeStampName(testStampPlanHash))
 		if err == nil {
 			t.Fatal("an unreadable stamp was reported as a successful snapshot")
 		}
@@ -160,7 +160,7 @@ func TestRuntimeStampSnapshotSeparatesAbsentPresentAndUnknown(t *testing.T) {
 // returning with nothing to put back.
 func TestUnknownPriorStampIsNeverCompensated(t *testing.T) {
 	root := t.TempDir()
-	stampPath := filepath.Join(root, windowsSandboxRuntimeStampName)
+	stampPath := filepath.Join(root, windowsSandboxRuntimeStampName(testStampPlanHash))
 	current := []byte("the-attestation-of-the-previous-successful-setup")
 	if err := os.WriteFile(stampPath, current, 0o600); err != nil {
 		t.Fatal(err)
@@ -195,10 +195,10 @@ func TestUnknownPriorStampIsNeverCompensated(t *testing.T) {
 // keeps the writer from running at all.
 func TestSetupRefusesAnUnreadablePriorStamp(t *testing.T) {
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, windowsSandboxRuntimeStampName), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(root, windowsSandboxRuntimeStampName(testStampPlanHash)), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root)
+	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root, testStampPlanHash)
 	if err == nil {
 		t.Fatal("setup accepted a snapshot that could not read the prior stamp")
 	}

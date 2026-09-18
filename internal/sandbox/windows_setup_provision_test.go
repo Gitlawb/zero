@@ -35,8 +35,7 @@ func windowsRuntimeTestRoots(t *testing.T) (string, []string) {
 	originalCacheDir := sandboxUserCacheDir
 	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
 	t.Cleanup(func() { sandboxUserCacheDir = originalCacheDir })
-	t.Setenv("TMP", tempRoot)
-	t.Setenv("TEMP", tempRoot)
+	redirectSandboxTestTemp(t, tempRoot)
 
 	candidates := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{workspaceRoot})
 	if len(candidates) == 0 {
@@ -61,7 +60,40 @@ func windowsRuntimeTestRoots(t *testing.T) (string, []string) {
 			t.Fatalf("candidate %s (canonically %s) is outside the test-owned cache (%s) and temp (%s) roots; refusing to modify it", candidate, canonical, ownedCache, ownedTemp)
 		}
 	}
+	// AND THE CANDIDATE THIS CALL DID NOT SEE. windowsSandboxRuntimeRoots returns
+	// the preferred, cache-derived root only, so the loop above says nothing about
+	// the temp fallback, which is derived from a different input. A caller that
+	// blocks the preferred root (blockCacheRuntimeRoot) makes selection
+	// materialize that fallback, and with TMPDIR left alone it was derived from
+	// the ambient Unix temp. Checked here, before any caller can create it.
+	// Reported by @jatmn.
+	fallback, err := fallbackSandboxRuntimeRoot(canonicalSandboxWorkspaceRoot(workspaceRoot))
+	if err != nil {
+		t.Fatalf("SETUP INVALID: no fallback runtime root under the test-owned temp %s: %v", ownedTemp, err)
+	}
+	requireWithinTestOwned(t, fallback, tempRoot)
 	return workspaceRoot, candidates
+}
+
+// The fixture's fallback boundary, exercised rather than assumed: with the
+// preferred root deliberately unavailable, the PRODUCTION selector relocates, and
+// what it selects and creates has to be inside the temp the fixture owns.
+func TestRuntimeTestRootsOwnTheFallbackSelectionToo(t *testing.T) {
+	workspaceRoot, _ := windowsRuntimeTestRoots(t)
+	ownedTemp := os.TempDir()
+
+	preferred, unblock := blockCacheRuntimeRoot(t, workspaceRoot)
+	defer unblock()
+
+	selected, lease, _, err := selectSandboxRuntimeRoot(workspaceRoot, false, "")
+	if err != nil {
+		t.Fatalf("selectSandboxRuntimeRoot with the preferred root blocked: %v", err)
+	}
+	lease.release()
+	if sameWindowsRuntimeRootPath(selected, preferred) {
+		t.Fatalf("SETUP INVALID: selection still returned the preferred root %s, so the fallback was not exercised", selected)
+	}
+	requireWithinTestOwned(t, selected, ownedTemp)
 }
 
 // TestBuildWindowsSandboxSetupACLPlanCreatesTheRootsItGrants is the regression for
@@ -194,8 +226,7 @@ func TestSetupMarkerSurvivesADifferentTempInALaterProcess(t *testing.T) {
 
 	runtimeRootUnder := func(temp string) string {
 		t.Helper()
-		t.Setenv("TMP", temp)
-		t.Setenv("TEMP", temp)
+		redirectSandboxTestTemp(t, temp)
 		roots := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{workspaceRoot})
 		if len(roots) != 1 {
 			t.Fatalf("expected one runtime root under TEMP=%s, got %v", temp, roots)
@@ -241,8 +272,7 @@ func TestRuntimeRootsPinToTheProfileTheCommandActuallyHolds(t *testing.T) {
 	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
 	t.Cleanup(func() { sandboxUserCacheDir = originalCacheDir })
 	tempRoot := t.TempDir()
-	t.Setenv("TMP", tempRoot)
-	t.Setenv("TEMP", tempRoot)
+	redirectSandboxTestTemp(t, tempRoot)
 
 	derived := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{workspaceRoot})
 	if len(derived) != 1 {
@@ -314,15 +344,13 @@ func TestFallbackSandboxRuntimeRootIsSpellingStable(t *testing.T) {
 			tempRoot, canonical, alias, got)
 	}
 
-	t.Setenv("TMP", tempRoot)
-	t.Setenv("TEMP", tempRoot)
+	redirectSandboxTestTemp(t, tempRoot)
 	viaReal, err := fallbackSandboxRuntimeRoot(workspaceRoot)
 	if err != nil {
 		t.Fatalf("fallbackSandboxRuntimeRoot(real spelling): %v", err)
 	}
 
-	t.Setenv("TMP", alias)
-	t.Setenv("TEMP", alias)
+	redirectSandboxTestTemp(t, alias)
 	viaAlias, err := fallbackSandboxRuntimeRoot(workspaceRoot)
 	if err != nil {
 		t.Fatalf("fallbackSandboxRuntimeRoot(alias): %v", err)
@@ -350,8 +378,7 @@ func TestWindowsSandboxRuntimeCandidatesUsesOneWorkspaceRoot(t *testing.T) {
 	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
 	t.Cleanup(func() { sandboxUserCacheDir = originalCacheDir })
 	tempRoot := t.TempDir()
-	t.Setenv("TMP", tempRoot)
-	t.Setenv("TEMP", tempRoot)
+	redirectSandboxTestTemp(t, tempRoot)
 
 	combined := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{first, second})
 	alone := windowsSandboxRuntimeRoots(PermissionProfile{}, []string{first})

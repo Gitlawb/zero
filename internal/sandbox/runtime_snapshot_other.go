@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 // snapshotRuntimeStampBound keeps the pathname form off Windows. The split it
@@ -17,9 +18,9 @@ import (
 // nothing" and "could not read it" are different facts on every platform, and
 // only the first may authorize a compensating delete. A permission or I/O error
 // here stops setup rather than being recorded as proven absence.
-func snapshotRuntimeStampBound(root string) (identity string, identified bool, prior []byte, state runtimeStampState, err error) {
+func snapshotRuntimeStampBound(root string, name string) (identity string, identified bool, prior []byte, state runtimeStampState, err error) {
 	identity, identified = runtimeDirIdentity(root)
-	path := windowsSandboxRuntimeStampPath(root)
+	path := filepath.Join(root, name)
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
 		if errors.Is(readErr, fs.ErrNotExist) {

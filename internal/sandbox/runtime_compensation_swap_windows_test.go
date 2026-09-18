@@ -60,19 +60,19 @@ func TestStampCompensationDoesNotReachASubstitute(t *testing.T) {
 	swapDuringCompensation(t, root, aside)
 
 	// Removal of a stamp this run wrote, i.e. the fresh-setup rollback.
-	_ = compensateRuntimeStampBound(root, identity, nil, false)
+	_ = compensateRuntimeStampBound(root, identity, windowsSandboxRuntimeStampName(testStampPlanHash), nil, false)
 
 	// Whatever the outcome, the substitute is not this run's business.
 	substitute := filepath.Join(root, "substitute.txt")
 	if _, err := os.Stat(substitute); err != nil {
 		t.Errorf("compensation removed a file from the substitute directory: %v", err)
 	}
-	if _, err := os.Stat(windowsSandboxRuntimeStampPath(root)); err == nil {
+	if _, err := os.Stat(windowsSandboxRuntimeStampPath(root, testStampPlanHash)); err == nil {
 		t.Error("compensation created a stamp inside the substitute directory")
 	}
 	// And the original, which is the object that was verified, is the one that
 	// lost the stamp this run wrote.
-	if _, err := os.Stat(windowsSandboxRuntimeStampPath(aside)); err == nil {
+	if _, err := os.Stat(windowsSandboxRuntimeStampPath(aside, testStampPlanHash)); err == nil {
 		t.Error("the stamp this run wrote is still on the original object, so compensation followed the name instead")
 	}
 }

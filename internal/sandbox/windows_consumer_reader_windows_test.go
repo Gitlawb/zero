@@ -44,7 +44,7 @@ func TestCarriedConsumerSIDOutranksTheLeafOwner(t *testing.T) {
 	if err := writeWindowsRuntimeStampThroughHandle(root, "planhash"); err != nil {
 		t.Fatalf("write the stamp: %v", err)
 	}
-	stamp := windowsSandboxRuntimeStampPath(root)
+	stamp := windowsSandboxRuntimeStampPath(root, testStampPlanHash)
 
 	mask, present := stampACEMask(t, stamp, consumer)
 	if !present {

@@ -21,7 +21,7 @@ func TestStampCompensationRefusesAnUnidentifiedRoot(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("create the runtime root: %v", err)
 	}
-	stamp := windowsSandboxRuntimeStampPath(root)
+	stamp := windowsSandboxRuntimeStampPath(root, testStampPlanHash)
 	const foreign = "belongs to whoever put it here"
 	if err := os.WriteFile(stamp, []byte(foreign), 0o600); err != nil {
 		t.Fatalf("seed the stamp: %v", err)
@@ -85,7 +85,7 @@ func TestStampCompensationStaysQuietWhenTheRootIsAbsent(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "zero", "runtime", "v1", "abcd")
 	snapshot := windowsSandboxStampSnapshot{
-		path:           windowsSandboxRuntimeStampPath(root),
+		path:           windowsSandboxRuntimeStampPath(root, testStampPlanHash),
 		root:           root,
 		rootIdentified: false,
 	}

@@ -34,7 +34,7 @@ func TestTheApplyRefusesARuntimeRootTheSnapshotNeverRead(t *testing.T) {
 		t.Fatalf("create the runtime tree: %v", err)
 	}
 	// A prior stamp, which is the thing a failed setup must not destroy.
-	priorPath := filepath.Join(root, windowsSandboxRuntimeStampName)
+	priorPath := filepath.Join(root, windowsSandboxRuntimeStampName(testStampPlanHash))
 	prior := []byte("previous-successful-setup")
 	if err := os.WriteFile(priorPath, prior, 0o600); err != nil {
 		t.Fatalf("write the prior stamp: %v", err)
@@ -85,11 +85,11 @@ func TestTheApplyRefusesARuntimeRootTheSnapshotNeverRead(t *testing.T) {
 
 	// And the substitute is untouched: no stamp, so it cannot later validate as
 	// set up while carrying no capability ACE.
-	if _, statErr := os.Stat(filepath.Join(root, windowsSandboxRuntimeStampName)); statErr == nil {
+	if _, statErr := os.Stat(filepath.Join(root, windowsSandboxRuntimeStampName(testStampPlanHash))); statErr == nil {
 		t.Error("the substituted directory collected a stamp")
 	}
 	// The real root's prior stamp survives byte for byte.
-	got, readErr := os.ReadFile(filepath.Join(moved, windowsSandboxRuntimeStampName))
+	got, readErr := os.ReadFile(filepath.Join(moved, windowsSandboxRuntimeStampName(testStampPlanHash)))
 	if readErr != nil {
 		t.Fatalf("read the original stamp back: %v", readErr)
 	}
@@ -114,7 +114,7 @@ func TestTheApplyStillStampsTheRootTheSnapshotRead(t *testing.T) {
 		t.Fatalf("an unswapped runtime root was refused: %v", err)
 	}
 	t.Cleanup(func() { _ = rollback() })
-	if _, statErr := os.Stat(filepath.Join(root, windowsSandboxRuntimeStampName)); statErr != nil {
+	if _, statErr := os.Stat(filepath.Join(root, windowsSandboxRuntimeStampName(testStampPlanHash))); statErr != nil {
 		t.Fatalf("the stamp was not written: %v", statErr)
 	}
 }

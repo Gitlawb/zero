@@ -5,6 +5,7 @@ package sandbox
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // runtimeCompensationSwapSeam exists so the shared compensation code compiles
@@ -13,7 +14,7 @@ import (
 // rename.
 var runtimeCompensationSwapSeam func()
 
-func compensateRuntimeStampBound(root string, identity string, prior []byte, existed bool) error {
+func compensateRuntimeStampBound(root string, identity string, name string, prior []byte, existed bool) error {
 	current, ok := runtimeDirIdentity(root)
 	if !ok {
 		return fmt.Errorf("identify the sandbox runtime root %s for stamp compensation", root)
@@ -25,7 +26,7 @@ func compensateRuntimeStampBound(root string, identity string, prior []byte, exi
 	if runtimeCompensationSwapSeam != nil {
 		runtimeCompensationSwapSeam()
 	}
-	path := windowsSandboxRuntimeStampPath(root)
+	path := filepath.Join(root, name)
 	if !existed {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove sandbox runtime setup stamp written by this run: %w", err)

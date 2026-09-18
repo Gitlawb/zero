@@ -32,10 +32,10 @@ func TestTheStampWritesThroughAnOpenDirectoryHandle(t *testing.T) {
 	}
 	defer windows.CloseHandle(handle)
 
-	if err := writeWindowsRuntimeStampToDirectoryHandle(handle, "planhash"); err != nil {
+	if err := writeWindowsRuntimeStampToDirectoryHandle(handle, windowsSandboxRuntimeStampName(testStampPlanHash), testStampPlanHash); err != nil {
 		t.Fatalf("write the stamp: %v", err)
 	}
-	recorded, err := os.ReadFile(windowsSandboxRuntimeStampPath(root))
+	recorded, err := os.ReadFile(windowsSandboxRuntimeStampPath(root, testStampPlanHash))
 	if err != nil || string(recorded) != "planhash" {
 		t.Fatalf("the stamp did not land in the runtime root (%q, err %v)", recorded, err)
 	}

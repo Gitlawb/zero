@@ -33,7 +33,7 @@ import (
 // denied, so that lie let a FAILED setup delete an attestation it had no record
 // of, leaving the previous run's marker pointing at an unusable runtime root.
 // Only a positive not-found produces runtimeStampAbsent.
-func snapshotRuntimeStampBound(root string) (identity string, identified bool, prior []byte, state runtimeStampState, err error) {
+func snapshotRuntimeStampBound(root string, name string) (identity string, identified bool, prior []byte, state runtimeStampState, err error) {
 	utf16Root, err := windows.UTF16PtrFromString(root)
 	if err != nil {
 		return "", false, nil, runtimeStampUnknown, fmt.Errorf("encode sandbox runtime root %s: %w", root, err)
@@ -62,7 +62,7 @@ func snapshotRuntimeStampBound(root string) (identity string, identified bool, p
 		return "", false, nil, runtimeStampUnknown, fmt.Errorf("identify sandbox runtime root %s: %w", root, idErr)
 	}
 
-	stamp, err := openWindowsChildNoFollow(directory, windowsSandboxRuntimeStampName,
+	stamp, err := openWindowsChildNoFollow(directory, name,
 		windows.GENERIC_READ|windows.FILE_READ_ATTRIBUTES, windows.FILE_NON_DIRECTORY_FILE)
 	if err != nil {
 		if isWindowsNotFound(err) {
@@ -72,7 +72,7 @@ func snapshotRuntimeStampBound(root string) (identity string, identified bool, p
 		}
 		return identity, true, nil, runtimeStampUnknown, fmt.Errorf("open the sandbox runtime stamp in %s: %w", root, err)
 	}
-	file := os.NewFile(uintptr(stamp), windowsSandboxRuntimeStampName)
+	file := os.NewFile(uintptr(stamp), name)
 	defer file.Close()
 	data, readErr := io.ReadAll(file)
 	if readErr != nil {

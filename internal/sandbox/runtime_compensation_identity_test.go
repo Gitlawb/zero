@@ -22,12 +22,12 @@ func TestStampCompensationRefusesAReplacementDirectory(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	stampPath := windowsSandboxRuntimeStampPath(root)
+	stampPath := windowsSandboxRuntimeStampPath(root, testStampPlanHash)
 	if err := os.WriteFile(stampPath, []byte("previous-plan-hash"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root)
+	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root, testStampPlanHash)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}

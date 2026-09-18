@@ -22,11 +22,11 @@ func TestStampSnapshotPairsIdentityWithItsOwnBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	const contents = "the stamp that belongs to this directory"
-	if err := os.WriteFile(windowsSandboxRuntimeStampPath(root), []byte(contents), 0o600); err != nil {
+	if err := os.WriteFile(windowsSandboxRuntimeStampPath(root, testStampPlanHash), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	identity, identified, prior, state, err := snapshotRuntimeStampBound(root)
+	identity, identified, prior, state, err := snapshotRuntimeStampBound(root, windowsSandboxRuntimeStampName(testStampPlanHash))
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestStampSnapshotIdentifiesARootWithNoStamp(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	identity, identified, _, state, err := snapshotRuntimeStampBound(root)
+	identity, identified, _, state, err := snapshotRuntimeStampBound(root, windowsSandboxRuntimeStampName(testStampPlanHash))
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}

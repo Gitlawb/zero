@@ -76,7 +76,7 @@ func TestStampGrantsTheRuntimeRootOwnerReadOnly(t *testing.T) {
 	if err := writeWindowsRuntimeStampThroughHandle(root, "planhash"); err != nil {
 		t.Fatalf("write the stamp: %v", err)
 	}
-	stamp := windowsSandboxRuntimeStampPath(root)
+	stamp := windowsSandboxRuntimeStampPath(root, testStampPlanHash)
 	owner := ownerOfDirectory(t, root)
 
 	mask, present := stampACEMask(t, stamp, owner)

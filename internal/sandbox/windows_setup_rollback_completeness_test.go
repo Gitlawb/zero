@@ -24,7 +24,7 @@ func TestRollbackRemovesTheStampItWroteAndThenTheRoot(t *testing.T) {
 	}
 
 	// Snapshot BEFORE the stamp exists, which is the fresh-setup case.
-	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root)
+	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root, testStampPlanHash)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -55,32 +55,76 @@ func TestRollbackRemovesTheStampItWroteAndThenTheRoot(t *testing.T) {
 // marker pointing at a tree with no stamp, which reads as "the runtime directory
 // was removed since setup ran". A healthy machine would start reporting itself
 // broken because an unrelated later setup failed.
+//
+// The stamp is named after the plan it attests, so there are two shapes of
+// "already there", and a failed setup has to leave the previous one standing in
+// both.
 func TestRollbackRestoresAPreviousSetupsStamp(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "runtime")
-	if err := writeWindowsSandboxRuntimeStamp(root, "the-previous-setup"); err != nil {
-		t.Fatalf("writeWindowsSandboxRuntimeStamp: %v", err)
-	}
+	// A DIFFERENT PLAN. The previous setup's attestation is a different file, so
+	// this run never reaches it: only the stamp this run wrote is taken back.
+	t.Run("a failed setup for another plan", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "runtime")
+		if err := writeWindowsSandboxRuntimeStamp(root, "the-previous-setup"); err != nil {
+			t.Fatalf("writeWindowsSandboxRuntimeStamp: %v", err)
+		}
+		snapshot, err := snapshotWindowsSandboxRuntimeStamp(root, "this-run")
+		if err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		if snapshot.priorState != runtimeStampAbsent {
+			t.Fatalf("SETUP INVALID: this run's plan already had a stamp (state %v)", snapshot.priorState)
+		}
+		if err := writeWindowsSandboxRuntimeStamp(root, "this-run"); err != nil {
+			t.Fatalf("writeWindowsSandboxRuntimeStamp: %v", err)
+		}
 
-	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root)
-	if err != nil {
-		t.Fatalf("snapshot: %v", err)
-	}
-	if err := writeWindowsSandboxRuntimeStamp(root, "this-run"); err != nil {
-		t.Fatalf("writeWindowsSandboxRuntimeStamp: %v", err)
-	}
+		// created is empty: this run found the root already there and owns none of it.
+		if err := (windowsRuntimeRootRollback{stamp: snapshot}).run(); err != nil {
+			t.Fatalf("rollback.run: %v", err)
+		}
 
-	// created is empty: this run found the root already there and owns none of it.
-	if err := (windowsRuntimeRootRollback{stamp: snapshot}).run(); err != nil {
-		t.Fatalf("rollback.run: %v", err)
-	}
+		kept, err := os.ReadFile(windowsSandboxRuntimeStampPath(root, "the-previous-setup"))
+		if err != nil {
+			t.Fatalf("the previous setup's stamp is gone: %v", err)
+		}
+		if string(kept) != "the-previous-setup" {
+			t.Errorf("the previous stamp is %q, want %q", kept, "the-previous-setup")
+		}
+		if _, err := os.Stat(windowsSandboxRuntimeStampPath(root, "this-run")); !os.IsNotExist(err) {
+			t.Errorf("the failed run's own stamp was left behind (stat err %v)", err)
+		}
+	})
 
-	restored, err := os.ReadFile(windowsSandboxRuntimeStampPath(root))
-	if err != nil {
-		t.Fatalf("the previous setup's stamp is gone: %v", err)
-	}
-	if string(restored) != "the-previous-setup" {
-		t.Errorf("the stamp is %q, want the previous setup's %q", restored, "the-previous-setup")
-	}
+	// THE SAME PLAN, re-applied. Now the file is shared with the previous
+	// success, so what this run overwrote has to be put back rather than removed.
+	t.Run("a failed re-run of the same plan", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "runtime")
+		if err := writeWindowsSandboxRuntimeStamp(root, testStampPlanHash); err != nil {
+			t.Fatalf("writeWindowsSandboxRuntimeStamp: %v", err)
+		}
+		snapshot, err := snapshotWindowsSandboxRuntimeStamp(root, testStampPlanHash)
+		if err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		if snapshot.priorState != runtimeStampPresent {
+			t.Fatalf("SETUP INVALID: the previous stamp was not recorded (state %v)", snapshot.priorState)
+		}
+		if err := writeWindowsSandboxRuntimeStamp(root, testStampPlanHash); err != nil {
+			t.Fatalf("writeWindowsSandboxRuntimeStamp: %v", err)
+		}
+
+		if err := (windowsRuntimeRootRollback{stamp: snapshot}).run(); err != nil {
+			t.Fatalf("rollback.run: %v", err)
+		}
+
+		restored, err := os.ReadFile(windowsSandboxRuntimeStampPath(root, testStampPlanHash))
+		if err != nil {
+			t.Fatalf("the previous setup's stamp is gone: %v", err)
+		}
+		if string(restored) != testStampPlanHash {
+			t.Errorf("the stamp is %q, want the previous setup's %q", restored, testStampPlanHash)
+		}
+	})
 }
 
 // Pre-existing content is never removed, whatever else the rollback does.
@@ -119,7 +163,7 @@ func TestRollbackContinuesAfterACompensationFails(t *testing.T) {
 	// reason this test is not about. It passed on an unelevated box and failed on
 	// every CI runner, because whether that recreate succeeds depends on the token.
 	stamp := windowsSandboxStampSnapshot{
-		path:           windowsSandboxRuntimeStampPath(root),
+		path:           windowsSandboxRuntimeStampPath(root, testStampPlanHash),
 		prior:          []byte("x"),
 		priorState:     runtimeStampPresent,
 		root:           root,

@@ -146,7 +146,7 @@ func TestTheStampIsWrittenThroughTheTraversalAndRefusesASwappedTree(t *testing.T
 	if err := writeWindowsRuntimeStampThroughHandle(root, "planhash"); err != nil {
 		t.Fatalf("write the stamp through the traversal: %v", err)
 	}
-	recorded, err := os.ReadFile(windowsSandboxRuntimeStampPath(root))
+	recorded, err := os.ReadFile(windowsSandboxRuntimeStampPath(root, testStampPlanHash))
 	if err != nil || string(recorded) != "planhash" {
 		t.Fatalf("the stamp did not land in the runtime root (%q, err %v)", recorded, err)
 	}
@@ -167,7 +167,7 @@ func TestTheStampIsWrittenThroughTheTraversalAndRefusesASwappedTree(t *testing.T
 	if err := writeWindowsRuntimeStampThroughHandle(root, "planhash"); err == nil {
 		t.Fatal("the stamp was written through a junction, marking an unprovisioned tree as set up")
 	}
-	if _, err := os.Stat(filepath.Join(target, leaf, windowsSandboxRuntimeStampName)); err == nil {
+	if _, err := os.Stat(filepath.Join(target, leaf, windowsSandboxRuntimeStampName(testStampPlanHash))); err == nil {
 		t.Errorf("a stamp was written inside the attacker's tree at %s", target)
 	}
 }

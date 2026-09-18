@@ -17,6 +17,11 @@ import (
 var (
 	windowsSetupProcessIsElevated = windowsProcessIsElevated
 	windowsSetupInstallerSID      = currentProcessSID
+	// windowsSetupApplyNetworkPlan installs the WFP filters, which needs a real
+	// Administrator token and machine-wide state. Behind a variable so a test can
+	// drive the rest of this transaction, the part that publishes and compensates
+	// the stamp and the marker, on a box that cannot touch the filtering platform.
+	windowsSetupApplyNetworkPlan = applyWindowsNetworkPlan
 )
 
 func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) int {
@@ -69,6 +74,20 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		restore := setWindowsSetupConsumerSID(consumer)
 		defer restore()
 	}
+
+	// ONE SETUP PER SANDBOX HOME AT A TIME, from before the first thing recorded
+	// about the previous state until the marker is published or every
+	// compensation has run. Taken ahead of the lease, the provisioning and the
+	// snapshot, and released by the deferred call after whichever return below
+	// runs, so the stamp and marker this process publishes, or the snapshot it
+	// restores, can never interleave with another helper's. See
+	// lockWindowsSandboxSetup.
+	unlockSetup, lockErr := lockWindowsSandboxSetup(config.SandboxHome)
+	if lockErr != nil {
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+lockErr.Error())
+		return 1
+	}
+	defer unlockSetup()
 
 	// HOLD THE SELECTED ROOT FOR THE WHOLE TRANSACTION.
 	//
@@ -146,7 +165,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		// that then fails delete an attestation it never recorded, leaving the
 		// previous run's marker pointing at a runtime root it can no longer
 		// prove. No privileged state is applied until this is known.
-		snapshot, snapshotErr := snapshotWindowsSandboxRuntimeStamp(root)
+		snapshot, snapshotErr := snapshotWindowsSandboxRuntimeStamp(root, marker.ACLPlanHash)
 		if snapshotErr != nil {
 			return failed(snapshotErr)
 		}
@@ -169,7 +188,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+runWindowsSandboxSetupCompensations(cause, rollback, runtimeRollback).Error())
 		return 1
 	}
-	if err := applyWindowsNetworkPlan(networkPlan); err != nil {
+	if err := windowsSetupApplyNetworkPlan(networkPlan); err != nil {
 		return failedAfterACL(err)
 	}
 	// The stamp is already on disk, written through the handle the capability ACE

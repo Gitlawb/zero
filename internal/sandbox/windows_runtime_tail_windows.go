@@ -147,8 +147,8 @@ func openWindowsChildNoFollow(parent windows.Handle, name string, access uint32,
 // writeWindowsRuntimeStampToDirectoryHandle writes the stamp into an ALREADY
 // OPEN directory, naming nothing. The caller holds the handle the capability ACE
 // was applied through, so the stamp cannot land anywhere else.
-func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, planHash string) error {
-	objectName, err := windows.NewNTUnicodeString(windowsSandboxRuntimeStampName)
+func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, name string, planHash string) error {
+	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return fmt.Errorf("encode sandbox runtime setup stamp name: %w", err)
 	}
@@ -177,7 +177,7 @@ func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, planHas
 	if err != nil {
 		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
 	}
-	file := os.NewFile(uintptr(handle), windowsSandboxRuntimeStampName)
+	file := os.NewFile(uintptr(handle), name)
 	defer file.Close()
 	reader, err := windowsRuntimeStampReader(directory)
 	if err != nil {
@@ -374,7 +374,8 @@ func writeWindowsRuntimeStampThroughHandle(root string, planHash string) error {
 	}
 	defer windows.CloseHandle(directory)
 
-	objectName, err := windows.NewNTUnicodeString(windowsSandboxRuntimeStampName)
+	name := windowsSandboxRuntimeStampName(planHash)
+	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return fmt.Errorf("encode sandbox runtime setup stamp name: %w", err)
 	}
@@ -403,7 +404,7 @@ func writeWindowsRuntimeStampThroughHandle(root string, planHash string) error {
 	if err != nil {
 		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
 	}
-	file := os.NewFile(uintptr(handle), windowsSandboxRuntimeStampName)
+	file := os.NewFile(uintptr(handle), name)
 	defer file.Close()
 	reader, err := windowsRuntimeStampReader(directory)
 	if err != nil {

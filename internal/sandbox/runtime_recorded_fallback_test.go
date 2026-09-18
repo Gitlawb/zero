@@ -28,13 +28,20 @@ func TestARecordedFallbackSurvivesATempChange(t *testing.T) {
 	home := t.TempDir()
 	workspace := canonicalSandboxWorkspaceRoot(t.TempDir())
 
+	// EVERY temp variable, in both phases. With only TMP and TEMP set this
+	// changed nothing on Unix: the fallback derived from the ambient TMPDIR, the
+	// MkdirAll below created a workspace-digest tree outside anything this test
+	// owns, the second derivation came back identical, and the test skipped
+	// having asserted nothing and left the directory behind.
 	tempA := t.TempDir()
-	t.Setenv("TMP", tempA)
-	t.Setenv("TEMP", tempA)
+	redirectSandboxTestTemp(t, tempA)
 	recorded, err := fallbackSandboxRuntimeRoot(workspace)
 	if err != nil {
-		t.Skipf("no fallback runtime root available here: %v", err)
+		t.Fatalf("SETUP INVALID: no fallback runtime root under a temp this test owns: %v", err)
 	}
+	// Containment BEFORE the tree exists, so cleanup belongs to tempA and happens
+	// even when an assertion below fails.
+	requireWithinTestOwned(t, recorded, tempA)
 	if err := os.MkdirAll(recorded, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -49,14 +56,17 @@ func TestARecordedFallbackSurvivesATempChange(t *testing.T) {
 
 	// The same command, run later from an environment with a different TEMP.
 	tempB := t.TempDir()
-	t.Setenv("TMP", tempB)
-	t.Setenv("TEMP", tempB)
+	redirectSandboxTestTemp(t, tempB)
 	derivedNow, err := fallbackSandboxRuntimeRoot(workspace)
 	if err != nil {
-		t.Skipf("no fallback runtime root under the second temp: %v", err)
+		t.Fatalf("SETUP INVALID: no fallback runtime root under the second temp: %v", err)
 	}
+	requireWithinTestOwned(t, derivedNow, tempB)
+	// A FAILURE, NOT A SKIP. The redirect owns every input the derivation reads,
+	// so an unmoved fallback means the premise of this test is broken, and a skip
+	// here is how it passed on Unix without ever reaching the assertion below.
 	if sameWindowsRuntimeRootPath(derivedNow, recorded) {
-		t.Skip("SETUP: the temp change did not move the derived fallback, so there is nothing to diverge")
+		t.Fatalf("SETUP INVALID: the temp change did not move the derived fallback (%s), so the assertion below would prove nothing", derivedNow)
 	}
 
 	if got := pinnedSandboxRuntimeRoot(workspace, preferred, derivedNow, home); got != recorded {
@@ -90,13 +100,13 @@ func TestARecordedFallbackForAnotherWorkspaceIsStillRefused(t *testing.T) {
 	theirs := canonicalSandboxWorkspaceRoot(t.TempDir())
 
 	temp := t.TempDir()
-	t.Setenv("TMP", temp)
-	t.Setenv("TEMP", temp)
+	redirectSandboxTestTemp(t, temp)
 
 	theirRoot, err := fallbackSandboxRuntimeRoot(theirs)
 	if err != nil {
-		t.Skipf("no fallback runtime root available here: %v", err)
+		t.Fatalf("SETUP INVALID: no fallback runtime root under a temp this test owns: %v", err)
 	}
+	requireWithinTestOwned(t, theirRoot, temp)
 	writeRecordedRoot(t, home, theirRoot)
 
 	if got := pinnedSandboxRuntimeRoot(mine, filepath.Join(t.TempDir(), "preferred"), filepath.Join(t.TempDir(), "fallback"), home); got != "" {

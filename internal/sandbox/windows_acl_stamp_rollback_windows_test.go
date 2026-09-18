@@ -88,7 +88,7 @@ func TestAStampFailureRestoresTheCommittedACL(t *testing.T) {
 		t.Errorf("the committed capability grant survived a failed setup:\nbefore %s\nafter  %s",
 			strings.Join(before, " | "), strings.Join(after, " | "))
 	}
-	if _, err := os.Stat(filepath.Join(root, windowsSandboxRuntimeStampName)); err == nil {
+	if _, err := os.Stat(filepath.Join(root, windowsSandboxRuntimeStampName(testStampPlanHash))); err == nil {
 		t.Error("a stamp exists even though the stamp step failed")
 	}
 }

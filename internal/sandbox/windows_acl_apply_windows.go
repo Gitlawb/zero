@@ -153,7 +153,7 @@ func writeRidingStamp(handle windows.Handle, path string, planHash string) error
 	if windowsACLStampWriteHook != nil {
 		return windowsACLStampWriteHook(path)
 	}
-	return writeWindowsRuntimeStampToDirectoryHandle(handle, planHash)
+	return writeWindowsRuntimeStampToDirectoryHandle(handle, windowsSandboxRuntimeStampName(planHash), planHash)
 }
 
 // restoreWindowsACLThroughHandle puts a captured DACL back on the object the

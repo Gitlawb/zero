@@ -97,7 +97,7 @@ func markForDeletion(handle windows.Handle) error {
 // write from the root owner, so an in-place overwrite is denied under the very
 // token that wrote it; and recreating it through the ordinary writer is what
 // puts that DACL back, which a raw write would not.
-func compensateRuntimeStampBound(root string, identity string, prior []byte, existed bool) error {
+func compensateRuntimeStampBound(root string, identity string, name string, prior []byte, existed bool) error {
 	directory, err := openVerifiedRuntimeDirectory(root, identity,
 		windows.FILE_TRAVERSE|windowsFileAddFile|windows.READ_CONTROL|windows.SYNCHRONIZE, "stamped")
 	if err != nil {
@@ -109,7 +109,7 @@ func compensateRuntimeStampBound(root string, identity string, prior []byte, exi
 		runtimeCompensationSwapSeam()
 	}
 
-	if err := deleteRuntimeStampChild(directory); err != nil {
+	if err := deleteRuntimeStampChild(directory, name); err != nil {
 		return err
 	}
 	if !existed {
@@ -117,7 +117,7 @@ func compensateRuntimeStampBound(root string, identity string, prior []byte, exi
 	}
 	// Recreated through the ordinary writer so it is protected again, and so the
 	// reader ACE is resolved the same way a fresh setup resolves it.
-	if err := writeWindowsRuntimeStampToDirectoryHandle(directory, string(prior)); err != nil {
+	if err := writeWindowsRuntimeStampToDirectoryHandle(directory, name, string(prior)); err != nil {
 		return fmt.Errorf("restore the previous sandbox runtime setup stamp: %w", err)
 	}
 	return nil
@@ -126,11 +126,20 @@ func compensateRuntimeStampBound(root string, identity string, prior []byte, exi
 // deleteRuntimeStampChild removes the stamp relative to an already verified
 // directory handle. A stamp that is not there is the desired end state; anything
 // else is reported rather than swallowed.
-func deleteRuntimeStampChild(directory windows.Handle) error {
-	stamp, err := openWindowsChildNoFollow(directory, windowsSandboxRuntimeStampName,
+func deleteRuntimeStampChild(directory windows.Handle, name string) error {
+	stamp, err := openWindowsChildNoFollow(directory, name,
 		windows.DELETE|windows.FILE_READ_ATTRIBUTES, windows.FILE_NON_DIRECTORY_FILE)
 	if err != nil {
-		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, os.ErrNotExist) {
+		// ABSENCE IS CLASSIFIED BY THE PRODUCER'S DOMAIN. openWindowsChildNoFollow
+		// goes through NtCreateFile, so a stamp that is not there arrives as
+		// STATUS_OBJECT_NAME_NOT_FOUND. This compared against the Win32 codes only,
+		// and an NTStatus is a different type that errors.Is does not convert, so a
+		// fresh setup that failed before writing any stamp reported a second,
+		// spurious rollback failure for removing a file that never existed. The
+		// snapshot path already answers this question for both domains, and using
+		// the same answer keeps snapshot and compensation agreeing about what
+		// absence means. Reported by @jatmn.
+		if isWindowsNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("remove sandbox runtime setup stamp written by this run: %w", err)
@@ -149,7 +158,7 @@ func deleteRuntimeStampChild(directory windows.Handle) error {
 func removeCreatedRuntimeDirBound(path string, identity string) error {
 	handle, err := openVerifiedRuntimeDirectory(path, identity, windows.DELETE, "created")
 	if err != nil {
-		if os.IsNotExist(err) {
+		if isWindowsNotFound(err) {
 			return nil
 		}
 		return err

@@ -46,10 +46,10 @@ func TestTheStampSkipsADirectorySwappedInAfterTheACE(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = rollback() })
 
-	if _, err := os.Stat(filepath.Join(root, windowsSandboxRuntimeStampName)); err == nil {
+	if _, err := os.Stat(filepath.Join(root, windowsSandboxRuntimeStampName(testStampPlanHash))); err == nil {
 		t.Error("the swapped-in directory collected the stamp; it carries no capability ACE and would still validate as set up")
 	}
-	recorded, err := os.ReadFile(filepath.Join(moved, windowsSandboxRuntimeStampName))
+	recorded, err := os.ReadFile(filepath.Join(moved, windowsSandboxRuntimeStampName(testStampPlanHash)))
 	if err != nil {
 		t.Fatalf("the stamp did not land on the object the ACE was applied to: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestTheStampSkipsADirectorySwappedInAfterTheACE(t *testing.T) {
 // object the snapshot read.
 func stampRequestFor(t *testing.T, root string, planHash string) *windowsACLStampRequest {
 	t.Helper()
-	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root)
+	snapshot, err := snapshotWindowsSandboxRuntimeStamp(root, testStampPlanHash)
 	if err != nil {
 		t.Fatalf("snapshot the runtime stamp for %s: %v", root, err)
 	}
