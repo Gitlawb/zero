@@ -1,13 +1,73 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/daemon/remote"
 )
+
+func TestDaemonTokenNavigationAndImageMatrix(t *testing.T) {
+	for _, kind := range []string{"exact", "symlink", "hardlink", "ordinary"} {
+		t.Run(kind, func(t *testing.T) {
+			ws, token, engine := daemonTokenFixture(t)
+			t.Setenv(remote.EnvTokenFileResolved, "")
+			t.Setenv(remote.EnvTokenFileIdentity, "")
+			// Valid image bytes ensure refusal cannot be an image-type error.
+			if err := os.WriteFile(token, onePixelPNG, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := token
+			if kind != "exact" {
+				path = filepath.Join(ws, "candidate.unknownext")
+				var err error
+				switch kind {
+				case "symlink":
+					err = os.Symlink(token, path)
+				case "hardlink":
+					err = os.Link(token, path)
+				case "ordinary":
+					err = os.WriteFile(path, onePixelPNG, 0o600)
+				}
+				if err != nil {
+					t.Skipf("%s unavailable: %v", kind, err)
+				}
+			}
+			registry := NewRegistry()
+			registry.Register(NewScopedLSPNavigateTool(ws, nil))
+			registry.Register(NewViewImageTool(ws))
+			for _, withEngine := range []bool{false, true} {
+				options := RunOptions{}
+				if withEngine {
+					options.Sandbox = engine
+				}
+				for _, op := range []string{"definition", "workspace_symbol", "image"} {
+					name := "lsp_navigate"
+					args := map[string]any{"path": path, "op": op, "line": 1, "query": "x"}
+					if op == "image" {
+						name, args = ViewImageToolName, map[string]any{"path": path}
+					}
+					result := registry.RunWithOptions(context.Background(), name, args, options)
+					if kind == "ordinary" {
+						if result.Status != StatusOK {
+							t.Fatalf("%s engine=%v ordinary control: %s", op, withEngine, result.Output)
+						}
+						if op == "image" && (len(result.Images) != 1 || !bytes.Equal(result.Images[0].Data, onePixelPNG)) {
+							t.Fatal("ordinary image bytes changed")
+						}
+					} else if result.Status != StatusError || len(result.Images) != 0 || !strings.Contains(result.Output, "holds the remote bridge token") {
+						t.Errorf("%s engine=%v must refuse credential before consumption: %+v", op, withEngine, result)
+					}
+				}
+			}
+		})
+	}
+}
 
 // The gate and the tool must resolve a path argument to the SAME bytes.
 // aliasedStringArg does not trim, so while requestPaths ran path args through

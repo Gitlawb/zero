@@ -12,6 +12,57 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
+func TestServeMCPNavigationAndImagesExcludeDaemonToken(t *testing.T) {
+	workspace := t.TempDir()
+	token := filepath.Join(workspace, "bridge-token")
+	const image = "GIF89a mcp-image-secret"
+	if err := os.WriteFile(token, []byte(image), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(remote.EnvToken, "")
+	t.Setenv(remote.EnvTokenFile, token)
+	t.Setenv(remote.EnvTokenFileResolved, "")
+	t.Setenv(remote.EnvTokenFileIdentity, "")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedLSPNavigateTool(workspace, nil))
+	registry.Register(tools.NewViewImageTool(workspace))
+	for _, kind := range []string{"exact", "hardlink", "symlink", "ordinary"} {
+		t.Run(kind, func(t *testing.T) {
+			path := token
+			if kind != "exact" {
+				path = filepath.Join(workspace, kind+".unknownext")
+				var err error
+				switch kind {
+				case "hardlink":
+					err = os.Link(token, path)
+				case "symlink":
+					err = os.Symlink(token, path)
+				default:
+					err = os.WriteFile(path, []byte(image), 0o600)
+				}
+				if err != nil {
+					t.Skipf("%s unavailable: %v", kind, err)
+				}
+			}
+			for _, op := range []string{"definition", "workspace_symbol", "image"} {
+				name := "lsp_navigate"
+				args := map[string]any{"path": path, "op": op, "line": 1, "query": "x"}
+				if op == "image" {
+					name, args = "view_image", map[string]any{"path": path}
+				}
+				result := callServerTool(t, registry, ServeOptions{WorkspaceRoot: workspace}, name, args)
+				if kind == "ordinary" {
+					if result.IsError {
+						t.Fatalf("ordinary %s: %s", op, TextContent(result.Content))
+					}
+				} else if !result.IsError || !strings.Contains(TextContent(result.Content), "holds the remote bridge token") {
+					t.Errorf("%s credential refusal missing: %+v", op, result)
+				}
+			}
+		})
+	}
+}
+
 func TestServeMCPExcludesDaemonTokenFromTools(t *testing.T) {
 	workspace := t.TempDir()
 	token := filepath.Join(workspace, "bridge-token")
