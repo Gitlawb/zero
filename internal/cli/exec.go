@@ -49,6 +49,14 @@ const (
 	exitInterrupted = 130
 )
 
+// defaultExecMaxTurns is the headless tool-turn budget when no source sets one.
+// An interactive run can be continued past the shared interactive default by the
+// user; an exec run has nobody to unstick it, so evals and automation would
+// truncate mid-task at 80 turns. The ceiling is the already-justified bound —
+// still finite against a genuinely runaway loop, which the loop's empty-turn
+// guard also cuts independently of this budget.
+const defaultExecMaxTurns = config.MaxTurnsCeiling
+
 type execOutputFormat string
 type execInputFormat string
 
@@ -320,6 +328,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
+	resolved.MaxTurns = execTurnBudget(resolved)
 	var displacedMaxTurns int
 	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
 	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
@@ -1220,6 +1229,20 @@ func applyExecProfile(options *execOptions) (execprofile.Profile, bool, error) {
 // there: escalation must never clear an effort the user pinned by hand.
 func specProfileEffortFilled(effortFilled bool, specReasoningEffort string) bool {
 	return effortFilled && strings.TrimSpace(specReasoningEffort) == ""
+}
+
+// execTurnBudget applies the headless default to the resolved turn budget: an
+// interactive run can be continued past the shared default by the user, but an
+// exec run has nobody to unstick it, so an unconfigured budget starts at the
+// documented ceiling instead of truncating mid-task. Explicit sources
+// (--max-turns, mode presets, ZERO_MAX_TURNS, config files) resolve as
+// MaxTurnsSet and pass through; an exec-profile budget still wins via
+// applyProfileTurnBudget afterward.
+func execTurnBudget(resolved config.ResolvedConfig) int {
+	if resolved.MaxTurnsSet {
+		return resolved.MaxTurns
+	}
+	return defaultExecMaxTurns
 }
 
 // applyProfileTurnBudget decides the run's turn budget once config is resolved.

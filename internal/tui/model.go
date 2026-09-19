@@ -256,6 +256,9 @@ type model struct {
 	composerSelection      composerSelectionState
 	dictation              dictationController
 	sttKeyPrompt           *sttKeyPromptState
+	terminalAttach         *terminalAttachState
+	terminalAutoAttach     *terminalAutoAttachState
+	terminalAttachSeen     map[int]bool
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan            planPanelState
@@ -1248,7 +1251,7 @@ func (m *model) stopPRWatcher() {
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
 		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
-		m.sttKeyPrompt == nil && m.renamePrompt == nil
+		m.sttKeyPrompt == nil && m.renamePrompt == nil && m.terminalAttach == nil
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
@@ -1450,6 +1453,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
+		// Attached to a live terminal: the overlay owns the viewport, so mouse
+		// events go nowhere rather than hitting transcript selection below.
+		if m.terminalAttach != nil {
+			return m, nil
+		}
 		if m.setup.visible {
 			return m.handleSetupMouse(msg)
 		}
@@ -1536,6 +1544,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.attachClipboardImage(msg.data, msg.mediaType), nil
 	case tea.PasteMsg:
+		// While attached to a live terminal, a paste forwards verbatim to the
+		// PTY stdin — never into the composer or transcript.
+		if m.terminalAttach != nil {
+			return m.handleTerminalAttachPaste(msg.Content)
+		}
 		// A paste into the cloud-STT key prompt fills the key (the common way to
 		// enter an API key), not the composer.
 		if m.sttKeyPrompt != nil {
@@ -1568,6 +1581,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleVoiceCaptureRelease()
 		}
 		return m, nil
+	case terminalAttachTickMsg:
+		return m.refreshTerminalAttach()
+	case interactiveExecStartMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.terminalAutoAttach = &terminalAutoAttachState{
+			runID:    msg.runID,
+			known:    msg.known,
+			deadline: m.now().Add(terminalAutoAttachTimeout),
+		}
+		return m, terminalAutoAttachTickCmd(msg.runID)
+	case terminalAutoAttachTickMsg:
+		return m.pollTerminalAutoAttach(msg)
 	case tea.KeyPressMsg:
 		if m.petDragActive {
 			pixelDrag := m.petPixelDrag
@@ -1606,6 +1633,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// input) until Enter saves or Esc cancels.
 		if m.sttKeyPrompt != nil {
 			return m.handleSTTKeyPromptKey(msg)
+		}
+		// Attached to a live terminal session: keystrokes (including Ctrl+C,
+		// which maps to 0x03 for the process) go to the PTY until Esc detaches.
+		if m.terminalAttach != nil {
+			return m.handleTerminalAttachKey(msg)
 		}
 		if m.renamePrompt != nil {
 			return m.handleSessionRenameKey(msg)
@@ -2460,6 +2492,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Size the composer so long input scrolls horizontally with the cursor
 		// visible instead of being clipped invisibly past the right edge.
 		m.input.SetWidth(maxInt(20, chatWidth(msg.Width)-14))
+		// An attached terminal fills the viewport, so the PTY tracks the
+		// live size instead of a fixed default.
+		m = m.resizeAttachedTerminalPTY()
 		// The title bar prints once into native scrollback when the inline
 		// renderer is active. In alt-screen mode it stays pinned inside View.
 		if !m.altScreen && !m.headerPrinted && msg.Width > 0 {
@@ -2635,6 +2670,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runCancel = nil
 		m.activeRunID = 0
+		m.terminalAutoAttach = nil
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
 		// A fully successful turn means the task is done. Weaker models often
 		// forget the final update_plan, leaving the panel stuck mid-progress;
@@ -3138,8 +3174,11 @@ func (m model) transcriptView() string {
 	mcpOverlay := m.mcpManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
 	sttKeyOverlay := m.sttKeyPromptOverlay(width)
+	terminalAttachOverlay := m.terminalAttachOverlay(width)
 	viewportOverlay := ""
 	switch {
+	case terminalAttachOverlay != "":
+		viewportOverlay = terminalAttachOverlay
 	case sttKeyOverlay != "":
 		viewportOverlay = sttKeyOverlay
 	case helpOverlayContent != "":
@@ -3207,6 +3246,13 @@ func (m model) pinnedTitleBar(width int) string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
+	// An attached terminal owns the keyboard and the viewport; the composer is
+	// inert, so like the ask_user and permission modals only the status line
+	// renders. Frame math routes through footerView, so this also shrinks the
+	// footer rect the overlay's row budget is derived from.
+	if m.terminalAttach != nil {
+		return m.footerStatusLine(width)
+	}
 	if m.renamePrompt != nil {
 		footer.WriteString(m.sessionRenamePromptView(width))
 		footer.WriteString("\n")
@@ -4753,6 +4799,8 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 	case commandStop:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.stopBackgroundTerminalsText(command.text)})
 		return m, nil
+	case commandAttach:
+		return m.attachTerminalCommand(command.text)
 	case commandSandboxSetup:
 		return m.startSandboxSetupCommand(command.text)
 	case commandProvider:
@@ -5254,6 +5302,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	}
 	m.runID++
 	m.activeRunID = m.runID
+	m.terminalAutoAttach = nil
 	m.runCancel = cancel
 	m.pending = true
 	// Clear per-run tracking state so stale specialists and plans from the
@@ -5411,6 +5460,7 @@ func (m *model) cancelRun() {
 	m.pending = false
 	m.runCancel = nil
 	m.activeRunID = 0
+	m.terminalAutoAttach = nil
 	m.cancelConfirmActive = false // whatever path got here, there's nothing left to confirm cancelling
 	m.plan.frozenAt = m.now()     // freeze the plan clock while idle (no run in flight)
 	m.pendingPermission = nil
@@ -5774,6 +5824,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// live status. The child session ID is not known yet (it's created
 			// inside the executor), so we use the tool call ID as a temporary
 			// key and reconcile on the result.
+			// A tty exec_command wants the attach overlay: the session registers
+			// with the process manager inside the tool's Run, so the update loop
+			// polls for it on a tick.
+			if call.Name == tools.ExecCommandToolName && execCallWantsTTY(call.Arguments) && m.runtimeMessageSink != nil {
+				known := map[int]bool{}
+				if controller, ok := m.execSessionController(); ok {
+					for _, session := range controller.ExecSessions() {
+						known[session.ID] = true
+					}
+				}
+				m.runtimeMessageSink(interactiveExecStartMsg{runID: runID, known: known})
+			}
 			if call.Name == "Task" {
 				name, desc := parseTaskCallArgs(call.Arguments)
 				if m.runtimeMessageSink != nil {

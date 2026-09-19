@@ -819,58 +819,73 @@ func TestRunProvidersRemoveDeletesKeyFromConfigStore(t *testing.T) {
 	}
 }
 
-func TestRunProvidersRemoveFailsWhenStoredKeyCleanupFails(t *testing.T) {
-	for _, jsonOutput := range []bool{false, true} {
-		name := "text"
-		if jsonOutput {
-			name = "json"
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Setenv("ZERO_CRED_STORAGE", "file")
-			dir := t.TempDir()
-			configPath := filepath.Join(dir, "config.json")
-			if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"gw","apiKeyStored":true}]}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			store, err := config.ProviderKeyStoreAt(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := store.Set("gw", "sk-secret"); err != nil {
-				t.Fatal(err)
-			}
-			// A directory at the lock-file path is a hermetic, cross-platform
-			// failure: Delete cannot acquire its write lock.
-			lockPath := filepath.Join(dir, "credentials.json.lock")
-			if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(lockPath, 0o700); err != nil {
-				t.Fatal(err)
-			}
+func TestProviderMutationsRedactStoredKeyFailures(t *testing.T) {
+	const secret = "sk-proj-1234567890abcdefghijklmnop"
+	for _, command := range []string{"remove", "rename"} {
+		for _, jsonOutput := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", command, jsonOutput), func(t *testing.T) {
+				t.Setenv("ZERO_CRED_STORAGE", "file")
+				dir := filepath.Join(t.TempDir(), secret)
+				configPath := filepath.Join(dir, "config.json")
+				writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+					ActiveProvider: secret,
+					Providers:      []config.ProviderProfile{{Name: secret, APIKeyStored: true}},
+				})
+				before, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				store, err := config.ProviderKeyStoreAt(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Set(secret, "stored-key"); err != nil {
+					t.Fatal(err)
+				}
+				// A directory at the lock-file path prevents credential writes
+				// without depending on platform-specific permission behavior.
+				lockPath := filepath.Join(dir, "credentials.json.lock")
+				if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(lockPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
 
-			args := []string{"providers", "remove", "gw"}
-			if jsonOutput {
-				args = append(args, "--json")
-			}
-			var stdout, stderr bytes.Buffer
-			code := runWithDeps(args, &stdout, &stderr, appDeps{
-				userConfigPath: func() (string, error) { return configPath, nil },
+				args := []string{"providers", command, secret}
+				if command == "rename" {
+					args = append(args, "renamed")
+				}
+				if jsonOutput {
+					args = append(args, "--json")
+				}
+				var stdout, stderr bytes.Buffer
+				code := runWithDeps(args, &stdout, &stderr, providerSetupDeps(configPath))
+				if code != exitCrash {
+					t.Fatalf("exit = %d, want transactional failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "[REDACTED]") {
+					t.Fatalf("stderr = %q, want a redacted credential failure", stderr.String())
+				}
+				if strings.Contains(stderr.String(), secret) || stdout.Len() != 0 {
+					t.Fatalf("failed mutation exposed a secret or reported success: stdout=%q stderr=%q", stdout.String(), stderr.String())
+				}
+				after, err := os.ReadFile(configPath)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatalf("failed mutation changed config: %v", err)
+				}
+
+				if err := os.Remove(lockPath); err != nil {
+					t.Fatal(err)
+				}
+				if key, ok, getErr := store.Get(secret); getErr != nil || !ok || key != "stored-key" {
+					t.Fatalf("failed mutation changed key: present=%v err=%v", ok, getErr)
+				}
+				if _, ok, getErr := store.Get("renamed"); getErr != nil || ok {
+					t.Fatalf("failed mutation left a renamed key: present=%v err=%v", ok, getErr)
+				}
 			})
-			if code != exitCrash {
-				t.Fatalf("exit = %d, want transactional cleanup failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-			}
-			if !strings.Contains(stderr.String(), "delete stored key") {
-				t.Fatalf("stderr = %q, want transactional key-deletion failure", stderr.String())
-			}
-
-			if err := os.Remove(lockPath); err != nil {
-				t.Fatal(err)
-			}
-			if key, ok, getErr := store.Get("gw"); getErr != nil || !ok || key != "sk-secret" {
-				t.Fatalf("failed cleanup changed key: present=%v len=%d err=%v", ok, len(key), getErr)
-			}
-		})
+		}
 	}
 }
 
@@ -1172,6 +1187,59 @@ func TestProviderAliasMutationRejectsUntrustedSourceErrors(t *testing.T) {
 				after, err := os.ReadFile(path)
 				if err != nil || !bytes.Equal(before, after) {
 					t.Fatal("rejection mutated the user config")
+				}
+			})
+		}
+	}
+}
+
+func TestProviderMutationsRedactPreflightErrors(t *testing.T) {
+	const secret = "sk-proj-1234567890abcdefghijklmnop"
+	for _, command := range []string{"remove", "rename"} {
+		for _, stage := range []string{"usage", "config path", "config read", "ambiguous identity"} {
+			t.Run(command+"/"+stage, func(t *testing.T) {
+				configPath := filepath.Join(t.TempDir(), secret, "config.json")
+				deps := providerSetupDeps(configPath)
+				args := []string{"providers", command, secret}
+				if command == "rename" {
+					args = append(args, "renamed")
+				}
+				var reason string
+				switch stage {
+				case "usage":
+					args = append(args, "--api-key="+secret)
+					reason = "unknown flag"
+				case "config path":
+					deps.userConfigPath = func() (string, error) {
+						return "", fmt.Errorf("locate config %s: %w", configPath, os.ErrPermission)
+					}
+					reason = "permission denied"
+				case "config read":
+					if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(configPath, []byte(`{"providers":`), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					reason = "invalid config JSON"
+				case "ambiguous identity":
+					writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+						Providers: []config.ProviderProfile{
+							{Name: secret},
+							{Name: secret},
+						},
+					})
+					reason = "ambiguous provider name"
+				}
+				var stdout, stderr bytes.Buffer
+				if code := runWithDeps(args, &stdout, &stderr, deps); code == exitSuccess {
+					t.Fatalf("mutation succeeded despite %s failure", stage)
+				}
+				if !strings.Contains(stderr.String(), reason) || !strings.Contains(stderr.String(), "[REDACTED]") {
+					t.Fatalf("stderr = %q, want a redacted error retaining %q", stderr.String(), reason)
+				}
+				if strings.Contains(stderr.String(), secret) || stdout.Len() != 0 {
+					t.Fatalf("failed mutation exposed a secret or reported success: stdout=%q stderr=%q", stdout.String(), stderr.String())
 				}
 			})
 		}
