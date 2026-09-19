@@ -239,6 +239,7 @@ func preserveWriteFileEncoding(existing []byte, content, bom, lineEndings string
 		useCRLF = lineEndings == "crlf"
 	}
 	updated = bytes.ReplaceAll(updated, []byte("\r\n"), []byte("\n"))
+	updated = bytes.ReplaceAll(updated, []byte("\r"), []byte("\n"))
 	if useCRLF {
 		updated = bytes.ReplaceAll(updated, []byte("\n"), []byte("\r\n"))
 	}

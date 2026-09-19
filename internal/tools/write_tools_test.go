@@ -199,6 +199,8 @@ func TestWriteFileToolExplicitEncodingIntent(t *testing.T) {
 		{"CRLF retain BOM", "\ufeffold\n", "new\n", "", "crlf", "\ufeffnew\r\n"},
 		{"CRLF without BOM", "old\n", "new\n", "", "crlf", "new\r\n"},
 		{"add and CRLF", "old\n", "new\n", "add", "crlf", "\ufeffnew\r\n"},
+		{"lone CR to LF", "old\r\n", "first\rsecond\r\nthird\nfourth\r", "", "lf", "first\nsecond\nthird\nfourth\n"},
+		{"lone CR to CRLF", "old\n", "first\rsecond\r\nthird\nfourth\r", "", "crlf", "first\r\nsecond\r\nthird\r\nfourth\r\n"},
 		{"empty remove BOM", "\ufeffold\r\n", "", "remove", "", ""},
 		{"empty default", "\ufeffold\r\n", "", "", "", "\ufeff"},
 	} {
