@@ -190,6 +190,8 @@ func TestParseExecSpecialistMetadataRejectsInvalidValues(t *testing.T) {
 }
 
 func TestRunExecRegistersTaskOnlyForUnsafeTopLevelRuns(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	tests := []struct {
 		name     string
 		args     []string
@@ -204,6 +206,9 @@ func TestRunExecRegistersTaskOnlyForUnsafeTopLevelRuns(t *testing.T) {
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
 				getwd: func() (string, error) {
 					return t.TempDir(), nil
 				},
@@ -1280,6 +1285,8 @@ func TestRunExecHelpDocumentsAllowEscalation(t *testing.T) {
 }
 
 func TestRunExecRegistersEscalateModelOnlyWithFlag(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	for _, tc := range []struct {
 		name     string
 		args     []string
@@ -1292,6 +1299,9 @@ func TestRunExecRegistersEscalateModelOnlyWithFlag(t *testing.T) {
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
 				getwd: func() (string, error) {
 					return t.TempDir(), nil
 				},
@@ -1973,5 +1983,25 @@ func TestRunExecTopTierDeclineNoSwitch(t *testing.T) {
 	}
 	if providerModels[0] != "claude-opus-4.1" {
 		t.Fatalf("provider model = %q, want claude-opus-4.1", providerModels[0])
+	}
+}
+
+func TestExecTurnBudgetDefaultsToCeilingUnlessSet(t *testing.T) {
+	cases := []struct {
+		name     string
+		resolved config.ResolvedConfig
+		want     int
+	}{
+		// A headless run has no user to continue past the shared interactive
+		// default, so an unconfigured budget starts at the ceiling.
+		{"unconfigured default", config.ResolvedConfig{MaxTurns: 80, MaxTurnsSet: false}, config.MaxTurnsCeiling},
+		// A user who configured 80 on purpose (e.g. cost control in CI) keeps 80.
+		{"explicit default value", config.ResolvedConfig{MaxTurns: 80, MaxTurnsSet: true}, 80},
+		{"configured value passes through", config.ResolvedConfig{MaxTurns: 42, MaxTurnsSet: true}, 42},
+	}
+	for _, tc := range cases {
+		if got := execTurnBudget(tc.resolved); got != tc.want {
+			t.Fatalf("%s: execTurnBudget = %d, want %d", tc.name, got, tc.want)
+		}
 	}
 }
