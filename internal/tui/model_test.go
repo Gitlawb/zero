@@ -3404,6 +3404,7 @@ func TestMultilineBurstSubmits(t *testing.T) {
 // path kept its line, so no test caught it). This pins the picker's failure
 // path: the config path sits under a regular file so the write must fail.
 func TestThemePickerAppendNoteOnFailedSave(t *testing.T) {
+	defer applyTheme(themeDark, true)
 	cfg := filepath.Join(t.TempDir(), "blocked", "zero.json")
 	if err := os.WriteFile(filepath.Dir(cfg), []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
