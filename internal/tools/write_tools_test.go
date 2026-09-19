@@ -681,7 +681,7 @@ func TestWriteFileToolOverwriteEmitsRedGreenDiff(t *testing.T) {
 	}
 }
 
-func TestWriteFileToolOmitsDiffWhenOverwritePreimageCannotBeRead(t *testing.T) {
+func TestWriteFileToolRejectsOverwriteWhenPreimageCannotBeRead(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "private.txt")
 	writeTestFile(t, path, "before\n")
@@ -692,14 +692,14 @@ func TestWriteFileToolOmitsDiffWhenOverwritePreimageCannotBeRead(t *testing.T) {
 	result := registry.RunWithOptions(context.Background(), tool.Name(), map[string]any{
 		"path": "private.txt", "content": "after\n", "overwrite": true,
 	}, RunOptions{PermissionGranted: true})
-	if result.Status != StatusOK {
-		t.Fatalf("write = %s", result.Output)
+	if result.Status != StatusError {
+		t.Fatalf("unreadable preimage must reject overwrite: %s", result.Output)
 	}
 	if len(result.FileDiffs) != 0 {
 		t.Fatalf("unreadable preimage must not produce a create-like diff: %#v", result.FileDiffs)
 	}
-	if got, err := os.ReadFile(path); err != nil || string(got) != "after\n" {
-		t.Fatalf("written content = %q, err = %v", got, err)
+	if got, err := os.ReadFile(path); err != nil || string(got) != "before\n" {
+		t.Fatalf("original content = %q, err = %v", got, err)
 	}
 }
 
