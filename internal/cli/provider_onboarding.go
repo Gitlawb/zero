@@ -588,11 +588,11 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		}
 	}
 	// Check the original requested row before entering the config/key transaction.
-	name, err = resolveProviderMutationName(configPath, options.names[0], deps)
+	_, err = resolveProviderMutationName(configPath, options.names[0], deps)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	cfg, keyRemoved, err := config.RemoveProviderAndKey(configPath, name)
+	cfg, name, keyRemoved, err := config.RemoveProviderAndKey(configPath, options.names[0])
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}

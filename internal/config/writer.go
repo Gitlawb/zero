@@ -1127,33 +1127,44 @@ func ProviderPersisted(path string, name string) (bool, error) {
 // store entry — config stays pure of secret I/O on the read path, and remove
 // keeps that symmetry by only touching config.json.
 func RemoveProvider(path string, name string) (FileConfig, error) {
-	cfg, _, err := RemoveProviderAndKey(path, name)
+	cfg, _, _, err := RemoveProviderAndKey(path, name)
 	return cfg, err
 }
 
 // RemoveProviderAndKey removes the persisted row and its marked stored key in
-// one transaction, returning whether a credential entry was deleted.
-func RemoveProviderAndKey(path string, name string) (FileConfig, bool, error) {
+// one transaction, returning the exact removed row name and whether a credential
+// entry was deleted. Identity resolution happens under the same lock as removal
+// so a concurrent profile mutation cannot retarget the operation.
+func RemoveProviderAndKey(path string, name string) (FileConfig, string, bool, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return FileConfig{}, false, fmt.Errorf("config path is required")
+		return FileConfig{}, "", false, fmt.Errorf("config path is required")
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return FileConfig{}, false, fmt.Errorf("provider name is required")
+		return FileConfig{}, "", false, fmt.Errorf("provider name is required")
 	}
+	removedName := ""
 	keyRemoved := false
 	cfg, err := runProviderProfileOperation(path, false, true, func(op *providerProfileOperation) error {
 		cfg := &op.config
+		row, match, err := resolvePersistedProviderIdentity(cfg.Providers, name)
+		if err != nil {
+			return err
+		}
+		if match == PersistedIdentityNone {
+			return fmt.Errorf("provider %q not found", name)
+		}
+		removedName = strings.TrimSpace(row.Name)
 		index := -1
 		for i, provider := range cfg.Providers {
-			if strings.TrimSpace(provider.Name) == name {
+			if strings.TrimSpace(provider.Name) == removedName {
 				index = i
 				break
 			}
 		}
 		if index < 0 {
-			return fmt.Errorf("provider %q not found", name)
+			return fmt.Errorf("provider %q not found", removedName)
 		}
 		activeIndex, activeIdentityIndex, activeIdentityMatches := -1, -1, 0
 		for i, provider := range cfg.Providers {
@@ -1189,7 +1200,7 @@ func RemoveProviderAndKey(path string, name string) (FileConfig, bool, error) {
 		}
 		return nil
 	})
-	return cfg, keyRemoved, err
+	return cfg, removedName, keyRemoved, err
 }
 
 // RenameProvider renames a provider profile, keeping everything keyed by the

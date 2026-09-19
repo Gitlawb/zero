@@ -362,11 +362,11 @@ func (m model) activateManagerSelection() (model, tea.Cmd) {
 	return next, cmd
 }
 
-// deleteManagerSelection removes the confirmed provider: the config write runs
-// synchronously (the list must reflect the config the instant the confirm
-// resolves), while the stored-key delete and the OAuth-login lookup — a
-// keychain subprocess and a token-store read — run in a follow-up tea.Cmd so
-// the confirm keypress never stalls the render loop. The OAuth token is
+// deleteManagerSelection removes the confirmed provider and its exclusively
+// owned stored key in one synchronous transaction, so the list reflects the
+// committed config when confirmation resolves. The OAuth-login lookup runs in
+// a follow-up tea.Cmd so its token-store read does not stall the render loop.
+// The OAuth token is
 // deliberately kept — logins outlive profiles so re-adding the provider
 // doesn't force a browser round-trip; zero auth logout removes it.
 func (m model) deleteManagerSelection() (model, tea.Cmd) {
@@ -391,11 +391,12 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	// removed that user row while the in-memory removal took the project one.
 	if row.owner.UserBacked {
 		exactName := row.owner.PersistedName
-		cfg, keyRemoved, err := config.RemoveProviderAndKey(m.userConfigPath, exactName)
+		cfg, removedName, keyRemoved, err := config.RemoveProviderAndKey(m.userConfigPath, exactName)
 		if err != nil {
 			wizard.manageStatus = "Delete failed: " + err.Error()
 			return m, nil
 		}
+		exactName = removedName
 		activeAfter = cfg.ActiveProvider
 		if keyRemoved {
 			notes = []string{"Deleted " + name + ". Its stored API key will also be deleted."}
@@ -532,8 +533,8 @@ func sessionRefersToPersistedRow(live string, row string, providers []config.Pro
 	return resolved != "" && resolved == strings.TrimSpace(row)
 }
 
-// providerManagerCleanupMsg reports the off-thread half of a delete: the
-// stored-key removal outcome and the OAuth-login hint.
+// providerManagerCleanupMsg reports the off-thread OAuth-login hint after a
+// provider and any exclusively owned stored key were removed transactionally.
 type providerManagerCleanupMsg struct {
 	notes []string
 }
