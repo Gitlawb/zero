@@ -326,7 +326,7 @@ func TestRootedMutationPublishDoesNotClobberRacedTokenAlias(t *testing.T) {
 				var changes []structuredPatchChange
 				changes, err = planStructuredPatch(root, operations, nil)
 				if err == nil {
-					err = applyStructuredPatchChanges(root, changes, nil)
+					_, err = applyStructuredPatchChanges(root, ws, changes, nil)
 				}
 			default:
 				_, err = writeRootedFile(root, "notes.txt", path, ws, []byte("updated\n"), 0o644, false)
@@ -380,7 +380,7 @@ func TestStructuredPatchPublishDoesNotClobberRacedTokenAlias(t *testing.T) {
 	// The commit either refuses the swapped target (the file changed between
 	// planning and commit, or it is the protected credential) or publishes
 	// atomically over the alias. Either is acceptable; an altered token is not.
-	err = applyStructuredPatchChanges(root, changes, nil)
+	_, err = applyStructuredPatchChanges(root, ws, changes, nil)
 	if err != nil && !strings.Contains(err.Error(), "changed on disk") &&
 		!strings.Contains(err.Error(), "remote bridge token") {
 		t.Fatal(err)

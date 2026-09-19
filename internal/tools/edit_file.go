@@ -169,10 +169,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	// The write-side handle is checked before truncation, so a target swapped
-	// after the read cannot redirect the edit to the token. In-place publication
-	// preserves the existing inode, ACLs and hard links.
-	if _, err := writeRootedFile(root, target.relative, absolutePath, tool.workspaceRoot, []byte(updated), readInfo.Mode(), false); err != nil {
+	if err := commitRootedFileContents(root, target.relative, readInfo, &content, updated); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
@@ -180,13 +177,14 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// FileTracker re-baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
 	formatting := tool.formatter(ctx, root, target.relative, absolutePath, tool.workspaceRoot, updated, readInfo.Mode())
-	updated, err = readPublishedContent(root, target.relative, absolutePath, tool.workspaceRoot)
+	published, newInfo, err := readRootedFile(root, target.relative)
 	if err != nil {
+		options.FileTracker.Forget(absolutePath)
 		return errorResult("Error reading written file " + relativePath + ": " + err.Error())
 	}
+	updated = string(published)
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
-	newInfo, _ := root.Stat(target.relative)
 	if updated == modelKnownContent {
 		// OUR edit, so we know precisely which lines moved: RecordEdit carries
 		// across the reads this edit did not disturb instead of dropping them.
@@ -220,9 +218,15 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
+	if diff, ok := boundedFileDiff(absolutePath, content, updated, true, true); ok {
+		result.FileDiffs = []FileDiff{diff}
+	} else if diffTextRevealsObfuscatedSecret(content) || diffTextRevealsObfuscatedSecret(updated) {
+		result.Redacted = true
+	}
 	// Card-only preview (Display.Preview): the model's Output stays the one-line
 	// summary, so the red/green diff costs zero model tokens.
-	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: boundedUnifiedDiff(relativePath, content, updated)}
+	preview := boundedUnifiedDiff(relativePath, content, updated)
+	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: preview}
 	return result
 }
 

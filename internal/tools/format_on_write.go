@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,21 +151,4 @@ func maybeFormatWrittenFile(ctx context.Context, root *os.Root, relativePath, ab
 		return unformatted
 	}
 	return formatOnWriteResult{Content: string(formatted), Formatter: command[0]}
-}
-
-// readPublishedContent binds all post-write consumers (tracker, preview and
-// diagnostics) to a newly opened, protected handle. In particular, a pathname
-// swapped after the initial rooted write cannot make those consumers ingest a
-// credential even when formatting is disabled or best-effort formatting stops.
-func readPublishedContent(root *os.Root, relativePath, absolutePath, workspaceRoot string) (string, error) {
-	file, _, err := protectedRootRead(root, relativePath, absolutePath, workspaceRoot)
-	if err != nil {
-		return "", err
-	}
-	content, readErr := io.ReadAll(file)
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil {
-		return "", errors.Join(readErr, closeErr)
-	}
-	return string(content), nil
 }

@@ -21,6 +21,74 @@ func requireGofmt(t *testing.T) {
 	}
 }
 
+// Preserve upstream's verified FileDiff/tracker contract across the PR's
+// stdin/stdout formatter boundary. A formatter's reported Content is not proof
+// of the on-disk bytes; both mutation tools must inspect the rooted final file.
+func TestPostWriteEvidenceUsesVerifiedFinalFile(t *testing.T) {
+	for _, name := range []string{"write", "edit"} {
+		for _, state := range []string{"replacement", "missing", "escaping symlink"} {
+			t.Run(name+"/"+state, func(t *testing.T) {
+				root, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(root, "a.go")
+				if err := os.WriteFile(target, []byte("before\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				tracker := NewFileTracker()
+				read := NewScopedReadFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{"path": "a.go"}, RunOptions{FileTracker: tracker})
+				if read.Status != StatusOK {
+					t.Fatal(read.Output)
+				}
+				formatter := func(context.Context, *os.Root, string, string, string, string, os.FileMode) formatOnWriteResult {
+					if err := os.Remove(target); err != nil {
+						t.Fatal(err)
+					}
+					switch state {
+					case "replacement":
+						if err := os.WriteFile(target, []byte("formatted\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					case "escaping symlink":
+						outside := filepath.Join(t.TempDir(), "outside")
+						if err := os.WriteFile(outside, []byte("external\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(outside, target); err != nil {
+							t.Skipf("symlinks unavailable: %v", err)
+						}
+					}
+					return formatOnWriteResult{Content: "unverified formatter claim"}
+				}
+				diagnosticsCalled := false
+				options := RunOptions{FileTracker: tracker, Diagnostics: func(context.Context, string) string {
+					diagnosticsCalled = true
+					return ""
+				}}
+				var result Result
+				if name == "write" {
+					tool := NewScopedWriteFileTool(root, nil).(writeFileTool)
+					tool.formatter = formatter
+					result = tool.RunWithOptions(context.Background(), map[string]any{"path": "a.go", "content": "requested\n", "overwrite": true}, options)
+				} else {
+					tool := NewScopedEditFileTool(root, nil).(editFileTool)
+					tool.formatter = formatter
+					result = tool.RunWithOptions(context.Background(), map[string]any{"path": "a.go", "old_string": "before", "new_string": "requested"}, options)
+				}
+				version, tracked := tracker.Version(target)
+				if state == "replacement" {
+					if result.Status != StatusOK || len(result.FileDiffs) != 1 || result.FileDiffs[0].OldText != "before\n" || result.FileDiffs[0].NewText != "formatted\n" || !tracked || version.Hash != HashContent([]byte("formatted\n")) || !diagnosticsCalled {
+						t.Fatalf("verified final file not used: %+v, tracked=%v", result, tracked)
+					}
+				} else if result.Status != StatusError || len(result.FileDiffs) != 0 || result.Display.Preview != "" || tracked || diagnosticsCalled {
+					t.Fatalf("unverified final file reached consumers: %+v, tracked=%v diagnostics=%v", result, tracked, diagnosticsCalled)
+				}
+			})
+		}
+	}
+}
+
 func TestFormatOnWriteDisabledByDefault(t *testing.T) {
 	requireGofmt(t)
 	t.Setenv("ZERO_FORMAT_ON_WRITE", "")
@@ -497,12 +565,8 @@ func TestPostWriteFormatterSwapCannotPublishOrObserveToken(t *testing.T) {
 				if diagnosticsCalled || strings.Contains(result.Output, secret) || strings.Contains(result.Display.Preview, secret) {
 					t.Fatalf("token reached a post-write consumer: diagnostics=%v output=%q preview=%q", diagnosticsCalled, result.Output, result.Display.Preview)
 				}
-				version, tracked := tracker.Version(target)
-				if toolName == "write" && tracked {
-					t.Fatal("swapped token alias was recorded by FileTracker")
-				}
-				if toolName == "edit" && (!tracked || version.Hash != HashContent([]byte("package ordinary\n\nfunc Old() {}\n"))) {
-					t.Fatalf("FileTracker consumed swapped alias: tracked=%v version=%+v", tracked, version)
+				if _, tracked := tracker.Version(target); tracked {
+					t.Fatal("unverified final target must be forgotten by FileTracker")
 				}
 				got, err := os.ReadFile(token)
 				if err != nil || string(got) != secret {
