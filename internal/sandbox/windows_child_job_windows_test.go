@@ -406,16 +406,22 @@ func TestTheCommandRunnerTakesOwnershipBeforeItRefuses(t *testing.T) {
 		return 0, fmt.Errorf("declined for the test")
 	}
 
+	// The EARLIEST refusal in the function, so a join that slipped below any of
+	// the checks would be measured as not having happened. A DenyRead profile on
+	// a restricted-token tier is refused before the level switch, before setup
+	// validation, and long before a token or a child exists.
 	var stderr strings.Builder
-	if code := runWindowsSandboxCommand(WindowsSandboxCommandConfig{SandboxLevel: "not-a-level"}, &stderr); code != 1 {
+	config := WindowsSandboxCommandConfig{
+		SandboxLevel:      WindowsSandboxLevelRestrictedToken,
+		PermissionProfile: PermissionProfile{FileSystem: FileSystemPolicy{DenyRead: []string{`C:\secrets`}}},
+	}
+	if code := runWindowsSandboxCommand(config, &stderr); code != 1 {
 		t.Fatalf("exit code = %d, want 1 (%s)", code, stderr.String())
 	}
-	if joined != 1 {
-		t.Fatalf("the runner took ownership %d times on a path that refuses the command, want exactly once", joined)
+	if !strings.Contains(stderr.String(), "DenyRead is not supported") {
+		t.Fatalf("SETUP INVALID: the runner did not stop at its earliest refusal, so a later join would still count: %s", stderr.String())
 	}
-	// A join that fails costs the guarantee and not the command, so the refusal
-	// below it still has to be the thing the operator sees.
-	if !strings.Contains(stderr.String(), "unsupported Windows sandbox level") {
-		t.Errorf("a declined join changed what the runner reported: %s", stderr.String())
+	if joined != 1 {
+		t.Fatalf("the runner took ownership %d times before its earliest refusal, want exactly once", joined)
 	}
 }
