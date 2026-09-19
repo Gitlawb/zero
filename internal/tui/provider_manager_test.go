@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,6 +14,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -1081,4 +1084,125 @@ func managerRowOwnership(t *testing.T, m model, name string) config.ProviderRowO
 		t.Fatalf("resolve ownership for %q: %v", name, err)
 	}
 	return owner
+}
+
+func TestProviderManagerOwnershipErrorRedactsConfigPath(t *testing.T) {
+	m := managerTestModel(t)
+	secret := "sk-proj-123456789012345678901234"
+	m.userConfigPath = filepath.Join(t.TempDir(), secret+".json")
+	invalidConfig := []byte(`{"providers":`)
+	if err := os.WriteFile(m.userConfigPath, invalidConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := append([]config.ProviderProfile(nil), m.savedProviders...)
+
+	m, _ = m.reloadProviderManagerRows()
+	owner := m.providerWizard.manageRows[0].owner
+	if owner.UserBacked {
+		t.Fatal("unreadable config must not permit editing a persisted row")
+	}
+	m = managerKey(t, m, testKeyText("e"))
+	if m.providerWizard.step != providerWizardStepManage {
+		t.Fatal("ownership failure must keep the manager out of the editor")
+	}
+	for _, text := range []string{
+		owner.Reason,
+		m.providerWizard.manageStatus,
+		strings.Join(m.providerWizard.renderManageStep(1000), "\n"),
+	} {
+		if strings.Contains(text, secret) || !strings.Contains(text, redaction.RedactedSecret) {
+			t.Fatalf("ownership error must display a redacted credential: %q", text)
+		}
+	}
+	if !reflect.DeepEqual(m.savedProviders, before) {
+		t.Fatal("ownership failure changed the saved provider list")
+	}
+	after, err := os.ReadFile(m.userConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, invalidConfig) {
+		t.Fatal("ownership failure changed the unreadable config")
+	}
+}
+
+func TestProviderManagerMutationErrorsRedactConfigPathAndPreserveState(t *testing.T) {
+	for _, operation := range []string{"delete", "rename"} {
+		t.Run(operation, func(t *testing.T) {
+			m := managerTestModel(t)
+			t.Setenv(config.ActiveProviderEnv, m.providerName)
+			secret := "sk-proj-123456789012345678901234"
+			dir := filepath.Join(t.TempDir(), secret)
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			beforeConfig, err := os.ReadFile(m.userConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.userConfigPath = filepath.Join(dir, "config.json")
+			if err := os.WriteFile(m.userConfigPath, beforeConfig, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			m, _ = m.reloadProviderManagerRows()
+			store, err := config.ProviderKeyStoreAt(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const storedKey = "sk-proj-existing12345678901234567890"
+			if err := store.Set(m.providerName, storedKey); err != nil {
+				t.Fatal(err)
+			}
+			// A directory at the lock path prevents persistence on every OS,
+			// without relying on permissions that administrators may bypass.
+			if err := os.Mkdir(filepath.Join(dir, ".zero-provider-write.lock"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			beforeProviders := append([]config.ProviderProfile(nil), m.savedProviders...)
+			beforeProfile := m.providerProfile
+			beforeName := m.providerName
+
+			var next model
+			var message string
+			if operation == "delete" {
+				m = managerKey(t, m, testKeyText("d"))
+				next = managerKey(t, m, testKeyText("y"))
+				if next.providerWizard == nil || next.providerWizard.step != providerWizardStepManage {
+					t.Fatal("failed deletion must keep the manager open")
+				}
+				message = next.providerWizard.manageStatus
+			} else {
+				m = managerKey(t, m, testKeyText("e"))
+				m.providerWizard.editDraft.Name = "renamed-gateway"
+				m.providerWizard.editDraft.APIKey = "sk-proj-replacement12345678901234567890"
+				next, _ = m.saveManagerEdit()
+				if next.providerWizard == nil || next.providerWizard.step != providerWizardStepEditMenu {
+					t.Fatal("failed rename must keep the editor open")
+				}
+				message = next.providerWizard.err
+			}
+			if strings.Contains(message, secret) || !strings.Contains(message, redaction.RedactedSecret) {
+				t.Fatalf("mutation error must display a redacted credential: %q", message)
+			}
+			if !reflect.DeepEqual(next.savedProviders, beforeProviders) ||
+				!reflect.DeepEqual(next.providerProfile, beforeProfile) ||
+				next.providerName != beforeName || next.removedLiveRow != m.removedLiveRow ||
+				os.Getenv(config.ActiveProviderEnv) != beforeName {
+				t.Fatal("failed mutation changed the saved providers or live session")
+			}
+			afterConfig, err := os.ReadFile(m.userConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(afterConfig, beforeConfig) {
+				t.Fatal("failed mutation changed the persisted config")
+			}
+			if key, present, err := store.Get(beforeName); err != nil || !present || key != storedKey {
+				t.Fatalf("failed mutation changed the stored credential: present=%v err=%v", present, err)
+			}
+			if _, present, err := store.Get("renamed-gateway"); err != nil || present {
+				t.Fatalf("failed mutation created a renamed credential: present=%v err=%v", present, err)
+			}
+		})
+	}
 }

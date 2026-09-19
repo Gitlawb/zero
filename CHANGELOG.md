@@ -15,6 +15,7 @@ tagged. Until then, source builds report the version `dev`.
 ### Bug Fixes
 
 * **oauth:** validate provider configuration before authorization and immediately before token replacement across CLI, TUI, setup, and device flows, preserving existing credentials when validation fails
+* **providers:** redact credential-shaped values in CLI removal/rename errors and TUI provider-manager ownership and mutation errors
 
 ## [0.9.0](https://github.com/Gitlawb/zero/compare/v0.8.0...v0.9.0) (2026-09-15)
 
@@ -70,6 +71,7 @@ tagged. Until then, source builds report the version `dev`.
 * **agent:** cheap compaction — dedicated summarizer model, input cap… ([#532](https://github.com/Gitlawb/zero/issues/532)) ([6645f97](https://github.com/Gitlawb/zero/commit/6645f9744b37dda4d52ecc4631578d62cefc89de))
 * **providers:** parallelize isolated provider unit tests and shrink retry backoffs ([#955](https://github.com/Gitlawb/zero/issues/955)) ([d6b25fc](https://github.com/Gitlawb/zero/commit/d6b25fc3039a6b7d72a5703a87a097449792b102))
 * reduce startup and turn overhead ([#932](https://github.com/Gitlawb/zero/issues/932)) ([1fde941](https://github.com/Gitlawb/zero/commit/1fde941803c4295c11a4a14559f3c5217d1a9e69))
+
 ## [0.8.0](https://github.com/Gitlawb/zero/compare/v0.7.0...v0.8.0) (2026-08-21)
 
 

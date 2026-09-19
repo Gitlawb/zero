@@ -17,6 +17,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 const providerManagerMaxVisible = 10
@@ -115,7 +116,7 @@ func (m model) reloadProviderManagerRows() (model, tea.Cmd) {
 		owner, err := config.ProviderRowOwnershipAt(m.userConfigPath, resolvedNames, profile.Name)
 		if err != nil {
 			// An unreadable config is not a licence to write to it.
-			owner = config.ProviderRowOwnership{Reason: "config.json could not be read: " + err.Error()}
+			owner = config.ProviderRowOwnership{Reason: "config.json could not be read: " + redaction.ErrorMessage(err, redaction.Options{})}
 		}
 		row.owner = owner
 		if descriptor, ok := m.descriptorForProfile(profile); ok {
@@ -393,7 +394,7 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		exactName := row.owner.PersistedName
 		cfg, removedName, keyRemoved, err := config.RemoveProviderAndKey(m.userConfigPath, exactName)
 		if err != nil {
-			wizard.manageStatus = "Delete failed: " + err.Error()
+			wizard.manageStatus = "Delete failed: " + redaction.ErrorMessage(err, redaction.Options{})
 			return m, nil
 		}
 		exactName = removedName
@@ -736,7 +737,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		edit.APIKey = key
 	}
 	if _, err := config.EditProvider(m.userConfigPath, edit); err != nil {
-		wizard.err = err.Error()
+		wizard.err = redaction.ErrorMessage(err, redaction.Options{})
 		return m, nil
 	}
 	// Decide whether the edited row is the live one BEFORE the list is rewritten:

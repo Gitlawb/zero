@@ -558,7 +558,7 @@ func parseProviderRepairArgs(args []string) (providerRepairOptions, bool, error)
 func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseProviderNamesArgs(args, 1, "usage: zero providers remove <name>")
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeExecUsageError(stderr, redaction.ErrorMessage(err, redaction.Options{}))
 	}
 	if help {
 		if err := writeProvidersHelp(stdout); err != nil {
@@ -568,12 +568,12 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	}
 	configPath, err := deps.userConfigPath()
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	name := options.names[0]
 	_, persisted, err := resolvePersistedProviderName(configPath, name)
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	// RemoveProvider only ever matches profiles persisted in config.json (see
 	// config.ProviderPersisted), but a provider can be visible in
@@ -594,7 +594,7 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	}
 	cfg, name, keyRemoved, err := config.RemoveProviderAndKey(configPath, options.names[0])
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	keyRetained := config.CredentialKeyRetained(cfg.Providers, name)
 	if options.json {
@@ -639,7 +639,7 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseProviderNamesArgs(args, 2, "usage: zero providers rename <old> <new>")
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeExecUsageError(stderr, redaction.ErrorMessage(err, redaction.Options{}))
 	}
 	if help {
 		if err := writeProvidersHelp(stdout); err != nil {
@@ -649,12 +649,12 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 	}
 	configPath, err := deps.userConfigPath()
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	oldName := options.names[0]
 	_, persisted, err := resolvePersistedProviderName(configPath, oldName)
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	if !persisted {
 		if exit, handled := reportUnpersistedProviderRename(stdout, stderr, deps, oldName, options.json, configPath); handled {
@@ -669,7 +669,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 	}
 	cfg, err := config.RenameProvider(configPath, oldName, options.names[1])
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{

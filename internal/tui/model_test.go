@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1233,6 +1234,63 @@ func TestResumeHonorsPriorCompaction(t *testing.T) {
 	}
 	if next.removedLiveRow != "" {
 		t.Fatalf("removedLiveRow = %q, want cleared when resume supplies the live provider", next.removedLiveRow)
+	}
+}
+
+func TestResumeAfterDeletingLiveProjectRow(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		deleteLiveRow bool
+		sameSession   bool
+	}{
+		{name: "different session clears retained identity", deleteLiveRow: true},
+		{name: "same session retains deleted identity", deleteLiveRow: true, sameSession: true},
+		{name: "no deletion preserves nonempty live fields"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var built []config.ProviderProfile
+			m := caseSiblingModel(t, "WORK", &built)
+			store := testSessionStore(t)
+			previous, err := store.Create(sessions.CreateInput{Provider: "WORK", ModelID: m.modelName})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := store.Create(sessions.CreateInput{Provider: "work", ModelID: "resumed-model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.sessionStore = store
+			m.activeSession = previous
+			before, err := os.ReadFile(m.userConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.deleteLiveRow {
+				m = selectManagerRow(t, m, "WORK")
+				m = managerKey(t, m, testKeyText("d"))
+				next, cmd := m.handleProviderWizardKey(testKeyText("y"))
+				m = drainProviderManagerCmds(t, next, cmd)
+				if m.removedLiveRow != "WORK" {
+					t.Fatalf("delete did not retain live identity: %q", m.removedLiveRow)
+				}
+				assertUserRowUntouched(t, m, before)
+				m.providerWizard = nil
+			}
+			wantProvider, wantModel, wantRemoved := m.providerName, m.modelName, m.removedLiveRow
+			if tc.sameSession {
+				target = previous
+			} else if tc.deleteLiveRow {
+				wantProvider, wantModel, wantRemoved = "work", "resumed-model", ""
+			}
+			next, message := m.handleResumeCommand(target.SessionID)
+			if message != "" || next.activeSession.SessionID != target.SessionID {
+				t.Fatalf("resume failed: %s", message)
+			}
+			if next.removedLiveRow != wantRemoved || next.providerName != wantProvider || next.modelName != wantModel || next.activeProviderRowName() != wantProvider {
+				t.Fatalf("resume identity = (%q, %q, %q, %q), want (%q, %q, %q, %q)", next.removedLiveRow, next.providerName, next.modelName, next.activeProviderRowName(), wantRemoved, wantProvider, wantModel, wantProvider)
+			}
+			assertUserRowUntouched(t, next, before)
+		})
 	}
 }
 
