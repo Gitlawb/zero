@@ -5,23 +5,28 @@ package sandbox
 import (
 	"fmt"
 	"io"
-
-	"golang.org/x/sys/windows"
 )
 
 func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writer) int {
+	// OWN THE CHILDREN BEFORE ANY CHILD CAN EXIST, so one created later inherits
+	// job membership at creation and a forcibly terminated helper cannot leave a
+	// suspended one behind. A failure here is not fatal: it costs the
+	// kill-on-close guarantee, not the sandbox, and the ordinary unwind paths
+	// still run.
+	//
+	// THE HANDLE IS NEVER CLOSED, and that is the contract rather than a leak.
+	// Closing it IS the kill: this process is a member of the job, so releasing
+	// the last handle terminates it where it stands. A deferred close therefore
+	// killed this helper during its own return, before the exit code below could
+	// be handed back, and every sandboxed command reported 0 however it really
+	// ended. Process exit releases the handle, which is exactly the event the
+	// guarantee is built on.
+	_, _ = windowsJoinChildKillJob()
 	// Fully restricted DenyRead tokens cannot load ordinary Users-granted
 	// system binaries without SID broadening; broadening is permanently off
 	// because it admits write grants outside WriteRoots. Reject on both the
 	// elevated and unelevated restricted-token tiers before setup or launch
 	// until access-time confinement exists (PR #640).
-	// Established BEFORE any child can exist, so a child created later inherits
-	// job membership at creation and a forcibly terminated helper cannot leave a
-	// suspended one behind. A failure here is not fatal: it costs the kill-on-close
-	// guarantee, not the sandbox, and the ordinary unwind paths still run.
-	if job, err := joinWindowsChildKillJob(); err == nil {
-		defer func() { _ = windows.CloseHandle(job) }()
-	}
 	if err := windowsDenyReadRestrictedTokenUnsupported(config); err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 		return 1

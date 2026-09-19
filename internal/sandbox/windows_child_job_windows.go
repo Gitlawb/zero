@@ -37,6 +37,11 @@ import (
 // visible hang for an invisible leak. It is a reasonable backstop, not the fix.
 //
 // Reported by @jatmn.
+// windowsJoinChildKillJob is the seam the command runner calls. Production value
+// only; a test substitutes it to prove the runner takes ownership on EVERY path,
+// including the ones that refuse the command a few lines later.
+var windowsJoinChildKillJob = joinWindowsChildKillJob
+
 func joinWindowsChildKillJob() (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
