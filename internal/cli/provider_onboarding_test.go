@@ -470,7 +470,10 @@ func TestRunProvidersUseSurfacesMalformedConfig(t *testing.T) {
 }
 
 func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	t.Setenv("OPENAI_API_KEY", "sk-env")
+	t.Setenv(config.ActiveProviderEnv, "openai")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
@@ -493,7 +496,10 @@ func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
 }
 
 func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	t.Setenv("OPENAI_API_KEY", "sk-env")
+	t.Setenv(config.ActiveProviderEnv, "openai")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
@@ -518,7 +524,10 @@ func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
 }
 
 func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	t.Setenv("OPENAI_API_KEY", "sk-env")
+	t.Setenv(config.ActiveProviderEnv, "openai")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
@@ -534,7 +543,10 @@ func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
 }
 
 func TestRunProvidersRenameEnvDerivedJSONKeepsSchema(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	t.Setenv("OPENAI_API_KEY", "sk-env")
+	t.Setenv(config.ActiveProviderEnv, "openai")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
@@ -909,6 +921,8 @@ func TestRunProvidersRemoveReportsRetainedSharedCredential(t *testing.T) {
 }
 
 func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	t.Run("case variant selects persisted spelling", func(t *testing.T) {
 		configPath := filepath.Join(t.TempDir(), "config.json")
 		writeProviderOnboardingConfig(t, configPath, config.FileConfig{
@@ -929,6 +943,7 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 
 	t.Run("environment provider accepts case variant", func(t *testing.T) {
 		t.Setenv("OPENAI_API_KEY", "sk-env")
+		t.Setenv(config.ActiveProviderEnv, "openai")
 		configPath := filepath.Join(t.TempDir(), "config.json")
 		writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 		var stdout, stderr bytes.Buffer
@@ -947,8 +962,16 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
+		deps := providerSetupDeps(configPath)
+		deps.resolveConfig = func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.Resolve(config.ResolveOptions{
+				UserConfigPath: configPath,
+				Env:            map[string]string{},
+				Overrides:      overrides,
+			})
+		}
 		var stdout, stderr bytes.Buffer
-		if code := runWithDeps([]string{"providers", "use", "ſ"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitCrash {
+		if code := runWithDeps([]string{"providers", "use", "ſ"}, &stdout, &stderr, deps); code != exitCrash {
 			t.Fatalf("use exit = %d, want crash for distinct identity; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 		}
 		after, err := os.ReadFile(configPath)
