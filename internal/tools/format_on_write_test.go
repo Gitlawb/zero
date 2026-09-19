@@ -497,7 +497,12 @@ func TestPostWriteFormatterSwapCannotPublishOrObserveToken(t *testing.T) {
 	for _, toolName := range []string{"write", "edit"} {
 		for _, aliasKind := range []string{"symlink", "hardlink"} {
 			t.Run(toolName+"/"+aliasKind, func(t *testing.T) {
-				dir := t.TempDir()
+				// The tools key tracker entries by the physical path. Match that
+				// spelling when TempDir is aliased (macOS /var -> /private/var).
+				dir, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
 				token := filepath.Join(dir, "bridge-token")
 				target := filepath.Join(dir, "ordinary.go")
 				const secret = "formatter-swap-secret"
@@ -529,7 +534,9 @@ func TestPostWriteFormatterSwapCannotPublishOrObserveToken(t *testing.T) {
 					return secret
 				}}
 				var result Result
+				formatterCalled := false
 				formatter := func(_ context.Context, _ *os.Root, _, _, _, written string, _ os.FileMode) formatOnWriteResult {
+					formatterCalled = true
 					// The injected formatter boundary is entered only after the rooted
 					// write and returns immediately before publication/post-write read.
 					if err := os.Remove(target); err != nil {
@@ -558,6 +565,9 @@ func TestPostWriteFormatterSwapCannotPublishOrObserveToken(t *testing.T) {
 					result = tool.RunWithOptions(context.Background(), map[string]any{
 						"path": "ordinary.go", "old_string": "Old", "new_string": "F",
 					}, options)
+				}
+				if !formatterCalled {
+					t.Fatalf("tool refused before exercising the formatter swap: %s", result.Output)
 				}
 				if result.Status != StatusError {
 					t.Fatalf("swapped %s result status = %s, want error: %q", aliasKind, result.Status, result.Output)

@@ -36,14 +36,14 @@ func TestLoadOpenFileChecksConsumedHandle(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer file.Close()
-			// The name is innocent now, but the consumed descriptor is unchanged.
-			if err := os.Remove(candidate); err != nil {
+			// An innocent lookup path must not authorize a protected handle or
+			// replace the bytes read from an ordinary handle. Use a separate name
+			// instead of unlinking an open file, which Windows does not permit.
+			lookup := filepath.Join(root, "replacement")
+			if err := os.WriteFile(lookup, []byte("GIF89a replacement"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(candidate, []byte("GIF89a replacement"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			image, err := LoadOpenFile(file, candidate, root)
+			image, err := LoadOpenFile(file, lookup, root)
 			if protected {
 				if err == nil || len(image.Data) != 0 || !strings.Contains(err.Error(), "holds the remote bridge token") {
 					t.Fatalf("consumed protected handle: %+v, %v", image, err)
