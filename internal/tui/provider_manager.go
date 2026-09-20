@@ -400,6 +400,7 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		exactName = removedName
 		activeAfter = cfg.ActiveProvider
 		if keyRemoved {
+			m = m.applyProviderKeyRemovalToSession(exactName)
 			notes = []string{"Deleted " + name + ". Its stored API key will also be deleted."}
 		} else if row.profile.APIKeyStored {
 			notes = []string{"Deleted " + name + ". Kept its stored API key because another saved provider still uses that credential."}
