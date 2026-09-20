@@ -1435,6 +1435,66 @@ func TestWriteFileAcceptsContentAlias(t *testing.T) {
 	}
 }
 
+func TestWriteFilePreservesCRLFAndUTF8BOMOnOverwrite(t *testing.T) {
+	root := t.TempDir()
+	tool := NewScopedWriteFileTool(root, nil)
+
+	original := "\xef\xbb\xbfline1\r\nline2\r\n"
+	targetPath := filepath.Join(root, "crlf_bom.txt")
+	if err := os.WriteFile(targetPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	newContent := "updated line1\nupdated line2\n"
+	result := tool.Run(context.Background(), map[string]any{
+		"path":      "crlf_bom.txt",
+		"content":   newContent,
+		"overwrite": true,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("expected status OK, got %s: %s", result.Status, result.Output)
+	}
+
+	written, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "\xef\xbb\xbfupdated line1\r\nupdated line2\r\n"
+	if string(written) != expected {
+		t.Fatalf("expected preserved CRLF & BOM: %q, got: %q", expected, string(written))
+	}
+}
+
+func TestWriteFileToolOverwriteIgnoresBinary(t *testing.T) {
+	root := t.TempDir()
+	tool := NewScopedWriteFileTool(root, nil)
+
+	path := filepath.Join(root, "binary.bin")
+	original := []byte("data\r\n\x00binary")
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatalf("write original file: %v", err)
+	}
+
+	result := tool.Run(context.Background(), map[string]any{
+		"path":      "binary.bin",
+		"content":   "new content\nwith lf",
+		"overwrite": true,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("expected overwrite ok, got %s: %s", result.Status, result.Output)
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read overwritten file: %v", err)
+	}
+
+	if strings.Contains(string(written), "\r\n") {
+		t.Fatalf("expected LF preserved for binary file, got CRLF in %q", string(written))
+	}
+}
+
 // gitApplyUnavailable reports whether an apply_patch failure is due to the git
 // binary being absent (an environment condition worth skipping) rather than a
 // real regression (which must fail the test). apply_patch shells out to

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -117,6 +118,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if priorContentKnown {
 		expectedContent = &priorContent
 	}
+	if existed && priorContentKnown {
+		hasBOM, isCRLF := detectLineEndingAndBOM([]byte(priorContent))
+		content = normalizeContent(content, hasBOM, isCRLF)
+	}
 	if err := commitFileContents(absolutePath, priorInfo, expectedContent, content); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
@@ -194,4 +199,31 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 // is allowed (writing an empty file), so allowEmpty is true.
 func fileContentArg(args map[string]any) (string, error) {
 	return aliasedStringArg(args, []string{"content", "contents", "text", "body", "data", "file_content"}, "", true, true)
+}
+
+func detectLineEndingAndBOM(data []byte) (hasBOM bool, crlf bool) {
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		hasBOM = true
+		data = data[3:]
+	}
+	if bytes.IndexByte(data, 0) != -1 {
+		return hasBOM, false
+	}
+	scanLen := len(data)
+	if scanLen > 4096 {
+		scanLen = 4096
+	}
+	crlf = bytes.Contains(data[:scanLen], []byte("\r\n"))
+	return hasBOM, crlf
+}
+
+func normalizeContent(content string, preserveBOM bool, preserveCRLF bool) string {
+	if preserveCRLF {
+		content = strings.ReplaceAll(content, "\r\n", "\n")
+		content = strings.ReplaceAll(content, "\n", "\r\n")
+	}
+	if preserveBOM && !strings.HasPrefix(content, "\xef\xbb\xbf") {
+		content = "\xef\xbb\xbf" + content
+	}
+	return content
 }
