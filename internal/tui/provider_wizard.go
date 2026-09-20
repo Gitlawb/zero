@@ -1391,6 +1391,24 @@ func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (str
 	return "", false, nil
 }
 
+// applyProviderKeyRemovalToSession mirrors a removed credential into every
+// in-memory profile sharing its identity, including a deleted live row.
+func (m model) applyProviderKeyRemovalToSession(name string) model {
+	// Copy before mutating: model copies share the savedProviders slice.
+	updated := make([]config.ProviderProfile, len(m.savedProviders))
+	copy(updated, m.savedProviders)
+	for index := range updated {
+		if config.SameProviderIdentity(updated[index].Name, name) {
+			updated[index].APIKeyStored = false
+		}
+	}
+	m.savedProviders = updated
+	if config.SameProviderIdentity(m.providerProfile.Name, name) {
+		m.providerProfile.APIKeyStored = false
+	}
+	return m
+}
+
 // applyManageKeyChoice acts on the keep/replace/remove selection. Keep closes the
 // wizard (nothing changes); Replace routes to credential entry (overwrites on save);
 // Remove deletes the stored key and its marker.
