@@ -532,7 +532,8 @@ func sessionRefersToPersistedRow(live string, row string, providers []config.Pro
 // providerManagerCleanupMsg reports the off-thread half of a delete: the
 // stored-key removal outcome and the OAuth-login hint.
 type providerManagerCleanupMsg struct {
-	notes []string
+	notes          []string
+	removedKeyName string
 }
 
 // providerManagerCleanupCmd finishes a delete off the UI goroutine: the
@@ -545,10 +546,15 @@ func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile
 	catalogID := profile.CatalogID
 	return func() tea.Msg {
 		notes := []string{}
+		removedKeyName := ""
 		if deleteStoredKey {
 			keyStore, storeErr := providerKeyStoreForPath(configPath)
 			if storeErr == nil {
-				_, storeErr = keyStore.Delete(name)
+				var removed bool
+				removed, storeErr = keyStore.Delete(name)
+				if storeErr == nil && removed {
+					removedKeyName = name
+				}
 			}
 			if storeErr != nil {
 				notes = append(notes, "Warning: its stored API key could not be deleted ("+redaction.ErrorMessage(storeErr, redaction.Options{})+").")
@@ -557,11 +563,14 @@ func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile
 		if login, ok := oauthLoginName(config.ProviderProfile{Name: name, CatalogID: catalogID}); ok {
 			notes = append(notes, "OAuth login kept — remove with `zero auth logout "+login+"`.")
 		}
-		return providerManagerCleanupMsg{notes: notes}
+		return providerManagerCleanupMsg{notes: notes, removedKeyName: removedKeyName}
 	}
 }
 
 func (m model) applyProviderManagerCleanup(msg providerManagerCleanupMsg) (model, tea.Cmd) {
+	if msg.removedKeyName != "" {
+		m = m.applyProviderKeyRemovalToSession(msg.removedKeyName)
+	}
 	if len(msg.notes) == 0 {
 		return m, nil
 	}

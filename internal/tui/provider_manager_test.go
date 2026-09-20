@@ -984,6 +984,94 @@ func TestProviderManagerRemoveDeletesKeyWhenSurvivorNeverClaimedIt(t *testing.T)
 	}
 }
 
+func TestProviderManagerDeleteReconcilesStoredKeyMarkers(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		retainKey  bool
+		failDelete bool
+	}{
+		{name: "successful removal"},
+		{name: "shared credential retained", retainKey: true},
+		{name: "credential deletion fails", failDelete: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+			dir := t.TempDir()
+			t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(dir, "oauth.json"))
+			configPath := filepath.Join(dir, "config.json")
+			profiles := []config.ProviderProfile{
+				{Name: "work", APIKeyStored: true},
+				{Name: "WORK", APIKeyStored: tc.retainKey},
+				{Name: "other", APIKeyStored: true},
+			}
+			data, err := json.Marshal(config.FileConfig{ActiveProvider: "work", Providers: profiles})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := config.ProviderKeyStoreAt(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Set("work", "shared-key"); err != nil {
+				t.Fatal(err)
+			}
+			// Resolved session state can carry a marker from another source even
+			// when the persisted sibling does not claim the shared credential.
+			profiles[1].APIKeyStored = true
+			live := profiles[0]
+			live.APIKey = "live-inline-key"
+			m := newModel(context.Background(), Options{
+				ProviderName: "work", ProviderProfile: live,
+				SavedProviders: profiles, UserConfigPath: configPath,
+			})
+			m, _ = m.openProviderManager()
+			m = managerKey(t, m, testKeyText("d"))
+			lockPath := filepath.Join(dir, "credentials.enc.lock")
+			if tc.failDelete {
+				if err := os.Remove(lockPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(lockPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			next, cmd := m.handleProviderWizardKey(testKeyText("y"))
+			next = drainProviderManagerCmds(t, next, cmd)
+			if tc.failDelete {
+				if err := os.Remove(lockPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wantStored := tc.retainKey || tc.failDelete
+			key, present, err := store.Get("WORK")
+			if err != nil || present != wantStored || (present && key != "shared-key") {
+				t.Fatalf("credential outcome: present=%v err=%v, want present=%v and unchanged key", present, err, wantStored)
+			}
+			if next.providerProfile.APIKeyStored != wantStored {
+				t.Errorf("live APIKeyStored = %v, want %v after manager cleanup", next.providerProfile.APIKeyStored, wantStored)
+			}
+			for _, profile := range next.savedProviders {
+				want := true
+				if profile.Name == "WORK" {
+					want = wantStored
+				}
+				if profile.APIKeyStored != want {
+					t.Errorf("saved %s APIKeyStored = %v, want %v", profile.Name, profile.APIKeyStored, want)
+				}
+			}
+			if next.providerName != "work" || next.providerProfile.APIKey != "live-inline-key" {
+				t.Fatal("cleanup changed the continuing provider or its inline credential")
+			}
+			if !tc.failDelete && (next.removedLiveRow != "work" || len(next.savedProviders) != 2) {
+				t.Fatal("manager did not remove and retain the live row's identity")
+			}
+		})
+	}
+}
+
 // A row visible only because Resolve() synthesized it from an env var has no
 // persisted profile and no stored key, so the confirmation must make no claim
 // about a key rather than promising a removal that cannot happen. The same
