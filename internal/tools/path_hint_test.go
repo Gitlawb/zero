@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -138,11 +139,36 @@ func TestAnnotateMissingPosixPathError(t *testing.T) {
 	}
 }
 
+// posixWiringRequest builds a POSIX-shaped request that resolves only against
+// the test-owned tree under root on the host running the test. On Windows a
+// leading-slash request is not absolute and is joined under root, which is the
+// production behavior under test. On Unix it is already absolute, so root is
+// prepended explicitly to keep the test hermetic; a fixed "/home/..." pathname
+// would read host state the test does not own.
+func posixWiringRequest(root string, relative string) string {
+	if runtime.GOOS == "windows" {
+		return "/" + relative
+	}
+	return filepath.ToSlash(root) + "/" + relative
+}
+
 func TestResolveScopedReadPathForGOOSAnnotatesWindowsPosixMiss(t *testing.T) {
 	root := t.TempDir()
-	const requested = "/home/zero-hint-missing/missing.txt"
+	const existingRelative = "home/zero-hint-real/real.txt"
+	writeTestFile(t, filepath.Join(root, filepath.FromSlash(existingRelative)), "real")
 
-	_, _, err := resolveScopedReadPathForGOOS("windows", root, nil, requested)
+	// The resolved relative path proves the resolution stayed inside the
+	// test-owned tree rather than matching the hint text only.
+	_, relative, err := resolveScopedReadPathForGOOS("windows", root, nil, posixWiringRequest(root, existingRelative))
+	if err != nil {
+		t.Fatalf("expected the POSIX-shaped workspace path to resolve, got %v", err)
+	}
+	if relative != existingRelative {
+		t.Fatalf("resolved relative path = %q, want %q", relative, existingRelative)
+	}
+
+	const missingRelative = "home/zero-hint-missing/missing.txt"
+	_, _, err = resolveScopedReadPathForGOOS("windows", root, nil, posixWiringRequest(root, missingRelative))
 	if err == nil {
 		t.Fatal("expected a resolution error for a missing path")
 	}
@@ -156,7 +182,7 @@ func TestResolveScopedReadPathForGOOSAnnotatesWindowsPosixMiss(t *testing.T) {
 		t.Fatalf("expected missing-path error to keep fs.ErrNotExist, got %v", err)
 	}
 
-	if _, _, err := resolveScopedReadPathForGOOS("linux", root, nil, requested); err == nil || strings.Contains(err.Error(), "[zero] path hint:") {
+	if _, _, err := resolveScopedReadPathForGOOS("linux", root, nil, posixWiringRequest(root, missingRelative)); err == nil || strings.Contains(err.Error(), "[zero] path hint:") {
 		t.Fatalf("linux must not get the windows hint, got %v", err)
 	}
 
