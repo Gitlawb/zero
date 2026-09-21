@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/agentsessions"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -25,6 +26,22 @@ type scriptedProvider struct {
 	requests   []zeroruntime.CompletionRequest
 	beforeCall func(int)
 	calls      int
+}
+
+func TestResumeSummarySanitizesPersistedModelMetadata(t *testing.T) {
+	secret := "sk-ant-api03-" + strings.Repeat("A", 24)
+	m := model{modelName: "active-model", providerName: "provider"}
+	summary := m.formatResumeSummary(sessions.Metadata{
+		SessionID: "session-1",
+		ModelID:   "claude\x1b[2K-opus\n" + secret,
+	}, 3)
+	if strings.Contains(summary, "\x1b") || strings.Contains(summary, secret) {
+		t.Fatalf("unsafe model metadata reached the resume summary: %q", summary)
+	}
+	want := "recorded: " + agentsessions.DisplayField("claude\x1b[2K-opus\n"+secret)
+	if !strings.Contains(summary, want) {
+		t.Fatalf("resume summary lost safe model text: %q", summary)
+	}
 }
 
 func (provider *scriptedProvider) StreamCompletion(
@@ -1325,8 +1342,13 @@ func TestResumePickerDetailRendersOnlyAtMediumWidth(t *testing.T) {
 	}
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /resume to start asynchronous session discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
 	if next.picker == nil || next.picker.kind != pickerSession {
 		t.Fatalf("expected /resume to open the session picker, got %#v", next.picker)
 	}
@@ -1360,8 +1382,13 @@ func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
 
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /resume to start asynchronous session discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
 	if next.picker == nil {
 		t.Fatal("expected /resume to open the session picker")
 	}
@@ -1396,8 +1423,13 @@ func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
 	}
 	m := newModel(context.Background(), Options{SessionStore: store, Cwd: "/repo"})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /resume to start asynchronous session discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
 	if next.picker == nil || len(next.picker.items) != 1 {
 		t.Fatalf("expected one picker item, got %#v", next.picker)
 	}
