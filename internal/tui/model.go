@@ -726,6 +726,24 @@ type peerReceiptErrorMsg struct{ err error }
 
 type peerApprovalExpiredMsg struct{ messageID string }
 
+// isPeerDelivery reports whether msg is cross-session peer traffic: every
+// peer*Msg type declared above, and nothing else.
+//
+// The list is closed on purpose and a test reads this file to keep it honest. A
+// new peer message type that is not added here fails
+// TestEveryPeerMessageTypeEndsTheFullAutoOffer by name, because the thing this
+// decides (see updateModel) is a permission boundary, and a type that was merely
+// forgotten would keep a full-auto offer alive across traffic the user was
+// looking at.
+func isPeerDelivery(msg tea.Msg) bool {
+	switch msg.(type) {
+	case peerMessageMsg, peerStatusMsg, peerHeldReleasedMsg, peerDecisionMsg,
+		peerRuntimeErrorMsg, peerReceiptErrorMsg, peerApprovalExpiredMsg:
+		return true
+	}
+	return false
+}
+
 type agentRowMsg struct {
 	runID int
 	row   transcriptRow
@@ -1401,6 +1419,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if next, cmd, routed := m.routeBTWParentMessage(msg); routed {
 		return next, cmd
+	}
+	// CROSS-SESSION TRAFFIC ENDS A FULL-AUTO OFFER, every kind of it.
+	//
+	// The offer is valid only until the next user-visible input transition,
+	// whatever delivers it (see sttPartialMsg below). Paste, blur, mouse, the
+	// clipboard and dictation all honoured that; peer delivery did not. A peer
+	// message raises an approval prompt or lands in the inbox, a held message is
+	// released after a mode sync, a status line or a peer error is appended to the
+	// transcript, an approval expires and its prompt goes away. Each of those
+	// changes what the user is looking at, so shift+tab, then peer traffic, then
+	// ctrl+g entered full-auto with the confirmation several events behind them.
+	//
+	// Cleared HERE, for the whole family at the dispatch boundary, rather than in
+	// the three handlers the report named. Those were the ones that reproduced;
+	// the decision, expiry and error deliveries are the same kind of transition
+	// and were armed the same way, and a rule written per handler is a rule the
+	// next handler forgets. Reported by @jatmn.
+	if isPeerDelivery(msg) {
+		m.unsafeArmed = false
 	}
 	switch msg := msg.(type) {
 	case uv.CellSizeEvent:
