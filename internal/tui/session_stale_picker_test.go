@@ -192,3 +192,137 @@ func TestTheImportNoteComparesAForeignWorkspaceWithoutResolvingIt(t *testing.T) 
 		t.Fatalf("note = %q", note)
 	}
 }
+
+// foreignTranscriptModel seeds a real Claude transcript and returns a model
+// pointed at it, so an import that is NOT refused actually does something —
+// which is what makes the refusal assertions below mean anything.
+func foreignTranscriptModel(t *testing.T) (model, *sessions.Store, agentsessions.ForeignSession) {
+	t.Helper()
+	home := t.TempDir()
+	transcript := filepath.Join(home, ".claude", "projects", "-w", "abc.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte(
+		`{"type":"user","cwd":"/w","sessionId":"abc","message":{"role":"user","content":"port the parser"}}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := agentsessions.Env{Home: home, Getenv: func(name string) string {
+		if name == "CLAUDE_CONFIG_DIR" {
+			return filepath.Join(home, ".claude")
+		}
+		return ""
+	}}
+	agentsessions.InvalidateDiscovery()
+	found, err := agentsessions.ClaudeCode(env).Discover("")
+	if err != nil || len(found) != 1 {
+		t.Fatalf("discover: %v (%d results)", err, len(found))
+	}
+	store := testSessionStore(t)
+	m := model{
+		sessionStore:     store,
+		agentSessionsEnv: env,
+		cwd:              t.TempDir(),
+		now:              func() time.Time { return time.Unix(0, 0) },
+	}
+	return m, store, found[0]
+}
+
+func storedSessionCount(t *testing.T, store *sessions.Store) int {
+	t.Helper()
+	metas, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(metas)
+}
+
+// A RUN IN FLIGHT REFUSES EVERY RESUME ROUTE, NOT JUST THE CHEAPEST ONE.
+// resumeWhileRunningText calls itself the refusal every resume route shares,
+// but the check lived inside startResumeCommand's local-id arm. Both foreign
+// routes walked past it: a typed `agent:id`, and a picker row with a
+// ForeignSource chosen through choosePicker, which reaches
+// startForeignSessionImport directly. Neither switched the active session at
+// completion — finishForeignSessionImport already declined that — but both ran
+// the import first, which reads the foreign transcript, CREATES A DURABLE ZERO
+// SESSION and invalidates the discovery cache. The local route refuses all of
+// that up front, so these must too: no command dispatched, no in-flight flag
+// left set, and no session in the store.
+func TestForeignImportRoutesRefuseWhileARunIsActive(t *testing.T) {
+	t.Run("typed agent:id", func(t *testing.T) {
+		m, store, _ := foreignTranscriptModel(t)
+		before := storedSessionCount(t, store)
+		m.pending = true
+		next, text, cmd := m.startResumeCommand("claude-code:abc")
+		if text != resumeWhileRunningText {
+			t.Fatalf("text = %q, want the shared mid-run refusal", text)
+		}
+		if cmd != nil {
+			t.Fatal("an import command was dispatched during a run")
+		}
+		if next.sessionImportInFlight {
+			t.Fatal("sessionImportInFlight was left set by a refused import")
+		}
+		if got := storedSessionCount(t, store); got != before {
+			t.Fatalf("stored sessions = %d, want %d: a refused import still created one", got, before)
+		}
+	})
+
+	t.Run("picker foreign row through choosePicker", func(t *testing.T) {
+		m, store, source := foreignTranscriptModel(t)
+		before := storedSessionCount(t, store)
+		m.pending = true
+		m.picker = &commandPicker{
+			kind:     pickerSession,
+			items:    []pickerItem{{Label: "port the parser", Value: "claude-code:abc", ForeignSource: &source}},
+			allItems: []pickerItem{{Label: "port the parser", Value: "claude-code:abc", ForeignSource: &source}},
+		}
+		updated, cmd := m.choosePicker()
+		next := updated.(model)
+		if cmd != nil {
+			t.Fatal("an import command was dispatched from the picker during a run")
+		}
+		if next.sessionImportInFlight {
+			t.Fatal("sessionImportInFlight was left set by a refused picker import")
+		}
+		if !transcriptContains(next.transcript, "Cannot resume sessions while a run is active") {
+			t.Fatalf("the picker refusal was not explained: %+v", next.transcript)
+		}
+		if got := storedSessionCount(t, store); got != before {
+			t.Fatalf("stored sessions = %d, want %d: a refused picker import still created one", got, before)
+		}
+	})
+
+	// THE OTHER DIRECTION, or the fix is just "imports never work". Idle, both
+	// routes dispatch, and the dispatched command really imports.
+	t.Run("idle typed agent:id still imports", func(t *testing.T) {
+		m, store, _ := foreignTranscriptModel(t)
+		next, text, cmd := m.startResumeCommand("claude-code:abc")
+		if text != "" || cmd == nil || !next.sessionImportInFlight {
+			t.Fatalf("idle import did not start: text=%q cmd=%v inFlight=%v", text, cmd != nil, next.sessionImportInFlight)
+		}
+		msg, ok := cmd().(foreignSessionImportedMsg)
+		if !ok || msg.err != nil {
+			t.Fatalf("idle import failed: %#v", msg)
+		}
+		if got := storedSessionCount(t, store); got != 1 {
+			t.Fatalf("stored sessions = %d, want the imported one", got)
+		}
+	})
+
+	t.Run("idle picker foreign row still imports", func(t *testing.T) {
+		m, store, source := foreignTranscriptModel(t)
+		next, text, cmd := m.startForeignSessionImport(source)
+		if text != "" || cmd == nil || !next.sessionImportInFlight {
+			t.Fatalf("idle picker import did not start: text=%q cmd=%v inFlight=%v", text, cmd != nil, next.sessionImportInFlight)
+		}
+		msg, ok := cmd().(foreignSessionImportedMsg)
+		if !ok || msg.err != nil {
+			t.Fatalf("idle picker import failed: %#v", msg)
+		}
+		if got := storedSessionCount(t, store); got != 1 {
+			t.Fatalf("stored sessions = %d, want the imported one", got)
+		}
+	})
+}

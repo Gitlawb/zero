@@ -308,19 +308,29 @@ func (m model) sessionPickerResultIsCurrent(msg sessionPickerLoadedMsg) bool {
 // command whose result is applied by finishForeignSessionImport.
 func (m model) startResumeCommand(args string) (model, string, tea.Cmd) {
 	args = strings.TrimSpace(args)
+	// CHECKED HERE, WHERE THE MUTATION STARTS, not only at /resume dispatch.
+	// The command's guard runs when discovery is requested; a picker choice
+	// lands later, after the picker has arrived, and by then a prompt may have
+	// started a run. Resuming then swaps activeSession under a live run whose
+	// completion appends its events to whichever session is active — the
+	// earlier run's transcript spliced into another conversation. Refusing
+	// before any mutation is the only order that works; a generation check on
+	// the result alone cannot cover a run that starts while the same request is
+	// still current.
+	//
+	// BEFORE THE BRANCH, NOT INSIDE THE LOCAL ARM. This check used to sit under
+	// `!strings.Contains(args, ":")`, so a foreign reference walked straight
+	// past it: `/resume claude-code:<id>` during a run set sessionImportInFlight
+	// and dispatched the import, which reads the foreign transcript, CREATES A
+	// DURABLE ZERO SESSION and calls InvalidateDiscovery. finishForeignSessionImport
+	// then declined to switch to it — so the side effects the local route
+	// refuses outright all happened anyway, and the user got a session they
+	// never reached. A refusal that only covers the cheapest route is not the
+	// shared rule this constant claims it is. Reported by @jatmn.
+	if m.pending {
+		return m, resumeWhileRunningText, nil
+	}
 	if !strings.Contains(args, ":") {
-		// CHECKED HERE, WHERE THE SWITCH HAPPENS, not only at /resume dispatch.
-		// The command's guard runs when discovery is requested; a picker choice
-		// lands later, after the picker has arrived, and by then a prompt may
-		// have started a run. Resuming then swaps activeSession under a live
-		// run whose completion appends its events to whichever session is
-		// active — the earlier run's transcript spliced into another
-		// conversation. Refusing before any mutation is the only order that
-		// works; a generation check on the result alone cannot cover a run
-		// that starts while the same request is still current.
-		if m.pending {
-			return m, resumeWhileRunningText, nil
-		}
 		next, text := m.handleResumeCommand(args)
 		return next, text, nil
 	}
@@ -609,7 +619,15 @@ func (m model) importForeignSessionCmd(ref string) tea.Cmd {
 	}
 }
 
+// startForeignSessionImport is the picker's route into an import. It is a
+// SEPARATE ENTRY POINT from startResumeCommand — choosePicker calls it directly
+// for a foreign row — so the mid-run refusal has to be repeated here rather than
+// inherited. Without it, choosing an un-imported row during a run ran the whole
+// import for a session the model then refused to switch to. Reported by @jatmn.
 func (m model) startForeignSessionImport(source agentsessions.ForeignSession) (model, string, tea.Cmd) {
+	if m.pending {
+		return m, resumeWhileRunningText, nil
+	}
 	if m.sessionImportInFlight {
 		return m, "Sessions\na foreign session import is already in progress", nil
 	}
