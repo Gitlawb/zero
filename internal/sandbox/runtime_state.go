@@ -517,10 +517,46 @@ func ownedFallbackRuntimeRecord(workspaceRoot, recorded string) bool {
 	return strings.EqualFold(components[len(components)-1], hex.EncodeToString(digest[:8]))
 }
 
-// selectSandboxRuntimeRoot picks the root for a command. honorRecorded is true
-// on the command side and false during setup: setup is making the choice, so it
-// must not consult a record it is about to overwrite, or a single unlucky
-// relocation to the temp fallback would pin every future setup to temp.
+// resolveSandboxRuntimeRootInputs is the part of runtime-root selection that
+// names things and touches nothing: the canonical workspace, and the root a
+// command prefers for it. It takes no lease and creates no directory.
+//
+// ONE RESOLVER, BECAUSE THERE WERE TWO AND THEY DISAGREED. Selection and the
+// diagnostic that asks "would a command still select the recorded root?" each
+// spelled these steps out, and the diagnostic's copy was missing one: a user
+// cache directory that resolves to nothing. os.UserCacheDir can succeed and
+// still hand back a value that canonicalizes to "" or ".", and selection fails
+// closed on that with "user cache directory is unavailable" while the
+// diagnostic carried on and derived candidates from the empty root. Doctor
+// could then report the recorded root as current, or as merely stale, on a
+// machine where every command fails before it ever looks at a marker. That is
+// the false-healthy signal this whole change exists to remove, reached through
+// a different edge of the same resolver.
+//
+// The diagnostic's doc comment already said it asked the command's question
+// through the command's function. Now it does: both callers get their inputs
+// here, so an input one of them refuses is refused by the other, with the same
+// error. Reported by @jatmn.
+func resolveSandboxRuntimeRootInputs(workspaceRoot string) (workspace string, preferred string, err error) {
+	workspace = canonicalSandboxWorkspaceRoot(workspaceRoot)
+	if workspace == "" || workspace == "." {
+		return "", "", errors.New("sandbox runtime requires a workspace root")
+	}
+	cacheRoot, err := sandboxUserCacheDir()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve user cache directory: %w", err)
+	}
+	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
+	if cacheRoot == "" || cacheRoot == "." {
+		return "", "", errors.New("user cache directory is unavailable")
+	}
+	preferred, err = sandboxRuntimeRootFor(workspace, cacheRoot)
+	if err != nil {
+		return "", "", err
+	}
+	return workspace, preferred, nil
+}
+
 // WindowsSandboxRecordedRuntimeRootIsCurrent answers the question a diagnostic
 // has to ask before trusting the marker: would a command run NOW still select
 // the runtime root that setup recorded?
@@ -540,16 +576,7 @@ func WindowsSandboxRecordedRuntimeRootIsCurrent(sandboxHome, workspaceRoot strin
 	if recorded == "" {
 		return "", false, nil
 	}
-	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
-	if workspaceRoot == "" || workspaceRoot == "." {
-		return recorded, false, errors.New("sandbox runtime requires a workspace root")
-	}
-	cacheRoot, err := sandboxUserCacheDir()
-	if err != nil {
-		return recorded, false, fmt.Errorf("resolve user cache directory: %w", err)
-	}
-	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
-	preferred, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+	workspaceRoot, preferred, err := resolveSandboxRuntimeRootInputs(workspaceRoot)
 	if err != nil {
 		return recorded, false, err
 	}
@@ -560,6 +587,11 @@ func WindowsSandboxRecordedRuntimeRootIsCurrent(sandboxHome, workspaceRoot strin
 // selectSandboxRuntimeRoot picks the runtime root and returns the lease on it
 // together with the directories acquiring that lease had to create.
 //
+// honorRecorded is true on the command side and false during setup: setup is
+// making the choice, so it must not consult a record it is about to overwrite,
+// or a single unlucky relocation to the temp fallback would pin every future
+// setup to temp.
+//
 // THE LEDGER IS PART OF THE ANSWER, NOT A DETAIL OF IT. Acquiring the lease
 // creates zero/runtime/v1 when they are not there, and this was the two-result
 // wrapper that dropped that fact on the floor. Setup then provisioned the leaf,
@@ -568,19 +600,7 @@ func WindowsSandboxRecordedRuntimeRootIsCurrent(sandboxHome, workspaceRoot strin
 // the partial ledger out for the same reason: acquisition can create one
 // component and fail on the next.
 func selectSandboxRuntimeRoot(workspaceRoot string, honorRecorded bool, sandboxHome string) (string, *sandboxRuntimeLease, []windowsCreatedRuntimeDir, error) {
-	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
-	if workspaceRoot == "" || workspaceRoot == "." {
-		return "", nil, nil, errors.New("sandbox runtime requires a workspace root")
-	}
-	cacheRoot, err := sandboxUserCacheDir()
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("resolve user cache directory: %w", err)
-	}
-	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
-	if cacheRoot == "" || cacheRoot == "." {
-		return "", nil, nil, errors.New("user cache directory is unavailable")
-	}
-	root, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+	workspaceRoot, root, err := resolveSandboxRuntimeRootInputs(workspaceRoot)
 	if err != nil {
 		return "", nil, nil, err
 	}

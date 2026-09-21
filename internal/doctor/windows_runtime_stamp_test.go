@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -189,5 +190,58 @@ func TestDoctorWarnsWhenTheRuntimeRootCannotBeResolved(t *testing.T) {
 	}
 	if _, ok := result.Details["error"]; !ok {
 		t.Errorf("the warning does not carry the resolver cause, so an operator cannot act on it: %+v", result.Details)
+	}
+}
+
+// A CACHE DIRECTORY THAT RESOLVES TO NOTHING IS UNRESOLVED TOO, not only one
+// that fails to resolve. os.UserCacheDir succeeds on a value like "." and the
+// selection a command makes refuses it after canonicalizing, with "user cache
+// directory is unavailable". The diagnostic behind this check did not, so doctor
+// went on to compare the recorded root against candidates derived from an empty
+// cache root and reported staleness, which sends an operator to re-run setup on
+// a machine where setup cannot select a root either.
+//
+// The sandbox package pins the two entry points to one error through the
+// resolver seam on every platform. This is the consumer's half, and it is
+// Windows-only because that is where the environment can produce the value:
+// %LocalAppData% is returned as it is, while a relative XDG_CACHE_HOME is an
+// error on Linux and a relative HOME still joins to a usable path on macOS.
+// Reported by @jatmn.
+func TestDoctorReportsAnEmptyCacheRootAsUnresolvedNotStale(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only %LocalAppData% hands os.UserCacheDir a value that canonicalizes to nothing")
+	}
+	home := t.TempDir()
+	workspace := t.TempDir()
+	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", home)
+	redirectUserCache(t)
+
+	runtimeRoot := doctorRuntimeCandidate(t, workspace)
+	if !strings.HasPrefix(runtimeRoot, os.TempDir()) && !strings.Contains(runtimeRoot, t.Name()) {
+		t.Fatalf("the runtime candidate %q is outside test-owned storage", runtimeRoot)
+	}
+	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
+		t.Fatalf("create the runtime root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeRoot) })
+	writeDoctorSetupMarker(t, home, workspace, runtimeRoot)
+
+	backend := sandbox.Backend{Name: sandbox.BackendWindowsRestrictedToken}
+	if result := windowsSandboxSetupCheck("windows", backend, workspace, config.SandboxConfig{}); result != nil {
+		t.Fatalf("SETUP INVALID: a freshly set-up machine was reported unhealthy: %s", result.Message)
+	}
+
+	for _, value := range []string{".", " . "} {
+		t.Setenv("LOCALAPPDATA", value)
+		result := windowsSandboxSetupCheck("windows", backend, workspace, config.SandboxConfig{})
+		if result == nil {
+			t.Fatalf("LOCALAPPDATA=%q: doctor reported a healthy sandbox while no command can select a runtime root", value)
+		}
+		if status, _ := result.Details["setupStatus"].(string); status != "runtime-root-unresolved" {
+			t.Errorf("LOCALAPPDATA=%q: setupStatus = %q, want runtime-root-unresolved: %s", value, status, result.Message)
+		}
+		if cause, _ := result.Details["error"].(string); !strings.Contains(cause, "user cache directory is unavailable") {
+			t.Errorf("LOCALAPPDATA=%q: the warning does not carry the resolver cause a command would report: %+v", value, result.Details)
+		}
 	}
 }
