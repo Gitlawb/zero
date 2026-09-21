@@ -52,11 +52,13 @@ func TestOpenScopedWriteRootRejectsSubstitutedRoot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		originalRoot := resolvedRoot + "-original"
+		t.Cleanup(func() { _ = os.RemoveAll(originalRoot) })
 		installWriteRootBeforeOpen(t, func(path string) {
 			if path != resolvedRoot {
 				return
 			}
-			if err := os.Rename(resolvedRoot, resolvedRoot+"-original"); err != nil {
+			if err := os.Rename(resolvedRoot, originalRoot); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Symlink(outside, resolvedRoot); err != nil {

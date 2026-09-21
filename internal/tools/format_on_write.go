@@ -238,13 +238,11 @@ func restoreFormattedFile(root *os.Root, relativePath string, content string, mo
 func formatterBinaryInWriteRoots(binaryPath string, roots []string) bool {
 	resolvedBinary, err := filepath.Abs(binaryPath)
 	if err != nil {
-		return true
+		return false
 	}
-	evaluatedBinary, err := filepath.EvalSymlinks(resolvedBinary)
-	if err != nil {
-		return true
+	if evaluatedBinary, err := filepath.EvalSymlinks(resolvedBinary); err == nil {
+		resolvedBinary = evaluatedBinary
 	}
-	resolvedBinary = evaluatedBinary
 	for _, root := range roots {
 		resolvedRoot, err := filepath.Abs(root)
 		if err != nil {
