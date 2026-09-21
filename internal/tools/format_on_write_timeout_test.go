@@ -177,67 +177,104 @@ func shortenFormatOnWriteTimeout(t *testing.T, timeout time.Duration) {
 	t.Cleanup(func() { formatOnWriteTimeout = previous })
 }
 
-// A FAILED FORMATTER MUST NOT LEAVE THE FILE HALF-REWRITTEN.
+// A FORMATTER RUNS ON A PRIVATE STAGING COPY, NEVER ON THE DESTINATION.
 //
-// These commands edit in place, so one killed by the deadline, killed by the
-// caller, or exiting partway through its own rewrite can leave the target
-// truncated: neither the input nor the output. Returning the written bytes on
-// top of that would leave the tracker baseline and the diff preview describing
-// a file that is not on disk, and the next edit would compare against content
-// the file does not have.
-func TestFormatOnWriteRestoresTheFileWhenTheFormatterFails(t *testing.T) {
-	installFakeFormatter(t, ".clobberfmt", "clobberfmt", clobberingFormatterScript())
+// Physical formatters are handed a path inside an owner-only sibling directory
+// (fsutil.CreatePrivateTempDir), so a killed, cancelled, or clobbering run can
+// neither truncate nor half-rewrite the destination. A failure on that staging
+// copy therefore keeps the fallback bytes the caller staged, and the
+// destination stays byte-for-byte (and inode-for-inode) untouched until the
+// single atomic publication in commitFileContents.
+func TestFormatOnWriteRunsTheFormatterOnAPrivateCopy(t *testing.T) {
+	argRecord := filepath.Join(t.TempDir(), "formatter-arg")
+	installFakeFormatter(t, ".clobberfmt", "clobberfmt", recordingClobberingFormatterScript())
 	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	t.Setenv("ZERO_FORMAT_ARG_RECORD", argRecord)
+	requireFormatterClobbers(t, "the bytes the caller wrote\n")
 
-	target := filepath.Join(t.TempDir(), "subject.clobberfmt")
+	dir := t.TempDir()
+	target := filepath.Join(dir, "subject.clobberfmt")
 	const written = "the bytes the caller wrote\n"
 	if err := os.WriteFile(target, []byte(written), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	requireFormatterClobbers(t, written)
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	formatting := maybeFormatWrittenFile(context.Background(), target, written)
 
+	recorded, err := os.ReadFile(argRecord)
+	if err != nil {
+		t.Fatalf("formatter never recorded the path it was handed: %v", err)
+	}
+	handed := strings.TrimSpace(string(recorded))
+	if handed == target {
+		t.Fatalf("formatter was handed the destination path %q", handed)
+	}
+	if base := filepath.Base(filepath.Dir(handed)); !strings.HasPrefix(base, ".zero-fmt-") {
+		t.Fatalf("formatter path %q is not inside a private staging directory", handed)
+	}
+
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("destination inode changed while the formatter ran on the staging copy")
+	}
 	onDisk, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(onDisk) != written {
-		t.Errorf("file on disk = %q, want the bytes that were written back", onDisk)
+		t.Errorf("destination = %q, want the untouched bytes %q", onDisk, written)
 	}
 	if formatting.Content != written {
-		t.Errorf("content = %q, want the bytes that were written", formatting.Content)
-	}
-	if formatting.RestoreFailed {
-		t.Error("restoration was reported as failed on a writable file")
+		t.Errorf("content = %q, want the fallback bytes that were written", formatting.Content)
 	}
 }
 
-// And the same for a run cut off by the deadline, which is the case the notice
-// already covers: the disclosure and the file have to agree.
-func TestFormatOnWriteRestoresTheFileOnTimeout(t *testing.T) {
+// The same isolation must hold on the deadline path, which is the one the
+// timeout notice already covers: the disclosure and the file have to agree.
+func TestFormatOnWriteKeepsFallbackAndDestinationOnTimeout(t *testing.T) {
 	installFakeFormatter(t, ".clobberfmt", "clobberfmt", clobberingFormatterScript())
 	shortenFormatOnWriteTimeout(t, time.Nanosecond)
 	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
 
-	target := filepath.Join(t.TempDir(), "subject.clobberfmt")
+	dir := t.TempDir()
+	target := filepath.Join(dir, "subject.clobberfmt")
 	const written = "the bytes the caller wrote\n"
 	if err := os.WriteFile(target, []byte(written), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	requireFormatterClobbers(t, written)
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	formatting := maybeFormatWrittenFile(context.Background(), target, written)
 
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("a timed-out formatter replaced the destination inode")
+	}
 	onDisk, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(onDisk) != written {
-		t.Errorf("file on disk = %q, want the bytes that were written back", onDisk)
+		t.Errorf("destination = %q, want the untouched bytes %q", onDisk, written)
+	}
+	if formatting.Content != written {
+		t.Errorf("content = %q, want the fallback bytes that were written", formatting.Content)
 	}
 	if !formatting.TimedOut {
-		t.Error("the deadline path stopped being reported once restoration was added")
+		t.Error("the deadline path stopped being reported once formatting moved off the destination")
 	}
 	if notice := formatting.notice("subject.clobberfmt"); !strings.Contains(notice, "not formatted") {
 		t.Errorf("notice = %q, want the timeout note", notice)
@@ -245,12 +282,22 @@ func TestFormatOnWriteRestoresTheFileOnTimeout(t *testing.T) {
 }
 
 // clobberingFormatterScript truncates the file it is handed and then fails, the
-// way an interrupted in-place formatter leaves a partial rewrite.
+// way an interrupted physical formatter would if it were handed the file.
 func clobberingFormatterScript() string {
 	if runtime.GOOS == "windows" {
 		return "@echo off\r\necho CLOBBERED> %1\r\nexit /b 3\r\n"
 	}
 	return "#!/bin/sh\necho CLOBBERED > \"$1\"\nexit 3\n"
+}
+
+// recordingClobberingFormatterScript is clobberingFormatterScript plus a record
+// of the path it was handed, so a test can prove that path is the private
+// staging copy and not the destination.
+func recordingClobberingFormatterScript() string {
+	if runtime.GOOS == "windows" {
+		return "@echo off\r\nif defined ZERO_FORMAT_ARG_RECORD echo %1> \"%ZERO_FORMAT_ARG_RECORD%\"\r\necho CLOBBERED> %1\r\nexit /b 3\r\n"
+	}
+	return "#!/bin/sh\nprintf '%s' \"$1\" > \"$ZERO_FORMAT_ARG_RECORD\"\necho CLOBBERED > \"$1\"\nexit 3\n"
 }
 
 // requireFormatterClobbers proves the fixture really does damage the file it is

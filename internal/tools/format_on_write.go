@@ -1,30 +1,29 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 // Format-on-write for the mutating file tools. When enabled, a successful
-// edit_file/write_file runs the language's standard formatter on the file it
-// just wrote, so the model's output always lands in project-canonical style
+// edit_file/write_file formats staged content before the single atomic
+// publication, so the model's output always lands in project-canonical style
 // and never fails a CI format check it cannot see. Off by default (set
 // ZERO_FORMAT_ON_WRITE=1): auto-reformatting changes bytes the model did not
 // write, which strict workflows may not want.
 //
-// Ordering matters: formatting runs BEFORE the FileTracker re-baseline, and
-// the caller records the POST-format content. Formatting after the baseline
-// would make the very next edit look like an external modification and trip
-// the conflict guard.
+// Ordering matters: formatting runs on an isolated temporary copy BEFORE
+// publication and BEFORE the FileTracker re-baseline. The caller records the
+// POST-format content that was actually published. Formatting the destination
+// in place after publication would reintroduce partial-file writes.
 
 // formatOnWriteTimeout bounds one formatter run; a wedged formatter must never
 // hang a tool call. On timeout the unformatted write stands, and the caller
@@ -48,33 +47,16 @@ var formatOnWriteTimeout = 10 * time.Second
 // and finds out from a CI format check it cannot see, which is the thing this
 // feature exists to prevent.
 type formatOnWriteResult struct {
-	Content      string
-	ContentKnown bool
-	Info         os.FileInfo
+	Content string
 	// Formatter is the binary that was run, named in the notice so the user can
 	// tell a slow gofmt from a slow prettier.
 	Formatter string
 	TimedOut  bool
-	// RestoreFailed means the file on disk is not known to hold Content.
-	//
-	// These formatters edit in place, so one that is killed or fails partway
-	// can leave the target truncated or half-rewritten: what a dead
-	// `prettier --write` leaves behind is not the input and not the output.
-	// Returning the written bytes while disk holds something else would put the
-	// tracker baseline, the diff preview and the file itself into three
-	// different states, so the failure paths write the bytes back. When even
-	// that fails the user has to hear about it: it is their file.
-	RestoreFailed bool
 }
 
 // notice is the line appended to the tool summary when formatting was expected
 // and did not happen, and empty in every other case.
 func (result formatOnWriteResult) notice(relativePath string) string {
-	if result.RestoreFailed {
-		return "\n\nWARNING: " + relativePath + " may not hold what was written. " +
-			result.Formatter + " was interrupted while rewriting it in place and the " +
-			"content could not be written back. Re-read the file before trusting it."
-	}
 	if !result.TimedOut {
 		return ""
 	}
@@ -84,8 +66,11 @@ func (result formatOnWriteResult) notice(relativePath string) string {
 }
 
 // formatterCommands maps a file extension to the formatter argv; the file path
-// is appended as the final argument. Only in-place, config-respecting,
-// community-standard formatters — a missing binary silently skips formatting.
+// is appended for physical-file adapters. Ruff and Prettier instead receive
+// the logical destination with stdin. Physical adapters keep the original
+// basename inside an owner-only sibling directory (including auxiliary files),
+// and retain the destination directory as their working directory. A missing
+// binary silently skips formatting.
 var formatterCommands = map[string][]string{
 	".go":    {"gofmt", "-w"},
 	".rs":    {"rustfmt"},
@@ -123,36 +108,20 @@ func formatOnWriteEnabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
-var runFormatOnWriteCommand = func(ctx context.Context, binaryPath string, arguments []string, directory string) error {
-	formatter := exec.CommandContext(ctx, binaryPath, arguments...)
-	formatter.Dir = directory
-	formatter.Stdin = strings.NewReader("")
-	return formatter.Run()
-}
-
-var readFormattedFile = readRootedFile
-
-// maybeFormatWrittenFile is the unscoped test-facing wrapper. Production
-// callers use maybeFormatWrittenFileScoped so a formatter cannot redirect the
-// final read or recovery write outside the configured write roots.
+// maybeFormatWrittenFile runs the configured formatter on an isolated copy of
+// writtenContent (when enabled and on PATH) and returns the bytes to publish.
+// The destination path is never opened or rewritten here. Best-effort
+// throughout: any failure — no formatter, formatter error, timeout, unreadable
+// result — returns writtenContent so the caller's state matches the last write
+// it performed itself. Only the timeout is reported back, for the reason on
+// formatOnWriteResult.
 func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) formatOnWriteResult {
-	restoreMode := os.FileMode(0o644)
-	if info, err := os.Stat(absolutePath); err == nil {
-		restoreMode = info.Mode().Perm()
-	}
-	return maybeFormatWrittenFileScoped(ctx, filepath.Dir(absolutePath), nil, absolutePath, writtenContent, restoreMode)
-}
-
-// maybeFormatWrittenFileScoped runs the configured formatter and returns only
-// content verified through a descriptor-bound root. Formatter failures restore
-// writtenContent through that same root; if restoration or the final read
-// fails, ContentKnown is false and callers omit exact diff evidence.
-func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, scope PathScope, absolutePath string, writtenContent string, restoreMode os.FileMode) formatOnWriteResult {
-	unformatted := formatOnWriteResult{Content: writtenContent, ContentKnown: true}
+	unformatted := formatOnWriteResult{Content: writtenContent}
 	if !formatOnWriteEnabled() {
 		return unformatted
 	}
-	command, ok := formatterCommands[strings.ToLower(filepath.Ext(absolutePath))]
+	ext := strings.ToLower(filepath.Ext(absolutePath))
+	command, ok := formatterCommands[ext]
 	if !ok {
 		return unformatted
 	}
@@ -160,90 +129,85 @@ func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, sco
 	if err != nil {
 		return unformatted
 	}
-	root, relativePath, err := openFormattedFileRoot(workspaceRoot, scope, absolutePath)
+	dir := filepath.Dir(absolutePath)
+	if command[0] == "prettier" {
+		return formatWithPrettier(ctx, command[0], binaryPath, command[1:], absolutePath, writtenContent)
+	}
+	if command[0] == "ruff" {
+		return formatWithStdin(ctx, command[0], binaryPath, append(append([]string(nil), command[1:]...), "--stdin-filename", absolutePath, "-"), absolutePath, writtenContent)
+	}
+	stagingDir, err := fsutil.CreatePrivateTempDir(dir, ".zero-fmt-*")
 	if err != nil {
-		unformatted.ContentKnown = false
 		return unformatted
 	}
-	defer root.Close()
-
+	defer func() { _ = os.RemoveAll(stagingDir) }()
+	staging, err := os.OpenFile(filepath.Join(stagingDir, filepath.Base(absolutePath)), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return unformatted
+	}
+	stagingName := staging.Name()
+	defer func() { _ = os.Remove(stagingName) }()
+	if _, err := staging.WriteString(writtenContent); err != nil {
+		_ = staging.Close()
+		return unformatted
+	}
+	if err := staging.Close(); err != nil {
+		return unformatted
+	}
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
-	arguments := append(append([]string(nil), command[1:]...), absolutePath)
-	if err := runFormatOnWriteCommand(formatCtx, binaryPath, arguments, filepath.Dir(absolutePath)); err != nil {
+	arguments := append(append([]string(nil), command[1:]...), stagingName)
+	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
+	formatter.Dir = dir
+	formatter.Stdin = strings.NewReader("")
+	if err := formatter.Run(); err != nil {
 		unformatted.Formatter = command[0]
-		if restoreErr := restoreFormattedFile(root, relativePath, writtenContent, restoreMode); restoreErr != nil {
-			unformatted.RestoreFailed = true
-			unformatted.ContentKnown = false
-		} else if restored, info, readErr := readFormattedFile(root, relativePath); readErr != nil {
-			unformatted.ContentKnown = false
-		} else {
-			unformatted.Content = string(restored)
-			unformatted.Info = info
-		}
 		if errors.Is(formatCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			unformatted.TimedOut = true
 		}
 		return unformatted
 	}
-
-	formatted, info, err := readFormattedFile(root, relativePath)
+	formatted, err := os.ReadFile(stagingName)
 	if err != nil {
-		unformatted.ContentKnown = false
 		return unformatted
 	}
-	return formatOnWriteResult{Content: string(formatted), ContentKnown: true, Info: info, Formatter: command[0]}
+	return formatOnWriteResult{Content: string(formatted), Formatter: command[0]}
 }
 
-func restoreFormattedFile(root *os.Root, relativePath string, content string, mode os.FileMode) error {
-	file, err := root.OpenFile(relativePath, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, mode)
-	if err != nil {
-		return err
+// formatWithPrettier preserves config overrides and ignore rules by transmitting
+// the logical destination alongside stdin, without physical destination writes.
+func formatWithPrettier(ctx context.Context, formatterName, binaryPath string, formatterArgs []string, absolutePath, writtenContent string) formatOnWriteResult {
+	arguments := make([]string, 0, len(formatterArgs)+2)
+	for _, arg := range formatterArgs {
+		if arg == "--write" {
+			continue
+		}
+		arguments = append(arguments, arg)
 	}
-	if _, err := io.WriteString(file, content); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
+	arguments = append(arguments, "--stdin-filepath", absolutePath)
+	return formatWithStdin(ctx, formatterName, binaryPath, arguments, absolutePath, writtenContent)
 }
 
-// openFormattedFileRoot opens the write root before the formatter runs and
-// computes the target relative to that descriptor-bound root. Atomic in-root
-// replacement remains valid; a formatter that swaps the target to an escaping
-// symlink is rejected when readFormattedFile opens it through the root.
-func openFormattedFileRoot(workspaceRoot string, scope PathScope, absolutePath string) (*os.Root, string, error) {
-	roots, err := scopedRoots(workspaceRoot, scope)
-	if err != nil {
-		return nil, "", err
+func formatWithStdin(ctx context.Context, formatterName, binaryPath string, arguments []string, absolutePath, writtenContent string) formatOnWriteResult {
+	unformatted := formatOnWriteResult{Content: writtenContent}
+	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
+	defer cancel()
+	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
+	formatter.Dir = filepath.Dir(absolutePath)
+	formatter.Stdin = strings.NewReader(writtenContent)
+	var stdout bytes.Buffer
+	formatter.Stdout = &stdout
+	if err := formatter.Run(); err != nil {
+		unformatted.Formatter = formatterName
+		if errors.Is(formatCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			unformatted.TimedOut = true
+		}
+		return unformatted
 	}
-	var firstErr error
-	for _, configuredRoot := range roots {
-		resolvedRoot, err := filepath.Abs(configuredRoot)
-		if err == nil {
-			resolvedRoot, err = filepath.EvalSymlinks(resolvedRoot)
-		}
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		candidate := sandbox.NormalizePrefixForRoot(absolutePath, resolvedRoot)
-		relativePath, err := filepath.Rel(resolvedRoot, candidate)
-		if err != nil || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
-			continue
-		}
-		root, err := os.OpenRoot(resolvedRoot)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		return root, relativePath, nil
+	if stdout.Len() == 0 && writtenContent != "" {
+		// A formatter that produced nothing for non-empty input (an ignored
+		// path on some CLI versions) must not publish an empty file.
+		return unformatted
 	}
-	if firstErr != nil {
-		return nil, "", firstErr
-	}
-	return nil, "", fmt.Errorf("%s must stay inside the configured write roots", absolutePath)
+	return formatOnWriteResult{Content: stdout.String(), Formatter: formatterName}
 }

@@ -2,9 +2,10 @@ package tools
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 var errFileChangedDuringWrite = errors.New("file changed on disk before the write committed")
@@ -20,89 +21,89 @@ var fileWriteBeforeCommit func(path string)
 var fileWriteStat = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
 
 // commitFileContents binds an overwrite to the file identity and bytes that
-// the caller observed. A create uses exclusive creation. An overwrite opens the
-// observed object without truncation, verifies identity/content through that
-// handle, then truncates and writes the same handle. A path replacement before
-// or during commit therefore fails instead of publishing stale rich evidence.
+// the caller observed, then publishes the new content through a private
+// same-directory temporary file and an atomic replacement (fsutil.WriteFileAtomic).
 //
-// expectedInfo nil means the caller observed a missing path. expectedContent
-// may be nil for an existing but unreadable file; that path may still be
-// overwritten, but callers must omit rich before/after evidence.
-func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *string, content string) error {
+// The identity checks run against the object opened at commit time, before any
+// mutation: a path replacement between observation and commit therefore fails
+// instead of publishing stale content, and no reader ever observes a truncated
+// destination (invariant #921). The exclusive-create branch refuses a path that
+// appeared after the caller observed it missing.
+//
+// The returned warning string is non-empty only when the replacement already
+// committed but its backup cleanup failed; the caller reports success and
+// surfaces the warning. A non-nil error means nothing was published.
+func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *string, content string) (string, error) {
 	if fileWriteBeforeCommit != nil {
 		fileWriteBeforeCommit(path)
 	}
 
 	if expectedInfo == nil {
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if err != nil {
-			return err
+		if _, err := os.Lstat(path); err == nil {
+			return "", errFileChangedDuringWrite
+		} else if !os.IsNotExist(err) {
+			return "", err
 		}
-		openedInfo, err := fileWriteStat(file)
-		if err != nil {
-			_ = file.Close()
-			return err
-		}
-		return writeAndVerifyFileIdentity(path, file, openedInfo, content, false)
+		return publishFileContents(path, content)
 	}
 
-	flags := os.O_WRONLY
-	if expectedContent != nil {
-		flags = os.O_RDWR
-	}
-	file, err := os.OpenFile(path, flags, 0)
+	file, err := os.OpenFile(path, fileCommitOpenFlags(expectedContent), 0)
 	if err != nil {
-		return err
+		return "", err
 	}
 	openedInfo, err := fileWriteStat(file)
 	if err != nil {
 		_ = file.Close()
-		return err
+		return "", err
 	}
 	if !os.SameFile(expectedInfo, openedInfo) {
 		_ = file.Close()
-		return errFileChangedDuringWrite
+		return "", errFileChangedDuringWrite
 	}
 	pathInfo, err := os.Stat(path)
 	if err != nil || !os.SameFile(openedInfo, pathInfo) {
 		_ = file.Close()
-		return errFileChangedDuringWrite
+		return "", errFileChangedDuringWrite
 	}
 	if expectedContent != nil {
 		current, readErr := io.ReadAll(file)
 		if readErr != nil {
 			_ = file.Close()
-			return readErr
+			return "", readErr
 		}
 		if string(current) != *expectedContent {
 			_ = file.Close()
-			return errFileChangedDuringWrite
+			return "", errFileChangedDuringWrite
 		}
-	}
-	return writeAndVerifyFileIdentity(path, file, openedInfo, content, true)
-}
-
-func writeAndVerifyFileIdentity(path string, file *os.File, openedInfo os.FileInfo, content string, truncate bool) error {
-	if truncate {
-		if err := file.Truncate(0); err != nil {
-			_ = file.Close()
-			return err
-		}
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			_ = file.Close()
-			return err
-		}
-	}
-	if _, err := io.WriteString(file, content); err != nil {
-		_ = file.Close()
-		return err
 	}
 	if err := file.Close(); err != nil {
-		return err
+		return "", err
 	}
-	pathInfo, err := os.Stat(path)
-	if err != nil || !os.SameFile(openedInfo, pathInfo) {
-		return fmt.Errorf("%w: path identity changed", errFileChangedDuringWrite)
+	return publishFileContents(path, content)
+}
+
+// fileCommitOpenFlags selects the descriptor used to bind an overwrite to the
+// observed object. When the caller has preimage bytes to compare, the descriptor
+// must be readable (and writable, to prove the same authorization an in-place
+// write would have required); when it does not, write access alone is enough.
+func fileCommitOpenFlags(expectedContent *string) int {
+	if expectedContent != nil {
+		return os.O_RDWR
 	}
-	return nil
+	return os.O_WRONLY
+}
+
+// publishFileContents performs the atomic replacement and treats a committed
+// replacement whose backup cleanup failed as a successful write, returning the
+// warning instead of flipping the tool status to error.
+func publishFileContents(path, content string) (string, error) {
+	err := fsutil.WriteFileAtomic(path, []byte(content), 0o644)
+	if err == nil {
+		return "", nil
+	}
+	var committed *fsutil.CommittedReplacementCleanupError
+	if errors.As(err, &committed) {
+		return "replacement committed, but backup cleanup failed", nil
+	}
+	return "", err
 }
