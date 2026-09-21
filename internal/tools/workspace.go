@@ -254,6 +254,13 @@ func scopedReadRoots(workspaceRoot string, scope PathScope) ([]string, error) {
 }
 
 func resolveScopedReadPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
+	return resolveScopedReadPathForGOOS(runtimeGOOS(), workspaceRoot, scope, requestedPath)
+}
+
+// resolveScopedReadPathForGOOS is resolveScopedReadPath with the host OS
+// injected, so the Windows-only missing-POSIX-path hint can be checked for
+// every platform from any one of them (the same seam as detectShellRuntime).
+func resolveScopedReadPathForGOOS(goos string, workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
 	// Spill files (truncated tool output saved under the per-uid temp dir) are
 	// readable regardless of scope: the truncation notice tells the model to
 	// read_file/grep them, which must actually work. resolveSpillReadPath
@@ -263,7 +270,15 @@ func resolveScopedReadPath(workspaceRoot string, scope PathScope, requestedPath 
 		return spillPath, spillPath, nil
 	}
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
-		return resolveWorkspacePath(workspaceRoot, requestedPath)
+		absolute, relative, err := resolveWorkspacePath(workspaceRoot, requestedPath)
+		if err != nil {
+			// The hint only belongs on this branch: the scoped loop below runs
+			// only when filepath.IsAbs(requestedPath) holds, which a
+			// POSIX-looking path never does on Windows. Confinement errors are
+			// not missing-path errors, so the annotator leaves them unchanged.
+			err = annotateMissingPosixPathError(goos, workspaceRoot, requestedPath, err)
+		}
+		return absolute, relative, err
 	}
 	roots, err := scopedReadRoots(workspaceRoot, scope)
 	if err != nil {
