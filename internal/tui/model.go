@@ -6138,83 +6138,19 @@ func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage
 	m.runtimeMessageSink(agentUsageMsg{runID: runID, modelID: modelID, usage: event})
 }
 
-// toolResultDetail is the card body source: the rich card-only Display.Preview
-// (a code/diff preview) when present on a successful result, else the Output that
-// the model also saw. Error results keep their Output so the failure shows.
-//
-// UNDECORATED, ALWAYS. The enforcement disclosure is carried separately as typed
-// notices and rendered by the card as its own furniture, so a body that already
-// had the notice composed into it drew the warning twice: once in the notice
-// lines and once at the top of the output. A rich preview never carried it, so
-// only the no-preview results (every bash and exec card, and every error) were
-// wrong, which is exactly the shape a preview-only test cannot see.
-//
-// One owner for composition: this returns the base text, and whoever presents it
-// decorates once. Provider-facing text still goes through ModelOutput.
+// toolResultDetail is the card body source. The rule lives on the result itself
+// (agent.ToolResult.CardBody) because the session payload is built from it too,
+// and that payload now has a writer outside this package.
 func toolResultDetail(result agent.ToolResult) string {
-	display := result.BaseDisplay()
-	if strings.TrimSpace(display.Preview) != "" && (result.Status != tools.StatusError || result.Outcome.Finalized()) {
-		return display.Preview
-	}
-	return result.BaseModelOutput()
+	return result.CardBody()
 }
 
 // toolResultSessionPayload preserves both views of a tool result: output remains
 // the provider-facing text used for session context, while displayPreview keeps
-// the richer card body that was visible during the live run. The preview is only
-// stored when it differs, so ordinary tool results retain their compact event.
-//
-// A result carrying enforcement notices ALWAYS differs now, because output is
-// decorated and the card body is not, so the undecorated body is written even
-// when it is empty. Restoration keys on the field being PRESENT rather than
-// non-empty for exactly that case: a command that printed nothing under an
-// enforced profile has an empty body and a real notice, and falling back to
-// output there would restore the decorated text and draw the notice twice.
+// the richer card body that was visible during the live run. The contract and
+// its presence rules are documented on agent.ToolResultSessionPayload.
 func toolResultSessionPayload(result agent.ToolResult) map[string]any {
-	return ToolResultSessionPayload(result)
-}
-
-// ToolResultSessionPayload is THE serialization of a tool result into a session
-// event, shared by the interactive and the headless writers.
-//
-// They used to spell it separately, and the headless one persisted only the
-// decorated ModelOutput. Both write to the same default session store the TUI
-// resumes from, so a CLI-written result restored into the TUI arrived with no
-// typed notices and no undecorated body: for a long collapsed result the card
-// rendered no body and therefore no disclosure at all, even though the run
-// that produced it had shown one. One owner for the contract means one place
-// where a field can go missing, and a test against this function covers both
-// writers.
-func ToolResultSessionPayload(result agent.ToolResult) map[string]any {
-	output := result.ModelOutput()
-	payload := map[string]any{
-		"toolCallId": result.ToolCallID,
-		"name":       result.Name,
-		"status":     string(result.Status),
-		"output":     output,
-	}
-	if preview := toolResultDetail(result); preview != output {
-		payload["displayPreview"] = preview
-	}
-	if result.Truncated {
-		payload["truncated"] = true
-	}
-	if result.Redacted {
-		payload["redacted"] = true
-	}
-	if len(result.Meta) > 0 {
-		payload["meta"] = result.Meta
-	}
-	if len(result.EnforcementNotices) > 0 {
-		payload["enforcementNotices"] = result.EnforcementNotices
-	}
-	if len(result.ChangedFiles) > 0 {
-		payload["changedFiles"] = result.ChangedFiles
-	}
-	if len(result.ChangeSummaries) > 0 {
-		payload["changeSummaries"] = result.ChangeSummaries
-	}
-	return payload
+	return agent.ToolResultSessionPayload(result)
 }
 
 func toolResultRowText(result agent.ToolResult) string {

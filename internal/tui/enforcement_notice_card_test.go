@@ -216,7 +216,7 @@ func TestRestoredNoPreviewCardShowsTheDisclosureExactlyOnce(t *testing.T) {
 // notice furniture to draw it. The disclosure the run had shown was simply gone
 // from the resumed transcript.
 //
-// Both writers now go through ToolResultSessionPayload, so this exercises the
+// Every writer now goes through agent.ToolResultSessionPayload, so this exercises the
 // exact bytes the CLI persists, restores them the way the TUI does, and renders
 // the collapsed card, which is the shape the old CLI test could not reach.
 func TestHeadlessWrittenCollapsedResultRestoresTheDisclosureExactlyOnce(t *testing.T) {
@@ -234,7 +234,7 @@ func TestHeadlessWrittenCollapsedResultRestoresTheDisclosureExactlyOnce(t *testi
 
 	// The CLI's persisted payload IS this function now; encode it as the
 	// session store would.
-	encoded, err := json.Marshal(ToolResultSessionPayload(result))
+	encoded, err := json.Marshal(agent.ToolResultSessionPayload(result))
 	if err != nil {
 		t.Fatal(err)
 	}

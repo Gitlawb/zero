@@ -258,6 +258,34 @@ func WithEnforcementNotices(text string, notices []string) string {
 	return joined + "\n\n" + text
 }
 
+// WithoutEnforcementNotices is the inverse, for a reader of STORED text.
+//
+// A persisted tool result carries its output with the disclosure already
+// composed in, and the same notices again as a typed field. A reader that
+// rebuilds a result from both has to take the composed copy back off, or the
+// accessors above compose it a second time and the disclosure is drawn twice.
+// It lives beside WithEnforcementNotices so the two agree on the format by
+// construction rather than by a second spelling of it somewhere else.
+//
+// Text that was never decorated is returned unchanged, so a record whose writer
+// stored the undecorated output still round-trips to exactly one disclosure.
+func WithoutEnforcementNotices(text string, notices []string) string {
+	if len(notices) == 0 {
+		return text
+	}
+	joined := strings.TrimSpace(strings.Join(notices, "\n"))
+	if joined == "" {
+		return text
+	}
+	if rest, ok := strings.CutPrefix(text, joined+"\n\n"); ok {
+		return rest
+	}
+	if strings.TrimSpace(text) == joined {
+		return ""
+	}
+	return text
+}
+
 // Display carries a short, structured summary of a tool result for the TUI/stream.
 type Display struct {
 	Summary string

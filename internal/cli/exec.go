@@ -28,7 +28,6 @@ import (
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/trace"
-	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -1499,7 +1498,8 @@ func persistedToolResultPayload(result agent.ToolResult) map[string]any {
 	// session store the TUI resumes from. A CLI-written result restored into
 	// the TUI therefore arrived without typed enforcement notices and without
 	// the undecorated card body, so a long collapsed result rendered no body
-	// and, with it, no disclosure. The interactive writer owns the shape now,
-	// and this is the same function, not a matching copy of it.
-	return tui.ToolResultSessionPayload(result)
+	// and, with it, no disclosure. internal/agent owns the shape now, beside
+	// ToolResult, and every writer calls the same function rather than keeping
+	// a matching copy of it.
+	return agent.ToolResultSessionPayload(result)
 }
