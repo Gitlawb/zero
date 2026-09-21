@@ -8,11 +8,16 @@ import (
 )
 
 // looksLikePosixAbsolutePath reports whether p has the shape of an absolute
-// POSIX path: a single leading "/". A double slash is a Windows UNC path, and
-// a drive-letter path is Windows-absolute, so neither is a POSIX path the
-// model hallucinated. Shape-only: it never consults GOOS or the filesystem.
+// POSIX path: a single leading "/". Windows treats both "/" and "\" as
+// separators, so two leading separators in any combination (//server/share,
+// /\server/share, /\?\C:...) are UNC or device-style paths, and a drive-letter
+// path is Windows-absolute, so none of them is a POSIX path the model
+// hallucinated. Shape-only: it never consults GOOS or the filesystem.
 func looksLikePosixAbsolutePath(p string) bool {
-	return strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "//")
+	if !strings.HasPrefix(p, "/") {
+		return false
+	}
+	return len(p) < 2 || (p[1] != '/' && p[1] != '\\')
 }
 
 // annotateMissingPosixPathError appends a Windows-only hint to a read-path
