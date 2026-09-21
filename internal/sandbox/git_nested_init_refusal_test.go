@@ -362,3 +362,81 @@ func TestNestedWorkspaceRefusesAnInlineGitAliasForInit(t *testing.T) {
 		}
 	}
 }
+
+// THE REFUSAL THAT CANNOT BE APPROVED IS THE ONE THE OPERATOR HAS TO SEE.
+//
+// `git clone` carries both risks: it uses the network and it creates a
+// repository. The clone test above sets NetworkAllow, which is the only policy
+// under which the nested-repository branch was ever reached. Under the DEFAULT
+// policy the network gate ran first and answered with a prompt, so the operator
+// was asked to approve network access for a command no approval could make
+// runnable, and ReasonNestedGitInit, the reason with a remedy in it, was never
+// shown. Reported by @jatmn.
+func TestNestedCloneIsRefusedAsNestedUnderTheDefaultNetworkPolicy(t *testing.T) {
+	_, workspace := nestedGitWorkspace(t)
+	policy := DefaultPolicy()
+	if policy.Network != NetworkDeny {
+		t.Fatalf("SETUP INVALID: the default network policy is %q, so this does not exercise the ordering", policy.Network)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: policy, Backend: nativeWrappingBackend})
+
+	for _, granted := range []bool{false, true} {
+		request := gitCommandRequest(workspace, "git clone https://example.invalid/repo.git vendor/dep")
+		request.PermissionGranted = granted
+		decision := engine.Evaluate(context.Background(), request)
+		if decision.Action != ActionDeny || decision.Block == nil || decision.Block.Code != BlockNestedGitInit {
+			t.Fatalf("granted=%v: clone in a governed workspace was %s (block %#v, reason %q), want a %s denial", granted, decision.Action, decision.Block, decision.Reason, BlockNestedGitInit)
+		}
+		if decision.Reason != ReasonNestedGitInit {
+			t.Errorf("granted=%v: reason = %q, want the nested-repository reason and its remedy", granted, decision.Reason)
+		}
+	}
+
+	// CONTROLS. A network command that creates no repository still gets the
+	// network answer, so the reordering did not swallow that gate, and a clone
+	// into a standalone workspace is a network question and nothing else.
+	fetch := engine.Evaluate(context.Background(), gitCommandRequest(workspace, "git fetch origin"))
+	if fetch.Action != ActionPrompt || fetch.Reason != ReasonNetworkBlocked {
+		t.Errorf("git fetch in the governed workspace was %s (%q), want the network prompt", fetch.Action, fetch.Reason)
+	}
+	standalone := t.TempDir()
+	if workspaceGovernedByAncestorRepository(standalone) {
+		t.Fatalf("SETUP INVALID: %s is governed by an ancestor repository", standalone)
+	}
+	standaloneEngine := NewEngine(EngineOptions{WorkspaceRoot: standalone, Policy: policy, Backend: nativeWrappingBackend})
+	clone := standaloneEngine.Evaluate(context.Background(), gitCommandRequest(standalone, "git clone https://example.invalid/repo.git ."))
+	if clone.Action != ActionPrompt || clone.Reason != ReasonNetworkBlocked {
+		t.Errorf("clone into a standalone workspace was %s (%q), want the network prompt", clone.Action, clone.Reason)
+	}
+}
+
+// THE LIMIT OF THIS GUARD, WRITTEN DOWN SO IT IS NOT MISTAKEN FOR COVERAGE.
+//
+// The nested-repository rule recognises git creating a repository. It does not
+// recognise a repository assembled by other means, and it cannot: mkdir and a
+// few writes, an archive, or a script in any language all produce the same
+// directory, and none of them is a git command. These legs are allowed today.
+// They are here so that anyone reading the rule as containment of the .git
+// pathname finds a test saying otherwise, and so that a change which DOES close
+// it at the decision layer has to come and update this deliberately.
+//
+// It is not a statement that the behaviour is acceptable. A repository built
+// this way carries whatever config its author wrote, and a plain `git status`
+// outside the sandbox honours it. That has to be closed where the carveouts
+// live, at write time. Reported by @jatmn.
+func TestHandAssembledRepositoryIsNotWhatThisGuardCatches(t *testing.T) {
+	_, workspace := nestedGitWorkspace(t)
+	engine := gitWorkspaceEngine(t, workspace)
+	for _, command := range []string{
+		"mkdir .git",
+		"mkdir -p .git/objects .git/refs && printf 'ref: refs/heads/main\n' > .git/HEAD",
+		"cp -r ../template-repo/.git .git",
+		"python3 -c \"import os; os.makedirs('.git/refs')\"",
+		"tar -xf repo.tar",
+	} {
+		decision := engine.Evaluate(context.Background(), gitCommandRequest(workspace, command))
+		if decision.Block != nil && decision.Block.Code == BlockNestedGitInit {
+			t.Errorf("%q is now refused as nested repository creation. If that is deliberate, this test and the WHAT THIS IS NOT note in risk.go both need to say what the rule covers now", command)
+		}
+	}
+}

@@ -153,6 +153,18 @@ func classifyWithScope(request Request, scope *Scope) Risk {
 		// Refused rather than protected, because the protection would have to be
 		// established at a moment the sandbox is no longer at.
 		//
+		// WHAT THIS IS NOT. It refuses GIT creating a repository, by every spelling
+		// git offers. It is not containment of the .git pathname. A command that
+		// assembles a repository by other means (mkdir and a few file writes, an
+		// archive, a script in any language) is not recognised here, and no static
+		// reading of a shell command can recognise all of them, so this rule must
+		// not be described or relied on as the boundary. A repository assembled
+		// that way carries whatever config its author wrote, and an ordinary
+		// `git status` run outside the sandbox honours it, core.fsmonitor included.
+		// Closing that is the carveouts' job, at write time, not this rule's.
+		// TestHandAssembledRepositoryIsNotWhatThisGuardCatches pins the limit so it
+		// cannot be mistaken for coverage. Reported by @jatmn.
+		//
 		// The condition is the WORKSPACE, not the directory the command names.
 		// Resolving that directory would mean tracking -C and cwd through the
 		// script, which is precisely the option-parsing surface that let

@@ -33,10 +33,10 @@ import (
 // binary and then stats the file is the only thing that catches that class.
 //
 // Deliberately NOT a debug curiosity: it takes the same path a shell tool
-// takes, through SandboxManager.BuildCommandPlan, so what it proves is what
-// users get. It prints the resolved backend and enforcement level to stderr
-// before running, so a harness can assert the sandbox was actually engaged
-// rather than quietly downgraded.
+// takes, the engine's decision first and then the engine's command plan, so
+// what it proves is what users get. It prints the decision, then the resolved
+// backend and enforcement level, to stderr before running, so a harness can
+// assert the sandbox was actually engaged rather than quietly downgraded.
 func runSandboxExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	command, err := parseSandboxExecArgs(args)
 	if err != nil {
@@ -88,6 +88,36 @@ func runSandboxExec(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		// it that may differ.
 		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
 	})
+
+	// The CLI's shared shutdown context, so Ctrl+C and a directed SIGTERM both
+	// arrive here rather than only at whatever the terminal happens to signal.
+	runCtx, stopSignals := signalContext()
+	defer stopSignals()
+
+	// THE DECISION COMES BEFORE THE PLAN, as it does for every real tool call.
+	//
+	// A shell tool is evaluated by the engine and only then planned
+	// (tools.Registry.RunWithOptions). This went straight to BuildCommandPlan, so
+	// it took "the same path a shell tool takes" only from the second step on, and
+	// every refusal that lives in Evaluate did not exist here. The one that
+	// matters most is the nested-repository guard: a workspace governed by an
+	// ancestor repository carries NO git carveouts, on the strength of that guard
+	// refusing to create a repository there, and `zero sandbox exec -- git init`
+	// created one under the plain workspace grant with a writable config and
+	// hooks. A harness that runs what production would have refused does not
+	// prove what users get. Reported by @jatmn.
+	//
+	// PermissionGranted is true because the person at the terminal typed the
+	// command, which is the approval a prompt asks a session user for. It lifts
+	// exactly what an approval lifts in a session and nothing else: a denial is
+	// still a denial, and an approved network command still runs inside a sandbox
+	// that has the network off.
+	decision := sandboxExecDecision(runCtx, engine, workspaceRoot, command)
+	fmt.Fprintf(stderr, "sandbox: decision=%s reason=%s\n", decision.Action, decision.Reason)
+	if decision.Action == zeroSandbox.ActionDeny {
+		return writeAppError(stderr, decision.ErrorString(), exitCrash)
+	}
+
 	plan, err := engine.BuildCommandPlan(zeroSandbox.CommandSpec{
 		Name: command[0],
 		Args: command[1:],
@@ -112,11 +142,62 @@ func runSandboxExec(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		fmt.Fprintf(stderr, "sandbox: DOWNGRADED: %s\n", plan.DowngradeReason)
 	}
 
-	// The CLI's shared shutdown context, so Ctrl+C and a directed SIGTERM both
-	// arrive here rather than only at whatever the terminal happens to signal.
-	runCtx, stopSignals := signalContext()
-	defer stopSignals()
 	return runSandboxPlannedCommand(runCtx, plan, stdout, stderr)
+}
+
+// sandboxExecToolName is the tool a session would have run this command with.
+// Grants and the engine's shell rules are keyed by it.
+const sandboxExecToolName = "bash"
+
+// sandboxExecDecision asks the engine the question a session asks before it
+// plans a shell command, for the argv this invocation was given.
+func sandboxExecDecision(ctx context.Context, engine *zeroSandbox.Engine, workspaceRoot string, argv []string) zeroSandbox.Decision {
+	return engine.Evaluate(ctx, zeroSandbox.Request{
+		WorkspaceRoot:     workspaceRoot,
+		ToolName:          sandboxExecToolName,
+		SideEffect:        zeroSandbox.SideEffectShell,
+		PermissionGranted: true,
+		PermissionMode:    zeroSandbox.PermissionModeAsk,
+		Args:              map[string]any{"command": sandboxExecCommandText(argv)},
+		Reason:            "zero sandbox exec",
+	})
+}
+
+// sandboxExecCommandText renders argv as the command text the engine analyses.
+//
+// The engine classifies a shell tool by parsing its command string, so argv has
+// to become one without changing what it says. A word made only of characters
+// the shell does not interpret is left bare, which keeps `git init` reading as a
+// session would have written it. Anything else is single-quoted, so an argument
+// such as "git init" stays ONE word and is not mistaken for a command, and a
+// payload handed to `sh -c` reaches the analyser as the payload it is.
+func sandboxExecCommandText(argv []string) string {
+	words := make([]string, 0, len(argv))
+	for _, word := range argv {
+		words = append(words, sandboxExecQuoteWord(word))
+	}
+	return strings.Join(words, " ")
+}
+
+func sandboxExecQuoteWord(word string) string {
+	if word == "" {
+		return "''"
+	}
+	bare := true
+	for _, r := range word {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("_@%+=:,./-", r):
+		default:
+			bare = false
+		}
+	}
+	if bare {
+		return word
+	}
+	// A single quote cannot appear inside single quotes, so it closes them, is
+	// written escaped, and opens them again.
+	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 }
 
 const (
@@ -260,8 +341,13 @@ func writeSandboxExecHelp(w io.Writer) error {
 Runs one command through the real sandbox and exits with its status.
 
 Everything after the -- separator is the command, so its own flags are not
-parsed as Zero's. The resolved backend and enforcement level are written to
-stderr before the command runs, and a downgrade is reported there explicitly.
+parsed as Zero's. The command is evaluated the way a session evaluates a shell
+tool call before anything is planned: the decision is written to stderr, and a
+command a session refuses is refused here too, with the same reason. Running it
+from a terminal counts as the approval a session would prompt for, and lifts
+only what that approval lifts. The resolved backend and enforcement level are
+then written to stderr before the command runs, and a downgrade is reported
+there explicitly.
 
 Examples:
   zero sandbox exec -- cmd /c echo hello
