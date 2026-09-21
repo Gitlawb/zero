@@ -158,18 +158,32 @@ func TestLineStructureIsNotTreatedAsAnInvisibleSeparator(t *testing.T) {
 // Malformed UTF-8 must not move the span mapping, which works in the source's
 // own byte offsets. A decoder that measured an invalid byte as the three bytes
 // of U+FFFD would shift every later span.
+// The exact output is asserted, not just the absence of the key. An invalid
+// byte measured as three would still cover the secret while moving the
+// replacement's edges onto the bytes around it, which reads as a pass if the
+// test only asks whether the secret is gone.
 func TestSplitRedactionHandlesMalformedUTF8(t *testing.T) {
 	for _, testCase := range []struct {
 		name  string
 		value string
+		want  string
 	}{
-		{"invalid byte before the secret", "\xff" + awsKey[:8] + "\x00" + awsKey[8:]},
-		{"invalid byte inside the split", awsKey[:8] + "\x00\xff" + awsKey[8:]},
-		{"invalid byte after the secret", awsKey[:8] + "\x00" + awsKey[8:] + "\xfe"},
-		{"only invalid bytes", "\xff\xfe\x00\xff"},
+		{"invalid byte before the secret", "\xff" + awsKey[:8] + "\x00" + awsKey[8:], "\xff[REDACTED]"},
+		// An invalid byte is NOT one of the separators: it decodes to U+FFFD and
+		// is drawn, so a key broken by one is visible to whoever reads it, the
+		// same argument that keeps tab and newline out. It is kept in the
+		// compacted text and so it still ends the match.
+		{"invalid byte inside the split", awsKey[:8] + "\x00\xff" + awsKey[8:], awsKey[:8] + "\x00\xff" + awsKey[8:]},
+		{"invalid byte after the secret", awsKey[:8] + "\x00" + awsKey[8:] + "\xfe", "[REDACTED]\xfe"},
+		{"invalid bytes on both sides", "\xff\xfe" + awsKey[:8] + "\x00" + awsKey[8:] + "\xfd\xfc", "\xff\xfe[REDACTED]\xfd\xfc"},
+		{"invalid byte then text then the secret", "\xffpre " + awsKey[:8] + "\x00" + awsKey[8:] + " post", "\xffpre [REDACTED] post"},
+		{"only invalid bytes", "\xff\xfe\x00\xff", "\xff\xfe\x00\xff"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			got := RedactString(testCase.value, Options{})
+			if got != testCase.want {
+				t.Errorf("RedactString(%q) = %q, want %q", testCase.value, got, testCase.want)
+			}
 			if strings.Contains(rejoin(got), awsKey) {
 				t.Errorf("the key survived: %q", got)
 			}
