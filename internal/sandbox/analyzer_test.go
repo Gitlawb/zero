@@ -38,6 +38,12 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "zsh -xc wraps destructive payload", script: `zsh -xc 'parted /dev/sda mklabel gpt'`, destructive: true},
 		{name: "bash -ec wraps network payload", script: `bash -ec 'curl https://x.test'`, network: true},
 		{name: "bash --command wraps editor", script: `bash --command 'vim file'`, interactive: true},
+		// `--` ends option processing, so a `-ec`/`-c` after it is a positional
+		// operand, not the shell command flag: the quoted text must NOT be parsed
+		// as a payload command and must not trigger its classification.
+		{name: "bash -- -ec editor is not a payload", script: `bash -- -ec 'vim file'`, interactive: false},
+		{name: "bash -- -ec fdisk is not a payload", script: `bash -- -ec 'fdisk /dev/sda'`, destructive: false},
+		{name: "bash -- -c curl is not a payload", script: `bash -- -c 'curl https://x.test'`, network: false},
 		{name: "sudo wraps bare repl", script: "sudo python3", interactive: true},
 		// A valueless wrapper flag must not swallow the real payload command.
 		{name: "sudo -n keeps rm payload", script: "sudo -n rm -rf /tmp/x", destructive: true},

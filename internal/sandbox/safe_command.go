@@ -442,6 +442,13 @@ func shellDashCPayload(program string, fields []string) string {
 	}
 	args := fields[start+1:]
 	for i, arg := range args {
+		// `--` ends option processing: every following token is a positional
+		// operand (a script name or argument), not a shell flag. Treating
+		// `bash -- -ec 'cmd'` as `-c` would recurse into an operand the shell
+		// never runs as a command string.
+		if arg == "--" {
+			break
+		}
 		if shellCommandFlag(arg) {
 			if i+1 < len(args) {
 				return strings.Join(args[i+1:], " ")

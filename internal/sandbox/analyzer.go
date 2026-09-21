@@ -429,6 +429,11 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 // and a POSIX short-option cluster such as `-ec`, `-lc`, or `-xc`.
 func dashCPayload(args []*syntax.Word) string {
 	for index := 0; index < len(args); index++ {
+		// `--` ends option processing: the remaining words are positional
+		// operands, so a later `-ec`/`-c` is not the shell's command flag.
+		if wordText(args[index]) == "--" {
+			break
+		}
 		if shellCommandFlag(wordText(args[index])) && index+1 < len(args) {
 			return wordText(args[index+1])
 		}

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,65 @@ func installFileWriteRace(t *testing.T, mutate func(string)) {
 	prior := fileWriteBeforeCommit
 	fileWriteBeforeCommit = mutate
 	t.Cleanup(func() { fileWriteBeforeCommit = prior })
+}
+
+func installWriteRootBeforeOpen(t *testing.T, hook func(string)) {
+	t.Helper()
+	prior := writeRootBeforeOpen
+	writeRootBeforeOpen = hook
+	t.Cleanup(func() { writeRootBeforeOpen = prior })
+}
+
+// A granted root swapped for a symlink between the pre-open identity stat and
+// os.OpenRoot must be refused: os.OpenRoot re-resolves the path, so without the
+// identity comparison the returned descriptor would be bound to the external
+// directory and every later mutation would escape the validated boundary. The
+// hook reproduces the exact check-to-use window deterministically.
+func TestOpenScopedWriteRootRejectsSubstitutedRoot(t *testing.T) {
+	t.Run("accepts stable root", func(t *testing.T) {
+		root := t.TempDir()
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, relative, err := openScopedWriteRoot(root, nil, filepath.Join(resolvedRoot, "created.txt"))
+		if err != nil {
+			t.Fatalf("stable root rejected: %v", err)
+		}
+		defer handle.Close()
+		if relative != "created.txt" {
+			t.Fatalf("relative = %q, want created.txt", relative)
+		}
+	})
+
+	t.Run("rejects substituted root", func(t *testing.T) {
+		root := t.TempDir()
+		outside := t.TempDir()
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		installWriteRootBeforeOpen(t, func(path string) {
+			if path != resolvedRoot {
+				return
+			}
+			if err := os.Rename(resolvedRoot, resolvedRoot+"-original"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, resolvedRoot); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		})
+
+		handle, _, err := openScopedWriteRoot(root, nil, filepath.Join(resolvedRoot, "created.txt"))
+		if err == nil {
+			_ = handle.Close()
+			t.Fatal("openScopedWriteRoot accepted a root substituted between stat and open")
+		}
+		if !errors.Is(err, errWriteRootSubstituted) {
+			t.Fatalf("error = %v, want errWriteRootSubstituted", err)
+		}
+	})
 }
 
 func installFileWriteStat(t *testing.T, stat func(*os.File) (os.FileInfo, error)) {

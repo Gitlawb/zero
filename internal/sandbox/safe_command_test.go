@@ -67,6 +67,10 @@ func TestDetectInteractiveCommandAllowsNonInteractive(t *testing.T) {
 		"tail -n 50 app.log",
 		"ssh host 'uptime'",
 		"grep -r foo .",
+		// After the `--` separator the following tokens are positional operands,
+		// not shell flags, so `-ec` must not be read as the `-c` command flag.
+		"bash -- -ec 'vim file.txt'",
+		"sh -- -c 'less /var/log/syslog'",
 	}
 	for _, command := range cases {
 		t.Run(command, func(t *testing.T) {
@@ -237,7 +241,29 @@ func TestShellCommandFlag(t *testing.T) {
 	}
 }
 
-// Audit finding (MED): the interactive-program detector must not be bypassed by
+// Audit: the `--` separator ends option processing, so a `-c`/`-ec` token
+// appearing after it is a positional operand, not the shell command flag. A
+// payload hidden behind `bash -- -ec '...'` must not be recursed into.
+func TestShellDashCPayloadStopsAtDashDash(t *testing.T) {
+	cases := []struct {
+		name   string
+		fields []string
+		want   string
+	}{
+		{name: "dashdash before clustered flag", fields: []string{"bash", "--", "-ec", "vim file.txt"}, want: ""},
+		{name: "dashdash before bare flag", fields: []string{"sh", "--", "-c", "less file"}, want: ""},
+		{name: "real flag before dashdash", fields: []string{"bash", "-c", "vim file.txt", "--"}, want: "vim file.txt --"},
+		{name: "no dashdash grouped flag", fields: []string{"bash", "-ec", "vim file.txt"}, want: "vim file.txt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shellDashCPayload(tc.fields[0], tc.fields); got != tc.want {
+				t.Fatalf("shellDashCPayload(%v) = %q, want %q", tc.fields, got, tc.want)
+			}
+		})
+	}
+}
+
 // quote/escape characters embedded INSIDE the program token (e.g. `vi\m`,
 // `v"i"m`, `'v'im`), not just surrounding it.
 func TestDetectInteractiveStripsEmbeddedQuotingFromToken(t *testing.T) {

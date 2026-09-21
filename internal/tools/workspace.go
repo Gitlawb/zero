@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -400,6 +401,17 @@ func recheckScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPa
 	return firstErr
 }
 
+// errWriteRootSubstituted reports that the granted root directory changed
+// identity between the pre-open stat and the descriptor open, so the handle may
+// point outside the validated boundary. The operation fails closed.
+var errWriteRootSubstituted = errors.New("write root changed identity between validation and open")
+
+// writeRootBeforeOpen is a deterministic test hook. Production leaves it nil;
+// tests use it to substitute the root path after its identity is captured but
+// before os.OpenRoot resolves it, exercising the same check-to-use window a
+// concurrent attacker would race.
+var writeRootBeforeOpen func(path string)
+
 // openScopedWriteRoot opens the granted write root that contains absolutePath
 // and returns a descriptor-bound handle plus the path relative to it. The
 // caller closes the handle.
@@ -428,15 +440,45 @@ func openScopedWriteRoot(workspaceRoot string, scope PathScope, absolutePath str
 			}
 			continue
 		}
+		// Capture the root directory identity BEFORE opening the handle.
+		// os.OpenRoot resolves every component again, so replacing the root path
+		// between this stat and the open (a symlink or directory swap) would bind
+		// the returned descriptor to a different, possibly external directory.
+		// Comparing identities after the open closes that check-to-use window.
+		expectedStat, err := os.Stat(resolvedRoot)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
 		candidate := sandbox.NormalizePrefixForRoot(absolutePath, resolvedRoot)
 		relativePath, err := filepath.Rel(resolvedRoot, candidate)
 		if err != nil || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
 			continue
 		}
+		if writeRootBeforeOpen != nil {
+			writeRootBeforeOpen(resolvedRoot)
+		}
 		root, err := os.OpenRoot(resolvedRoot)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
+			}
+			continue
+		}
+		actualStat, err := root.Stat(".")
+		if err != nil {
+			_ = root.Close()
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !os.SameFile(expectedStat, actualStat) {
+			_ = root.Close()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%w: %s", errWriteRootSubstituted, resolvedRoot)
 			}
 			continue
 		}
