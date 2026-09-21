@@ -31,6 +31,13 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "sudo wraps rm -rf", script: "sudo rm -rf /tmp/x", destructive: true},
 		{name: "env wraps curl", script: "env curl https://x.test", network: true},
 		{name: "bash -c wraps editor", script: `bash -c 'vim file'`, interactive: true},
+		// POSIX getopt clusters the command flag with other short options; the
+		// payload must still be parsed and classified (ZERO-ESC-02).
+		{name: "bash -ec wraps destructive payload", script: `bash -ec 'fdisk /dev/sda'`, destructive: true},
+		{name: "sh -lc wraps destructive payload", script: `sh -lc 'shred -u secret.txt'`, destructive: true},
+		{name: "zsh -xc wraps destructive payload", script: `zsh -xc 'parted /dev/sda mklabel gpt'`, destructive: true},
+		{name: "bash -ec wraps network payload", script: `bash -ec 'curl https://x.test'`, network: true},
+		{name: "bash --command wraps editor", script: `bash --command 'vim file'`, interactive: true},
 		{name: "sudo wraps bare repl", script: "sudo python3", interactive: true},
 		// A valueless wrapper flag must not swallow the real payload command.
 		{name: "sudo -n keeps rm payload", script: "sudo -n rm -rf /tmp/x", destructive: true},

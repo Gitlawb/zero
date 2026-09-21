@@ -61,6 +61,15 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err != nil {
 		return errorResult("Error writing file " + requestedPath + ": " + err.Error())
 	}
+	// Anchor every mutation below on the granted write root. The pathname
+	// checks above say what was REQUESTED; this handle enforces what actually
+	// happens, so a parent directory swapped for an escaping symlink after
+	// validation cannot redirect the create or overwrite.
+	root, rootedRelative, err := openScopedWriteRoot(tool.workspaceRoot, tool.scope, absolutePath)
+	if err != nil {
+		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	}
+	defer root.Close()
 
 	existed := false
 	var priorInfo os.FileInfo
@@ -107,8 +116,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
-		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	if dir := filepath.Dir(rootedRelative); dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return errorResult("Error writing file " + relativePath + ": " + err.Error())
+		}
 	}
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
@@ -117,7 +128,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if priorContentKnown {
 		expectedContent = &priorContent
 	}
-	if err := commitFileContents(absolutePath, priorInfo, expectedContent, content); err != nil {
+	if err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, expectedContent, content); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
@@ -135,7 +146,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// session compares against what is now on disk.
 	newInfo := formatting.Info
 	if newInfo == nil {
-		newInfo, _ = os.Stat(absolutePath)
+		newInfo, _ = root.Stat(rootedRelative)
 	}
 	if finalContentKnown {
 		options.FileTracker.Record(absolutePath, []byte(content), newInfo)

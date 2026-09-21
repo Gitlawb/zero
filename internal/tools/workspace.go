@@ -399,3 +399,51 @@ func recheckScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPa
 	}
 	return firstErr
 }
+
+// openScopedWriteRoot opens the granted write root that contains absolutePath
+// and returns a descriptor-bound handle plus the path relative to it. The
+// caller closes the handle.
+//
+// absolutePath is expected to be symlink-resolved, as resolveScopedPath and
+// resolveScopedTargetPath return it. Each configured root is resolved before
+// comparison so a workspace that legitimately sits under a platform alias
+// (macOS /var -> /private/var, Windows 8.3 short names) still matches. Every
+// mutation is then performed relative to the returned handle, so no component
+// above the target can be swapped for an escaping link between the pathname
+// check and the open.
+func openScopedWriteRoot(workspaceRoot string, scope PathScope, absolutePath string) (*os.Root, string, error) {
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return nil, "", err
+	}
+	var firstErr error
+	for _, configuredRoot := range roots {
+		resolvedRoot, err := filepath.Abs(configuredRoot)
+		if err == nil {
+			resolvedRoot, err = filepath.EvalSymlinks(resolvedRoot)
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		candidate := sandbox.NormalizePrefixForRoot(absolutePath, resolvedRoot)
+		relativePath, err := filepath.Rel(resolvedRoot, candidate)
+		if err != nil || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
+			continue
+		}
+		root, err := os.OpenRoot(resolvedRoot)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		return root, relativePath, nil
+	}
+	if firstErr != nil {
+		return nil, "", firstErr
+	}
+	return nil, "", fmt.Errorf("%s must stay inside the configured write roots", absolutePath)
+}

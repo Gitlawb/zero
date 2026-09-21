@@ -87,6 +87,39 @@ func TestEditFileRefusesPreimageRace(t *testing.T) {
 	}
 }
 
+// A parent directory swapped for a symlink that escapes the workspace between
+// validation and the commit must be refused. The create is opened relative to
+// the granted root handle, so the kernel never follows the swapped link. This
+// is the regression that fails on the pre-migration code: there the unanchored
+// os.OpenFile(path, O_CREATE|O_EXCL) followed the symlink and created the file
+// outside the workspace.
+func TestWriteFileRefusesParentSymlinkSwapBeforeCreate(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	installFileWriteRace(t, func(string) {
+		if err := os.Rename(sub, filepath.Join(root, "sub-original")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, sub); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	})
+
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "sub/created.txt", "content": "zero\n",
+	})
+	if result.Status == StatusOK {
+		t.Fatalf("create through a swapped parent symlink must fail, got OK: %s", result.Output)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "created.txt")); err == nil {
+		t.Fatal("create escaped the workspace through the swapped parent symlink")
+	}
+}
+
 func TestOverwriteDoesNotStatOpenedFileAfterFinalPreimageComparison(t *testing.T) {
 	for name, run := range map[string]func(string) Result{
 		"write overwrite": func(root string) Result {
