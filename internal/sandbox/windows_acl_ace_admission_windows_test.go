@@ -171,3 +171,46 @@ func lastLines(text string, count int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// THE TYPE RULE HAS TO HOLD ON ITS OWN. The guard-page legs above are also
+// stopped by the size rule, because their tails are short, so they pass with the
+// type rule removed. An object or callback entry can just as well be long enough
+// to hold the SID its would-be count claims, and then only its type says it is
+// not a plain ACE. Here every entry carries the trustee's whole SID at the plain
+// offset, which is the layout that would make a misread entry compare equal, and
+// only the two plain types may be admitted.
+func TestOnlyPlainACETypesAreAdmitted(t *testing.T) {
+	wanted, err := windows.StringToSid(aceAdmissionTrustee)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole := sidBytes(t, wanted)
+	for _, testCase := range []struct {
+		name    string
+		aceType byte
+		admit   bool
+	}{
+		{name: "allowed", aceType: windows.ACCESS_ALLOWED_ACE_TYPE, admit: true},
+		{name: "denied", aceType: windows.ACCESS_DENIED_ACE_TYPE, admit: true},
+		{name: "allowed object", aceType: 0x5, admit: false},
+		{name: "denied object", aceType: 0x6, admit: false},
+		{name: "allowed callback", aceType: 0x9, admit: false},
+		{name: "denied callback", aceType: 0xA, admit: false},
+		{name: "allowed callback object", aceType: 0xB, admit: false},
+		{name: "mandatory label", aceType: 0x11, admit: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			raw := rawACE(testCase.aceType, 0, 0x1F01FF, whole)
+			ace, sid := windowsPlainACESID((*windows.ACE_HEADER)(unsafe.Pointer(&raw[0])))
+			if (ace != nil) != testCase.admit {
+				t.Fatalf("type 0x%X admitted=%v, want %v", testCase.aceType, ace != nil, testCase.admit)
+			}
+			if testCase.admit && !sid.Equals(wanted) {
+				t.Errorf("an admitted plain entry did not yield its SID")
+			}
+		})
+	}
+	if ace, _ := windowsPlainACESID(nil); ace != nil {
+		t.Error("a nil header was admitted")
+	}
+}
