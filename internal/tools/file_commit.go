@@ -30,6 +30,11 @@ var fileWriteStat = func(file *os.File) (os.FileInfo, error) { return file.Stat(
 // destination (invariant #921). The exclusive-create branch refuses a path that
 // appeared after the caller observed it missing.
 //
+// The binding covers observation through the pre-publication check only. This
+// handle is closed before publishFileContents replaces the path, so a swap
+// between the check and the replace is overwritten rather than refused; that
+// window is inherent to temp-and-replace.
+//
 // The returned warning string is non-empty only when the replacement already
 // committed but its backup cleanup failed; the caller reports success and
 // surfaces the warning. A non-nil error means nothing was published.

@@ -125,6 +125,64 @@ func TestFormatOnWriteStaysQuietWhenTheFormatterFails(t *testing.T) {
 	}
 }
 
+// A WEDGED FORMATTER MUST BE KILLABLE AND MUST NOT BLOCK PAST THE DEADLINE.
+//
+// formatWithStdin captures stdout, so Run waits for every holder of that pipe,
+// not only the process the deadline kills. On Windows an npm-installed prettier
+// is a .cmd hosting node.exe, and a grandchild that keeps the pipe open would
+// push the return past the timeout. hardenProcessLifetime installs the tree
+// kill and the WaitDelay backstop on both routes; without it the command has
+// neither.
+func TestFormatOnWriteHardensFormatterLifetime(t *testing.T) {
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+
+	for _, stdin := range []bool{true, false} {
+		name := map[bool]string{true: "stdin", false: "staging"}[stdin]
+		t.Run(name, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), "subject.padfmt")
+			installFakeAdapter(t, ".padfmt", "padfmt", stdin)
+
+			var seen *exec.Cmd
+			previous := formatterCommandObserver
+			formatterCommandObserver = func(command *exec.Cmd) { seen = command }
+			defer func() { formatterCommandObserver = previous }()
+
+			_ = maybeFormatWrittenFile(context.Background(), target, "written\n")
+
+			if seen == nil {
+				t.Fatal("no formatter command was observed")
+			}
+			if seen.WaitDelay == 0 {
+				t.Error("formatter command has no WaitDelay, so a leaked grandchild can block Wait past the deadline")
+			}
+			if seen.Cancel == nil {
+				t.Error("formatter command has no Cancel, so the deadline cannot kill the formatter tree")
+			}
+		})
+	}
+}
+
+// installFakeAdapter registers a formatter for the test's duration. The stdin
+// flag chooses the stdin/stdout route over the private staging copy.
+func installFakeAdapter(t *testing.T, extension, name string, stdin bool) {
+	t.Helper()
+	binaryName := name + formatterScriptExtension()
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, binaryName), []byte(succeedingFormatterScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	previous, existed := formatterCommands[extension]
+	formatterCommands[extension] = formatterAdapter{argv: []string{binaryName}, stdin: stdin}
+	t.Cleanup(func() {
+		if existed {
+			formatterCommands[extension] = previous
+			return
+		}
+		delete(formatterCommands, extension)
+	})
+}
+
 // installFakeFormatter puts a formatter on PATH and registers it in the command
 // table for the test's duration, returning the binary name the notice carries.
 func installFakeFormatter(t *testing.T, extension, name, script string) string {
@@ -137,7 +195,7 @@ func installFakeFormatter(t *testing.T, extension, name, script string) string {
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	previous, existed := formatterCommands[extension]
-	formatterCommands[extension] = []string{binaryName}
+	formatterCommands[extension] = formatterAdapter{argv: []string{binaryName}}
 	t.Cleanup(func() {
 		if existed {
 			formatterCommands[extension] = previous

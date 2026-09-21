@@ -42,6 +42,13 @@ var stagingProtectionObserver func(stagingPath string)
 // symlink destination replaces the symlink itself with the new regular file. On Windows,
 // ReplaceFileW refuses symlink destinations outright and returns an error.
 // Hard links to destination files are broken by design (temp-and-rename publishes a new inode).
+//
+// On Windows, replacing a destination that another process holds open without
+// delete sharing fails with a sharing violation ("being used by another
+// process"). ReplaceWithRetry retries briefly for a holder that is only passing
+// through, but a long-lived handle (Go's os.Open, Python's open) makes the
+// replacement fail closed: the old bytes stay and no temporary file is left
+// behind.
 func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	return writeFileAtomic(filename, data, perm, nil)
 }

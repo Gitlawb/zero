@@ -6,8 +6,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -33,13 +33,34 @@ func requirePrivateFormatterDACL(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if descriptor == nil {
+		t.Fatalf("formatter staging has no security descriptor: %s", path)
+	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
 	}
-	sddl := descriptor.String()
-	if strings.Contains(sddl, ";;;WD)") || !strings.Contains(sddl, ";;;"+user.User.Sid.String()+")") {
-		t.Fatalf("formatter staging DACL is not current-user-only: %s: %s", path, sddl)
+	acl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acl == nil || acl.AceCount == 0 {
+		t.Fatalf("formatter staging DACL has no entries: %s", path)
+	}
+	// Compare each ACE's SID with the process token's SID. SDDL prints
+	// well-known accounts as two-letter aliases (the hosted runner's built-in
+	// administrator is "LA"), so a textual match against descriptor.String()
+	// is not portable; EqualSid resolves the alias.
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil {
+			t.Fatal(err)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if windows.EqualSid(sid, user.User.Sid) {
+			continue
+		}
+		t.Fatalf("formatter staging DACL grants access to a SID other than the current user: %s", path)
 	}
 }
 
@@ -80,7 +101,7 @@ func TestFormatOnWriteProtectsWindowsStagingThroughoutFormatter(t *testing.T) {
 	}
 	const extension = ".privateprobe"
 	previous, present := formatterCommands[extension]
-	formatterCommands[extension] = []string{executable, "-test.run=^TestPrivateFormatterDACLHelper$", "--"}
+	formatterCommands[extension] = formatterAdapter{argv: []string{executable, "-test.run=^TestPrivateFormatterDACLHelper$", "--"}}
 	defer func() {
 		if present {
 			formatterCommands[extension] = previous

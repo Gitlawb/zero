@@ -225,6 +225,98 @@ func TestFormatOnWritePrettierUsesDestinationFilename(t *testing.T) {
 	}
 }
 
+// PATH-KEYED RULES MUST RESOLVE AGAINST THE FILE THE CALLER NAMED.
+//
+// A stdin adapter receives the logical destination through its filename flag,
+// so a .clang-format-ignore pattern, an .editorconfig section, or rustfmt's
+// ignore still matches "vendor/lib.hintfmt" rather than a random staging name.
+func TestFormatOnWritePassesLogicalDestinationToStdinFormatter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake formatter shim is a POSIX script")
+	}
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	record := filepath.Join(t.TempDir(), "formatter-args")
+	installFakeStdinFormatter(t, ".hintfmt", "hintfmt", "--assume-filename", record)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "vendor", "lib.hintfmt")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	formatting := maybeFormatWrittenFile(context.Background(), target, "written\n")
+	if formatting.Content != "written\n" {
+		t.Fatalf("stdin adapter echoed %q, want the written bytes", formatting.Content)
+	}
+	recorded, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("formatter never recorded its arguments: %v", err)
+	}
+	args := string(recorded)
+	want := "--assume-filename=" + target
+	if !strings.Contains(args, want) {
+		t.Fatalf("formatter args %q do not carry the logical destination %q", args, want)
+	}
+	if strings.Contains(args, ".zero-fmt-") {
+		t.Fatalf("formatter args %q leaked a staging path instead of the destination", args)
+	}
+}
+
+// THE PRODUCTION TABLE MUST CARRY THE HINTS, NOT ONLY THE TEST SEAM.
+func TestFormatterFilenameHints(t *testing.T) {
+	want := map[string]string{
+		".c":     "--assume-filename",
+		".h":     "--assume-filename",
+		".cpp":   "--assume-filename",
+		".hpp":   "--assume-filename",
+		".cc":    "--assume-filename",
+		".sh":    "--filename",
+		".bash":  "--filename",
+		".lua":   "--stdin-filepath",
+		".swift": "--stdinpath",
+		".kt":    "--stdin-path",
+		".dart":  "--stdin-name",
+	}
+	for ext, flag := range want {
+		adapter, ok := formatterCommands[ext]
+		if !ok {
+			t.Fatalf("no formatter adapter for %s", ext)
+		}
+		if !adapter.stdin {
+			t.Errorf("%s adapter is not on the stdin route, so its filename hint cannot apply", ext)
+		}
+		if adapter.filenameFlag != flag {
+			t.Errorf("%s filenameFlag = %q, want %q", ext, adapter.filenameFlag, flag)
+		}
+	}
+}
+
+// installFakeStdinFormatter puts a stdin formatter on PATH and registers it for
+// the test's duration. The script records its argv and echoes stdin, so a test
+// can prove which logical path the adapter was handed.
+func installFakeStdinFormatter(t *testing.T, extension, name, filenameFlag, record string) {
+	t.Helper()
+	directory := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s' \"$*\" > \"$ZERO_FORMAT_ARG_RECORD\"\ncat\n"
+	if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ZERO_FORMAT_ARG_RECORD", record)
+	previous, existed := formatterCommands[extension]
+	formatterCommands[extension] = formatterAdapter{argv: []string{name}, stdin: true, filenameFlag: filenameFlag}
+	t.Cleanup(func() {
+		if existed {
+			formatterCommands[extension] = previous
+			return
+		}
+		delete(formatterCommands, extension)
+	})
+}
+
 const uglyGoSource = "package a\n\nfunc  A( ) {   }\n"
 
 func TestFormatOnWritePublishesFormattedBytesForWriteAndEdit(t *testing.T) {

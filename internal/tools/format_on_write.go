@@ -65,42 +65,64 @@ func (result formatOnWriteResult) notice(relativePath string) string {
 		". The file holds exactly what was written, so a project format check may still flag it."
 }
 
-// formatterCommands maps a file extension to the formatter argv; the file path
-// is appended for physical-file adapters. Ruff and Prettier instead receive
-// the logical destination with stdin. Physical adapters keep the original
-// basename inside an owner-only sibling directory (including auxiliary files),
-// and retain the destination directory as their working directory. A missing
-// binary silently skips formatting.
-var formatterCommands = map[string][]string{
-	".go":    {"gofmt", "-w"},
-	".rs":    {"rustfmt"},
-	".py":    {"ruff", "format", "--quiet"},
-	".ts":    {"prettier", "--log-level", "silent", "--write"},
-	".tsx":   {"prettier", "--log-level", "silent", "--write"},
-	".js":    {"prettier", "--log-level", "silent", "--write"},
-	".jsx":   {"prettier", "--log-level", "silent", "--write"},
-	".json":  {"prettier", "--log-level", "silent", "--write"},
-	".css":   {"prettier", "--log-level", "silent", "--write"},
-	".scss":  {"prettier", "--log-level", "silent", "--write"},
-	".html":  {"prettier", "--log-level", "silent", "--write"},
-	".md":    {"prettier", "--log-level", "silent", "--write"},
-	".yaml":  {"prettier", "--log-level", "silent", "--write"},
-	".yml":   {"prettier", "--log-level", "silent", "--write"},
-	".zig":   {"zig", "fmt"},
-	".dart":  {"dart", "format"},
-	".tf":    {"terraform", "fmt"},
-	".gleam": {"gleam", "format"},
-	".sh":    {"shfmt", "-w"},
-	".bash":  {"shfmt", "-w"},
-	".c":     {"clang-format", "-i"},
-	".h":     {"clang-format", "-i"},
-	".cpp":   {"clang-format", "-i"},
-	".hpp":   {"clang-format", "-i"},
-	".cc":    {"clang-format", "-i"},
-	".kt":    {"ktlint", "-F"},
-	".swift": {"swiftformat"},
-	".lua":   {"stylua"},
+// formatterAdapter describes how one formatter is run.
+//
+// STDIN ADAPTERS READ THE WRITTEN BYTES ON STDIN AND PRINT THE FORMATTED RESULT
+// TO STDOUT. That route lets filenameFlag carry the logical destination path,
+// so any rule written against the file's own path (.clang-format-ignore, an
+// .editorconfig section, rustfmt's ignore) still resolves against the file the
+// caller named instead of a random staging name. Physical adapters have no
+// such option: they are handed a private staging copy inside an owner-only
+// sibling directory (including auxiliary files) and keep the destination
+// directory as their working directory.
+type formatterAdapter struct {
+	argv []string
+	// stdin selects the stdin/stdout route. When false the private staging path
+	// is appended to argv.
+	stdin bool
+	// filenameFlag is the option that supplies the logical destination to a
+	// stdin adapter. It is emitted as "--flag=<target>" and empty when the
+	// formatter resolves its configuration from the working directory alone.
+	filenameFlag string
 }
+
+// formatterCommands maps a file extension to its formatter. A missing binary
+// silently skips formatting.
+var formatterCommands = map[string]formatterAdapter{
+	".go":    {argv: []string{"gofmt"}, stdin: true},
+	".rs":    {argv: []string{"rustfmt"}, stdin: true},
+	".py":    {argv: []string{"ruff", "format", "--quiet"}, stdin: true, filenameFlag: "--stdin-filename"},
+	".ts":    {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".tsx":   {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".js":    {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".jsx":   {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".json":  {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".css":   {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".scss":  {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".html":  {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".md":    {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".yaml":  {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".yml":   {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
+	".zig":   {argv: []string{"zig", "fmt", "--stdin"}, stdin: true},
+	".dart":  {argv: []string{"dart", "format"}, stdin: true, filenameFlag: "--stdin-name"},
+	".tf":    {argv: []string{"terraform", "fmt", "-"}, stdin: true},
+	".gleam": {argv: []string{"gleam", "format", "--stdin"}, stdin: true},
+	".sh":    {argv: []string{"shfmt"}, stdin: true, filenameFlag: "--filename"},
+	".bash":  {argv: []string{"shfmt"}, stdin: true, filenameFlag: "--filename"},
+	".c":     {argv: []string{"clang-format"}, stdin: true, filenameFlag: "--assume-filename"},
+	".h":     {argv: []string{"clang-format"}, stdin: true, filenameFlag: "--assume-filename"},
+	".cpp":   {argv: []string{"clang-format"}, stdin: true, filenameFlag: "--assume-filename"},
+	".hpp":   {argv: []string{"clang-format"}, stdin: true, filenameFlag: "--assume-filename"},
+	".cc":    {argv: []string{"clang-format"}, stdin: true, filenameFlag: "--assume-filename"},
+	".kt":    {argv: []string{"ktlint", "-F", "--stdin"}, stdin: true, filenameFlag: "--stdin-path"},
+	".swift": {argv: []string{"swiftformat"}, stdin: true, filenameFlag: "--stdinpath"},
+	".lua":   {argv: []string{"stylua", "-"}, stdin: true, filenameFlag: "--stdin-filepath"},
+}
+
+// formatterCommandObserver, when non-nil, receives each formatter command after
+// its lifetime bounds are applied. Tests use it to assert that a wedged
+// formatter can be killed and cannot block Wait past the deadline.
+var formatterCommandObserver func(*exec.Cmd)
 
 // formatOnWriteEnabled reports whether the opt-in env toggle is set.
 func formatOnWriteEnabled() bool {
@@ -108,34 +130,40 @@ func formatOnWriteEnabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
-// maybeFormatWrittenFile runs the configured formatter on an isolated copy of
-// writtenContent (when enabled and on PATH) and returns the bytes to publish.
-// The destination path is never opened or rewritten here. Best-effort
-// throughout: any failure — no formatter, formatter error, timeout, unreadable
-// result — returns writtenContent so the caller's state matches the last write
-// it performed itself. Only the timeout is reported back, for the reason on
+// maybeFormatWrittenFile runs the configured formatter over the written bytes
+// (when enabled and on PATH) and returns the bytes to publish. Stdin adapters
+// receive the bytes on stdin; physical adapters get a private staging copy. The
+// destination path is never opened or rewritten here. Best-effort throughout:
+// any failure — no formatter, formatter error, timeout, unreadable result —
+// returns writtenContent so the caller's state matches the last write it
+// performed itself. Only the timeout is reported back, for the reason on
 // formatOnWriteResult.
 func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) formatOnWriteResult {
 	unformatted := formatOnWriteResult{Content: writtenContent}
 	if !formatOnWriteEnabled() {
 		return unformatted
 	}
-	ext := strings.ToLower(filepath.Ext(absolutePath))
-	command, ok := formatterCommands[ext]
+	adapter, ok := formatterCommands[strings.ToLower(filepath.Ext(absolutePath))]
 	if !ok {
 		return unformatted
 	}
-	binaryPath, err := exec.LookPath(command[0])
+	binaryPath, err := exec.LookPath(adapter.argv[0])
 	if err != nil {
 		return unformatted
 	}
+	if adapter.stdin {
+		return formatWithStdin(ctx, adapter, binaryPath, absolutePath, writtenContent)
+	}
+	return formatWithStaging(ctx, adapter, binaryPath, absolutePath, writtenContent)
+}
+
+// formatWithStaging runs a physical formatter on a private copy of the written
+// bytes, never on the destination. The copy keeps the destination's basename
+// so filename-derived formatter behaviour still applies, and any scribble from
+// a killed or failing run lands there, not in the user's file.
+func formatWithStaging(ctx context.Context, adapter formatterAdapter, binaryPath, absolutePath, writtenContent string) formatOnWriteResult {
+	unformatted := formatOnWriteResult{Content: writtenContent}
 	dir := filepath.Dir(absolutePath)
-	if command[0] == "prettier" {
-		return formatWithPrettier(ctx, command[0], binaryPath, command[1:], absolutePath, writtenContent)
-	}
-	if command[0] == "ruff" {
-		return formatWithStdin(ctx, command[0], binaryPath, append(append([]string(nil), command[1:]...), "--stdin-filename", absolutePath, "-"), absolutePath, writtenContent)
-	}
 	stagingDir, err := fsutil.CreatePrivateTempDir(dir, ".zero-fmt-*")
 	if err != nil {
 		return unformatted
@@ -156,12 +184,16 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	}
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
-	arguments := append(append([]string(nil), command[1:]...), stagingName)
+	arguments := append(append([]string(nil), adapter.argv[1:]...), stagingName)
 	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
 	formatter.Dir = dir
 	formatter.Stdin = strings.NewReader("")
+	hardenProcessLifetime(formatter)
+	if formatterCommandObserver != nil {
+		formatterCommandObserver(formatter)
+	}
 	if err := formatter.Run(); err != nil {
-		unformatted.Formatter = command[0]
+		unformatted.Formatter = adapter.argv[0]
 		if errors.Is(formatCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			unformatted.TimedOut = true
 		}
@@ -171,34 +203,32 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	if err != nil {
 		return unformatted
 	}
-	return formatOnWriteResult{Content: string(formatted), Formatter: command[0]}
+	return formatOnWriteResult{Content: string(formatted), Formatter: adapter.argv[0]}
 }
 
-// formatWithPrettier preserves config overrides and ignore rules by transmitting
-// the logical destination alongside stdin, without physical destination writes.
-func formatWithPrettier(ctx context.Context, formatterName, binaryPath string, formatterArgs []string, absolutePath, writtenContent string) formatOnWriteResult {
-	arguments := make([]string, 0, len(formatterArgs)+2)
-	for _, arg := range formatterArgs {
-		if arg == "--write" {
-			continue
-		}
-		arguments = append(arguments, arg)
-	}
-	arguments = append(arguments, "--stdin-filepath", absolutePath)
-	return formatWithStdin(ctx, formatterName, binaryPath, arguments, absolutePath, writtenContent)
-}
-
-func formatWithStdin(ctx context.Context, formatterName, binaryPath string, arguments []string, absolutePath, writtenContent string) formatOnWriteResult {
+// formatWithStdin runs a formatter over stdin, supplies the logical
+// destination through the adapter's filename flag when it has one, and reads
+// the formatted bytes from stdout. The empty-output guard keeps a formatter
+// that ignores the path (and so prints nothing) from publishing an empty file.
+func formatWithStdin(ctx context.Context, adapter formatterAdapter, binaryPath, absolutePath, writtenContent string) formatOnWriteResult {
 	unformatted := formatOnWriteResult{Content: writtenContent}
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
+	arguments := append([]string(nil), adapter.argv[1:]...)
+	if adapter.filenameFlag != "" {
+		arguments = append(arguments, adapter.filenameFlag+"="+absolutePath)
+	}
 	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
 	formatter.Dir = filepath.Dir(absolutePath)
 	formatter.Stdin = strings.NewReader(writtenContent)
+	hardenProcessLifetime(formatter)
+	if formatterCommandObserver != nil {
+		formatterCommandObserver(formatter)
+	}
 	var stdout bytes.Buffer
 	formatter.Stdout = &stdout
 	if err := formatter.Run(); err != nil {
-		unformatted.Formatter = formatterName
+		unformatted.Formatter = adapter.argv[0]
 		if errors.Is(formatCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			unformatted.TimedOut = true
 		}
@@ -209,5 +239,5 @@ func formatWithStdin(ctx context.Context, formatterName, binaryPath string, argu
 		// path on some CLI versions) must not publish an empty file.
 		return unformatted
 	}
-	return formatOnWriteResult{Content: stdout.String(), Formatter: formatterName}
+	return formatOnWriteResult{Content: stdout.String(), Formatter: adapter.argv[0]}
 }

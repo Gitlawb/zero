@@ -92,7 +92,7 @@ func TestPreserveNativeACLRemovesInheritedACLWhenSourceHasNone(t *testing.T) {
 		t.Fatalf("clear ACL: %s: %v", out, err)
 	}
 	if out, err := exec.Command("chmod", "+a", "user:nobody allow read,file_inherit,directory_inherit", dir).CombinedOutput(); err != nil {
-		t.Fatalf("parent ACL: %s: %v", out, err)
+		t.Skipf("parent ACL unavailable on this filesystem: %s: %v", out, err)
 	}
 	// Exercise preservation directly so private creation cannot mask a nil/no-op bug.
 	staging, err := os.CreateTemp(dir, "inherited-*")
@@ -101,8 +101,14 @@ func TestPreserveNativeACLRemovesInheritedACLWhenSourceHasNone(t *testing.T) {
 	}
 	defer staging.Close()
 	before, err := exec.Command("ls", "-le", staging.Name()).CombinedOutput()
-	if err != nil || !strings.Contains(string(before), "nobody allow read") {
-		t.Fatalf("inherited grant missing: %s, %v", before, err)
+	if err != nil {
+		t.Fatalf("ls -le: %v\n%s", err, before)
+	}
+	if !strings.Contains(string(before), "nobody allow read") {
+		// The precondition is filesystem inheritance, not the helper under
+		// test: a host whose filesystem does not apply file_inherit entries to
+		// new files cannot exercise the absence case at all.
+		t.Skipf("filesystem did not inherit the directory ACL onto a new file; ls -le:\n%s", before)
 	}
 	if err := preserveNativeACL(staging, target); err != nil {
 		t.Fatal(err)
@@ -131,7 +137,7 @@ func TestPreserveNativeACLRemovesInheritedACLWhenSourceHasNone(t *testing.T) {
 func TestPrivateStagingDarwinCreationSuppressesInheritance(t *testing.T) {
 	dir := t.TempDir()
 	if out, err := exec.Command("chmod", "+a", "user:nobody allow read,file_inherit,directory_inherit", dir).CombinedOutput(); err != nil {
-		t.Fatalf("parent ACL: %s: %v", out, err)
+		t.Skipf("parent ACL unavailable on this filesystem: %s: %v", out, err)
 	}
 	count := 0
 	previous := privateCreationObserver
