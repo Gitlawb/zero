@@ -46,17 +46,26 @@ func gitWorkspaceEngine(t *testing.T, workspace string) *Engine {
 	})
 }
 
-// THE LIFECYCLE, END TO END: setup leaves this workspace with no git protection,
-// so the command that would create the thing needing protection is refused.
+// THE LIFECYCLE, END TO END: the workspace is protected at write time AND the
+// command that would create a repository there is refused with an explanation.
 //
-// The setup guard is the load-bearing half. If gitMetadataWriteCarveouts ever
-// starts returning config and hooks for a nested workspace again, the premise of
-// the refusal is gone and this fails here rather than quietly guarding nothing.
+// The setup guard is still load-bearing, but it now asserts the opposite of
+// what it once did. The carveouts were restored for a nested workspace, because
+// skipping them left nothing denying writes to <root>/.git and a repository
+// could be assembled there without running git at all. So the refusal is no
+// longer the only thing standing between a sandboxed command and a writable
+// config; it is the layer that tells an operator why, while the deny ACE is
+// what stops it. If the carveouts disappear again this fails here, because the
+// refusal on its own does not cover mkdir.
 func TestNestedWorkspaceRefusesGitInit(t *testing.T) {
 	ancestor, workspace := nestedGitWorkspace(t)
 
-	if carveouts := gitMetadataWriteCarveouts(workspace); len(carveouts) != 0 {
-		t.Fatalf("SETUP INVALID: the nested workspace planned %v, so it does have git protection and there is nothing to refuse", carveouts)
+	carved := map[string]bool{}
+	for _, carveout := range gitMetadataWriteCarveouts(workspace) {
+		carved[filepath.Base(carveout)] = true
+	}
+	if !carved["config"] || !carved["hooks"] {
+		t.Fatalf("SETUP INVALID: the nested workspace planned %v, so config and hooks are not denied and the refusal below is the only protection again", gitMetadataWriteCarveouts(workspace))
 	}
 
 	engine := gitWorkspaceEngine(t, workspace)

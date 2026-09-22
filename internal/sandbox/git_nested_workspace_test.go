@@ -2,23 +2,24 @@ package sandbox
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// ZERO MUST NOT SYNTHESIZE A CONTROL DIRECTORY IN SOMEBODY ELSE'S REPOSITORY.
+// A WORKSPACE INSIDE ANOTHER REPOSITORY KEEPS ITS CARVEOUTS.
 //
-// A missing .git used to mean "this directory may become a repository", so the
-// Windows plan materialized .git/config and .git/hooks to get the deny ACE in
-// place before git first ran. That is right for a standalone directory. It is
-// wrong when the workspace is a subdirectory of an existing repository: the
-// created .git competes with the ancestor's for git's discovery walk, inside a
-// repository Zero does not own.
+// This branch skipped them for a while, so that Zero would not create a .git in
+// a repository it does not own. The cost was worse than the thing avoided:
+// nothing then denied writes to <root>/.git, so a sandboxed command could build
+// a repository there by hand and put core.fsmonitor in its config, and Zero runs
+// git outside the sandbox against that workspace. The nested-repository refusal
+// recognises git creating a repository; it cannot recognise mkdir.
 //
-// The metadata for such a workspace belongs to the ancestor, sits outside this
-// write root, and the sandboxed principal has no inherited access to it, which
-// is the same reason the linked-worktree branch denies only the pointer file.
-func TestCarveoutsAreNotSynthesizedInsideAnAncestorRepository(t *testing.T) {
+// TestCarveoutsInsideAnAncestorRepositoryDoNotCaptureDiscovery measures the
+// reason the skip existed and shows it does not hold.
+func TestCarveoutsAreSynthesizedInsideAnAncestorRepository(t *testing.T) {
 	parent := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(parent, ".git"), 0o700); err != nil {
 		t.Fatal(err)
@@ -32,12 +33,78 @@ func TestCarveoutsAreNotSynthesizedInsideAnAncestorRepository(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(workspace, ".git")); err == nil {
 		t.Fatal("SETUP INVALID: the workspace already carries .git")
 	}
+	if !gitMetadataGovernedByAncestor(workspace) {
+		t.Fatal("SETUP INVALID: the ancestor is not detected, so this proves nothing")
+	}
 
 	specs := gitMetadataWriteCarveoutSpecs(workspace)
+	want := map[string]bool{
+		filepath.Join(workspace, ".git", "config"): true,
+		filepath.Join(workspace, ".git", "hooks"):  true,
+	}
 	for _, spec := range specs {
-		if spec.Path == filepath.Join(workspace, ".git", "config") || spec.Path == filepath.Join(workspace, ".git", "hooks") {
-			t.Fatalf("a nested workspace asks to materialize %s, which creates a control directory competing with the ancestor repository at %s", spec.Path, parent)
+		delete(want, spec.Path)
+	}
+	for path := range want {
+		t.Errorf("a workspace inside another repository gets no carveout for %s, so nothing denies writing it", path)
+	}
+}
+
+// The reason the skip existed, measured rather than argued: materializing only
+// config and hooks does not make the directory a repository, so git's discovery
+// walk still reaches the ancestor and a config planted there is never read.
+// If a future git changes that, this fails and the trade has to be reopened.
+func TestCarveoutsInsideAnAncestorRepositoryDoNotCaptureDiscovery(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("no git on PATH")
+	}
+	parent := t.TempDir()
+	run := func(dir string, args ...string) (string, error) {
+		command := exec.Command(git, args...)
+		command.Dir = dir
+		command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "HOME="+parent, "USERPROFILE="+parent)
+		out, err := command.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	if out, err := run(parent, "init", "-q", "."); err != nil {
+		t.Skipf("cannot create the ancestor repository: %v: %s", err, out)
+	}
+	workspace := filepath.Join(parent, "sub", "project")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ancestor, err := run(workspace, "rev-parse", "--show-toplevel")
+	if err != nil {
+		t.Skipf("cannot resolve the ancestor: %v: %s", err, ancestor)
+	}
+
+	// Materialize exactly what the plan materializes, and make the config as
+	// hostile as a sandboxed command would if it could write one.
+	for _, spec := range gitMetadataWriteCarveoutSpecs(workspace) {
+		if spec.IsFile {
+			if err := os.MkdirAll(filepath.Dir(spec.Path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(spec.Path, []byte("[core]\n\tfsmonitor = \"exit 9\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			continue
 		}
+		if err := os.MkdirAll(spec.Path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	after, err := run(workspace, "rev-parse", "--show-toplevel")
+	if err != nil {
+		t.Fatalf("git stopped working in the workspace after the carveouts were materialized: %v: %s", err, after)
+	}
+	if after != ancestor {
+		t.Fatalf("discovery moved from %s to %s: the materialized carveouts captured the walk, which is the trade this test exists to watch", ancestor, after)
+	}
+	if out, err := run(workspace, "status", "--porcelain"); err != nil {
+		t.Fatalf("git status failed in the workspace, so the planted config was read: %v: %s", err, out)
 	}
 }
 

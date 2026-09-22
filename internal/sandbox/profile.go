@@ -178,40 +178,31 @@ func gitMetadataWriteCarveoutSpecsWithLstat(root string, lstat func(string) (os.
 	if gitErr == nil && gitInfo.Mode().IsRegular() {
 		return []gitMetadataCarveout{{Path: gitPath, IsFile: true}}
 	}
-	// A MISSING .git IS NOT THE SAME AS "THIS WILL BECOME A REPOSITORY".
+	// EVERY WRITE ROOT GETS THE CARVEOUTS, INCLUDING ONE INSIDE ANOTHER REPOSITORY.
 	//
 	// The directory-shaped carveouts below are materialized by the Windows plan so
-	// the deny ACE is in place before git first runs. That is right for a
-	// standalone directory somebody may later git init. It is wrong when this
-	// workspace already sits inside a repository: creating .git/config and
-	// .git/hooks synthesizes a control directory that competes with the ancestor's
-	// for git's discovery walk, in a repository Zero does not own.
+	// the deny ACE is in place before git first runs. For a while this branch
+	// skipped them when an ancestor owned the git metadata, on the argument that
+	// creating .git/config and .git/hooks there synthesizes a control directory
+	// competing with the ancestor's for git's discovery walk. Measured against the
+	// git this repository builds against, it does not: a .git holding only config
+	// and hooks is not a valid repository, so `rev-parse --show-toplevel` still
+	// answers with the ancestor, `status` still works, and a core.fsmonitor
+	// written into that config is never executed. The test named below drives real
+	// git and fails if that ever stops being true.
 	//
-	// The same argument the linked-worktree branch above makes applies here. This
-	// workspace's git metadata belongs to the ancestor, it lives outside this write
-	// root, and the sandboxed principal has no inherited access to it, so it needs
-	// no carveout here. The non-materialized deny-delete on <root>/.git is emitted
-	// separately and still guards the name if a repository is ever created here.
-	// ONLY WHEN THIS ROOT HAS NO .git OF ITS OWN.
+	// Skipping them cost much more than it saved. With no carveout on this root
+	// nothing denies writes to <root>/.git at all, so a sandboxed command can
+	// assemble a repository there by hand, with mkdir and a few file writes and
+	// not one git command among them, and put core.fsmonitor in its config. Zero
+	// then runs `git -C <workspace> status` OUTSIDE the sandbox (scratch_files.go,
+	// internal/repoinfo, internal/zerogit) and git executes it. The nested-repository
+	// refusal in risk.go does not cover that and cannot: no static reading of a
+	// shell command enumerates the ways to create a directory. It stays as the
+	// layer that explains itself to an operator, not as the boundary.
 	//
-	// A workspace nested inside another repository can still own its own
-	// repository, and then the metadata below is ITS metadata, not the
-	// ancestor's. Asking the ancestor question unconditionally suppressed the
-	// hooks and config carveouts for such a workspace while
-	// workspaceGovernedByAncestorRepository, which answers the same question by
-	// testing for a local .git, reported it as not governed, so the refusal that
-	// would otherwise compensate never fired. The result was workspace write
-	// access over a live .git/config and .git/hooks, which is configuration that
-	// decides what git executes.
-	//
-	// Gating on the lstat error makes this literally the test that function
-	// applies. It cannot reintroduce the competing-control-directory problem the
-	// branch was written for: the carveouts are only materialized where .git
-	// already exists, so git's discovery walk already stops here. A permission
-	// failure on the lstat keeps today's behaviour.
-	if gitErr != nil && gitMetadataGovernedByAncestor(root) {
-		return nil
-	}
+	// So the boundary is here, where it is enforced at write time: config and
+	// hooks are denied on every write root, whatever owns the metadata above it.
 	return []gitMetadataCarveout{
 		{Path: filepath.Join(root, ".git", "hooks")},
 		{Path: filepath.Join(root, ".git", "config"), IsFile: true},
