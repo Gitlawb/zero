@@ -64,6 +64,13 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err != nil {
 		return errorResult("Error reading " + requestedPath + ": " + err.Error())
 	}
+	if info, lerr := os.Lstat(absolutePath); lerr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errorResult("Error: " + relativePath + " is a symbolic link. Editing through a symlink is not allowed; target the real file instead.")
+		}
+	} else if !os.IsNotExist(lerr) {
+		return errorResult("Error reading " + relativePath + ": " + lerr.Error())
+	}
 	contentBytes, err := os.ReadFile(absolutePath)
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
@@ -80,7 +87,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		}
 	}
 	content := string(contentBytes)
-	priorInfo, err := os.Stat(absolutePath)
+	priorInfo, err := os.Lstat(absolutePath)
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
@@ -158,7 +165,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
-	formatting := maybeFormatWrittenFile(ctx, absolutePath, updated)
+	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, updated)
 	updated = formatting.Content
 	finalContentKnown := true
 

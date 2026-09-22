@@ -53,6 +53,63 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	return writeFileAtomic(filename, data, perm, nil)
 }
 
+// WriteFileAtomicExclusive creates filename with data and fails if the path
+// already exists or appears concurrently. Unlike WriteFileAtomic it never
+// replaces a pre-existing object (regular file, symlink, or special file): the
+// destination is staged and synced like WriteFileAtomic, then published with an
+// atomic no-replace primitive, so a racing creator is refused with an error
+// wrapping os.ErrExist rather than overwritten. Readers never observe a partial
+// destination. This is the fail-closed equivalent of O_CREATE|O_EXCL for a
+// caller that must not clobber a file it did not observe.
+func WriteFileAtomicExclusive(filename string, data []byte, perm os.FileMode) error {
+	return writeFileAtomicExclusive(filename, data, perm)
+}
+
+// exclusiveBeforePublish, when non-nil, runs after the staging file has been
+// synced and closed but before the no-replace publication. Tests use it to
+// prove that a file appearing in that window is refused, not overwritten.
+var exclusiveBeforePublish func(filename string)
+
+func writeFileAtomicExclusive(filename string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	tmpFile, err := createTempFile(dir, perm)
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = tmpFile.Close()
+		}
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+	closed = true
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	if exclusiveBeforePublish != nil {
+		exclusiveBeforePublish(filename)
+	}
+	if err := publishExclusive(tmpName, filename); err != nil {
+		return err
+	}
+	syncDir(dir)
+	return nil
+}
+
 // The replacement dependency is local to the call, so failure tests need no global hook.
 func writeFileAtomic(filename string, data []byte, perm os.FileMode, replace func(string, string) error) error {
 	dir := filepath.Dir(filename)

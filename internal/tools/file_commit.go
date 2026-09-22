@@ -10,10 +10,23 @@ import (
 
 var errFileChangedDuringWrite = errors.New("file changed on disk before the write committed")
 
+// errSymlinkDestination refuses any write whose destination is, or has become,
+// a symbolic link. Observation and validation inspect the link (Lstat) and the
+// publication must replace the very object it validated: replacing the symlink
+// itself would strand the pointed-to file with stale bytes while destroying the
+// link. Failing closed is the only consistent contract.
+var errSymlinkDestination = errors.New("refusing to write through a symbolic link")
+
 // fileWriteBeforeCommit is a deterministic test hook. Production leaves it
 // nil; tests use it to replace a path after observation but before opening the
 // object that will actually be mutated.
 var fileWriteBeforeCommit func(path string)
+
+// fileCreateBeforeExclusivePublish is a deterministic test hook. It runs after
+// commitFileContents has observed the path missing but before the exclusive
+// publication, so a test can prove a file appearing in that window is refused
+// rather than overwritten.
+var fileCreateBeforeExclusivePublish func(path string)
 
 // fileWriteStat is a deterministic test seam for proving that the opened-file
 // identity is captured before the final preimage comparison. Production uses
@@ -28,7 +41,9 @@ var fileWriteStat = func(file *os.File) (os.FileInfo, error) { return file.Stat(
 // mutation: a path replacement between observation and commit therefore fails
 // instead of publishing stale content, and no reader ever observes a truncated
 // destination (invariant #921). The exclusive-create branch refuses a path that
-// appeared after the caller observed it missing.
+// appeared after the caller observed it missing, and publishes with an atomic
+// no-replace primitive so a racing creator is refused rather than overwritten.
+// A symlink destination is refused in both branches.
 //
 // The binding covers observation through the pre-publication check only. This
 // handle is closed before publishFileContents replaces the path, so a swap
@@ -43,13 +58,23 @@ func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *
 		fileWriteBeforeCommit(path)
 	}
 
-	if expectedInfo == nil {
-		if _, err := os.Lstat(path); err == nil {
-			return "", errFileChangedDuringWrite
-		} else if !os.IsNotExist(err) {
-			return "", err
+	pathInfo, statErr := os.Lstat(path)
+	if statErr == nil {
+		if pathInfo.Mode()&os.ModeSymlink != 0 {
+			return "", errSymlinkDestination
 		}
-		return publishFileContents(path, content)
+	} else if !os.IsNotExist(statErr) {
+		return "", statErr
+	}
+
+	if expectedInfo == nil {
+		if statErr == nil {
+			return "", errFileChangedDuringWrite
+		}
+		if fileCreateBeforeExclusivePublish != nil {
+			fileCreateBeforeExclusivePublish(path)
+		}
+		return publishFileContentsExclusive(path, content)
 	}
 
 	file, err := os.OpenFile(path, fileCommitOpenFlags(expectedContent), 0)
@@ -65,8 +90,8 @@ func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *
 		_ = file.Close()
 		return "", errFileChangedDuringWrite
 	}
-	pathInfo, err := os.Stat(path)
-	if err != nil || !os.SameFile(openedInfo, pathInfo) {
+	pathInfo, err = os.Lstat(path)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
 		_ = file.Close()
 		return "", errFileChangedDuringWrite
 	}
@@ -109,6 +134,20 @@ func publishFileContents(path, content string) (string, error) {
 	var committed *fsutil.CommittedReplacementCleanupError
 	if errors.As(err, &committed) {
 		return "replacement committed, but backup cleanup failed", nil
+	}
+	return "", err
+}
+
+// publishFileContentsExclusive creates the destination with an atomic no-replace
+// publication. A destination that already exists, or that appears concurrently,
+// is reported as errFileChangedDuringWrite instead of being overwritten.
+func publishFileContentsExclusive(path, content string) (string, error) {
+	err := fsutil.WriteFileAtomicExclusive(path, []byte(content), 0o644)
+	if err == nil {
+		return "", nil
+	}
+	if errors.Is(err, os.ErrExist) {
+		return "", errFileChangedDuringWrite
 	}
 	return "", err
 }

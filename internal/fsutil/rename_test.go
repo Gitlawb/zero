@@ -221,3 +221,48 @@ func TestWriteFileAtomicLeavesDestinationOnReplaceFailure(t *testing.T) {
 		t.Fatalf("staging leftovers: %v, %v", leftovers, err)
 	}
 }
+
+func TestWriteFileAtomicExclusiveCreatesWithoutReplacing(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "created.txt")
+
+	if err := WriteFileAtomicExclusive(target, []byte("first"), 0o644); err != nil {
+		t.Fatalf("exclusive create: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "first" {
+		t.Fatalf("created content = %q, err=%v", got, err)
+	}
+
+	if err := WriteFileAtomicExclusive(target, []byte("second"), 0o644); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("existing-destination error = %v, want os.ErrExist", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "first" {
+		t.Fatalf("exclusive create overwrote the existing file: %q, err=%v", got, err)
+	}
+}
+
+// The no-replace decision must be atomic: a file appearing after the staging
+// copy is synced and closed is refused by the publication primitive rather than
+// overwritten. This is the window the create branch previously lost.
+func TestWriteFileAtomicExclusiveRefusesConcurrentAppearance(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "raced.txt")
+	previous := exclusiveBeforePublish
+	exclusiveBeforePublish = func(filename string) {
+		if err := os.WriteFile(filename, []byte("other writer"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() { exclusiveBeforePublish = previous }()
+
+	if err := WriteFileAtomicExclusive(target, []byte("zero"), 0o644); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("raced create error = %v, want os.ErrExist", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "other writer" {
+		t.Fatalf("raced create overwrote the competitor: %q, err=%v", got, err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dir, ".zero-tmp-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("staging leftovers: %v, %v", leftovers, err)
+	}
+}

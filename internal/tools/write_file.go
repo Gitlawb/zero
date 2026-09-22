@@ -64,7 +64,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 
 	existed := false
 	var priorInfo os.FileInfo
-	if info, err := os.Stat(absolutePath); err == nil {
+	if info, err := os.Lstat(absolutePath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errorResult("Error: " + relativePath + " is a symbolic link. Writing through a symlink is not allowed; target the real file instead.")
+		}
 		existed = true
 		priorInfo = info
 		if !overwrite {
@@ -118,7 +121,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// publish once. Recording pre-format content would make the next edit look
 	// like an external modification and trip the conflict guard; formatting the
 	// destination in place after publication would reintroduce partial writes.
-	formatting := maybeFormatWrittenFile(ctx, absolutePath, content)
+	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, content)
 	content = formatting.Content
 	finalContentKnown := true
 

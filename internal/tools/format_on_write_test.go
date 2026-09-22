@@ -590,6 +590,92 @@ func installFakeGofmt(t *testing.T, script string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// Formatting must not run for a path outside the configured write roots. The
+// unscoped wrapper cannot express that; the scoped entry point refuses and
+// returns the written bytes unchanged, while the same call inside the root
+// still formats.
+func TestFormatOnWriteScopedConfinement(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(outside, []byte(uglyGoSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refused := maybeFormatWrittenFileScoped(context.Background(), root, nil, outside, uglyGoSource)
+	if refused.Content != uglyGoSource {
+		t.Fatalf("formatting outside the write root must be refused, got %q", refused.Content)
+	}
+
+	inside := filepath.Join(root, "a.go")
+	if err := os.WriteFile(inside, []byte(uglyGoSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	formatted := maybeFormatWrittenFileScoped(context.Background(), root, nil, inside, uglyGoSource)
+	if !strings.Contains(formatted.Content, "func A() {") {
+		t.Fatalf("formatting inside the write root must apply, got %q", formatted.Content)
+	}
+}
+
+// A physical formatter is handed a staging copy; its working directory must
+// still be pinned inside the allowed write root, not at the caller's cwd.
+func TestFormatOnWriteScopedStagingRunsInsideWriteRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake formatter shim is a POSIX script")
+	}
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	record := filepath.Join(t.TempDir(), "formatter-pwd")
+	installFakePhysicalFormatter(t, ".physfmt", "physfmt", record)
+
+	root := t.TempDir()
+	target := filepath.Join(root, "sub", "a.physfmt")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("written\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	formatting := maybeFormatWrittenFileScoped(context.Background(), root, nil, target, "written\n")
+	if formatting.Content != "written\n" {
+		t.Fatalf("physical formatter output = %q, want the written bytes", formatting.Content)
+	}
+	recorded, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("formatter never recorded its working directory: %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(recorded), resolvedRoot) {
+		t.Fatalf("formatter cwd %q escaped the write root %q", recorded, resolvedRoot)
+	}
+}
+
+// installFakePhysicalFormatter puts a non-stdin formatter on PATH and registers
+// it for the test's duration. The script records its working directory and
+// leaves the staging file untouched, so the published bytes are the written
+// bytes.
+func installFakePhysicalFormatter(t *testing.T, extension, name, record string) {
+	t.Helper()
+	directory := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s' \"$PWD\" > \"$ZERO_FORMAT_PWD_RECORD\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ZERO_FORMAT_PWD_RECORD", record)
+	previous, existed := formatterCommands[extension]
+	formatterCommands[extension] = formatterAdapter{argv: []string{name}}
+	t.Cleanup(func() {
+		if existed {
+			formatterCommands[extension] = previous
+			return
+		}
+		delete(formatterCommands, extension)
+	})
+}
+
 func TestFormatOnWriteRuffUsesLogicalDestinationForWriteAndEdit(t *testing.T) {
 	if _, err := exec.LookPath("ruff"); err != nil {
 		t.Skip("ruff not installed")

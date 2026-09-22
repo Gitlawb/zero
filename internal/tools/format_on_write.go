@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/fsutil"
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // Format-on-write for the mutating file tools. When enabled, a successful
@@ -130,15 +132,22 @@ func formatOnWriteEnabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
-// maybeFormatWrittenFile runs the configured formatter over the written bytes
-// (when enabled and on PATH) and returns the bytes to publish. Stdin adapters
-// receive the bytes on stdin; physical adapters get a private staging copy. The
-// destination path is never opened or rewritten here. Best-effort throughout:
-// any failure — no formatter, formatter error, timeout, unreadable result —
-// returns writtenContent so the caller's state matches the last write it
-// performed itself. Only the timeout is reported back, for the reason on
-// formatOnWriteResult.
+// maybeFormatWrittenFile is the unscoped test-facing wrapper. Production
+// callers use maybeFormatWrittenFileScoped so the formatter cannot operate
+// outside the configured write roots.
 func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) formatOnWriteResult {
+	return maybeFormatWrittenFileScoped(ctx, filepath.Dir(absolutePath), nil, absolutePath, writtenContent)
+}
+
+// maybeFormatWrittenFileScoped runs the configured formatter over a transient
+// copy of the written bytes (stdin, or a private staging file) and returns the
+// bytes to publish. The destination is never opened or rewritten here. If
+// absolutePath does not resolve inside one of the scope's write roots, the
+// formatting is refused and the written bytes pass through unchanged: a
+// formatter must not be able to read or write outside the same roots the tool
+// itself is confined to. The formatter's working directory is pinned inside the
+// matched root for the same reason.
+func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, scope PathScope, absolutePath string, writtenContent string) formatOnWriteResult {
 	unformatted := formatOnWriteResult{Content: writtenContent}
 	if !formatOnWriteEnabled() {
 		return unformatted
@@ -151,19 +160,65 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	if err != nil {
 		return unformatted
 	}
-	if adapter.stdin {
-		return formatWithStdin(ctx, adapter, binaryPath, absolutePath, writtenContent)
+	root, relativePath, err := openFormattedFileRoot(workspaceRoot, scope, absolutePath)
+	if err != nil {
+		return unformatted
 	}
-	return formatWithStaging(ctx, adapter, binaryPath, absolutePath, writtenContent)
+	defer root.Close()
+	workDir := filepath.Join(root.Name(), filepath.Dir(relativePath))
+	if adapter.stdin {
+		return formatWithStdin(ctx, adapter, binaryPath, absolutePath, writtenContent, workDir)
+	}
+	return formatWithStaging(ctx, adapter, binaryPath, absolutePath, writtenContent, workDir)
+}
+
+// openFormattedFileRoot resolves absolutePath against the scope's write roots
+// and opens the first root that contains it. It returns the descriptor-bound
+// root and the path relative to it, or an error when the path lies outside
+// every allowed root.
+func openFormattedFileRoot(workspaceRoot string, scope PathScope, absolutePath string) (*os.Root, string, error) {
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return nil, "", err
+	}
+	var firstErr error
+	for _, configuredRoot := range roots {
+		resolvedRoot, err := filepath.Abs(configuredRoot)
+		if err == nil {
+			resolvedRoot, err = filepath.EvalSymlinks(resolvedRoot)
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		candidate := sandbox.NormalizePrefixForRoot(absolutePath, resolvedRoot)
+		relativePath, err := filepath.Rel(resolvedRoot, candidate)
+		if err != nil || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
+			continue
+		}
+		root, err := os.OpenRoot(resolvedRoot)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		return root, relativePath, nil
+	}
+	if firstErr != nil {
+		return nil, "", firstErr
+	}
+	return nil, "", fmt.Errorf("%s must stay inside the configured write roots", absolutePath)
 }
 
 // formatWithStaging runs a physical formatter on a private copy of the written
 // bytes, never on the destination. The copy keeps the destination's basename
 // so filename-derived formatter behaviour still applies, and any scribble from
 // a killed or failing run lands there, not in the user's file.
-func formatWithStaging(ctx context.Context, adapter formatterAdapter, binaryPath, absolutePath, writtenContent string) formatOnWriteResult {
+func formatWithStaging(ctx context.Context, adapter formatterAdapter, binaryPath, absolutePath, writtenContent, dir string) formatOnWriteResult {
 	unformatted := formatOnWriteResult{Content: writtenContent}
-	dir := filepath.Dir(absolutePath)
 	stagingDir, err := fsutil.CreatePrivateTempDir(dir, ".zero-fmt-*")
 	if err != nil {
 		return unformatted
@@ -210,7 +265,7 @@ func formatWithStaging(ctx context.Context, adapter formatterAdapter, binaryPath
 // destination through the adapter's filename flag when it has one, and reads
 // the formatted bytes from stdout. The empty-output guard keeps a formatter
 // that ignores the path (and so prints nothing) from publishing an empty file.
-func formatWithStdin(ctx context.Context, adapter formatterAdapter, binaryPath, absolutePath, writtenContent string) formatOnWriteResult {
+func formatWithStdin(ctx context.Context, adapter formatterAdapter, binaryPath, absolutePath, writtenContent, dir string) formatOnWriteResult {
 	unformatted := formatOnWriteResult{Content: writtenContent}
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
@@ -219,7 +274,7 @@ func formatWithStdin(ctx context.Context, adapter formatterAdapter, binaryPath, 
 		arguments = append(arguments, adapter.filenameFlag+"="+absolutePath)
 	}
 	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
-	formatter.Dir = filepath.Dir(absolutePath)
+	formatter.Dir = dir
 	formatter.Stdin = strings.NewReader(writtenContent)
 	hardenProcessLifetime(formatter)
 	if formatterCommandObserver != nil {
