@@ -134,6 +134,52 @@ func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
 	}
 }
 
+func TestDiscoverCatalogCustomEndpointProbesLiveWithoutKey(t *testing.T) {
+	// The wizard deliberately leaves the key unset for auth-free custom
+	// gateways; the picker must still live-probe them (and must not fetch a
+	// doomed models.dev catalog for a provider key that cannot exist).
+	var catalogFetch bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"teletran-smart","name":"Teletran Smart"},
+				{"id":"agentrouter/glm-5.3","name":"GLM 5.3"}
+			]}`))
+			return
+		}
+		catalogFetch = true
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+
+	provider := providercatalog.Descriptor{
+		ID:             "custom-openai-compatible",
+		Transport:      providercatalog.TransportOpenAICompat,
+		DefaultBaseURL: server.URL + "/v1",
+		RequiresAuth:   true,
+		Custom:         true,
+	}
+	models, err := DiscoverCatalog(context.Background(), provider, config.ProviderProfile{
+		CatalogID:    "custom-openai-compatible",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/v1",
+		// No API key: custom endpoints must probe unconditionally.
+	}, Options{
+		HTTPClient:   server.Client(),
+		ModelsDevURL: server.URL + "/catalog",
+	})
+	if err != nil {
+		t.Fatalf("DiscoverCatalog: %v", err)
+	}
+	if catalogFetch {
+		t.Fatalf("custom endpoint should skip the remote catalog fetch")
+	}
+	got := strings.Join(modelIDs(models), ",")
+	if !strings.Contains(got, "teletran-smart") || !strings.Contains(got, "agentrouter/glm-5.3") {
+		t.Fatalf("models = %q, want live teletran ids", got)
+	}
+}
+
 func TestDiscoverCatalogOpenRouterKeepsLiveOnlyModels(t *testing.T) {
 	// Catalog omits anthropic/claude-sonnet-4.5 and the generic tools-only id;
 	// live retains both so preferLive keeps coding-capable live-only entries

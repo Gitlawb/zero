@@ -46,10 +46,26 @@ type Options struct {
 }
 
 func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, profile config.ProviderProfile, options Options) ([]Model, error) {
-	catalogModels, catalogErr := fetchCatalogModels(ctx, provider, options)
+	// Custom "bring your own endpoint" descriptors never have a curated remote
+	// catalog (models.dev has no such provider key) — skip the doomed fetch
+	// instead of burning probe-context time on it (providercatalog.Descriptor
+	// docs: RequiresAuth on Custom entries is a template default, not a
+	// credential requirement).
+	catalogModels, catalogErr := func() ([]Model, error) {
+		if provider.Custom {
+			return nil, nil
+		}
+		return fetchCatalogModels(ctx, provider, options)
+	}()
 	// OpenRouter and OpenGateway publish public live model lists. Probe them even
 	// without credentials so the picker stays current before a key is entered.
+	// Custom endpoints are probed unconditionally too: the wizard deliberately
+	// leaves the key blank for auth-free gateways (provider_wizard does not
+	// write APIKeyEnv for Custom profiles), so requiring a credential here
+	// would disable live discovery exactly where it matters most. Matches the
+	// CLI's unconditional Discover() behavior.
 	canProbeProvider := modelDiscoveryAllowed(profile) && (!provider.RequiresAuth ||
+		provider.Custom ||
 		discoveryHasCredential(profile) ||
 		publicLiveCatalogProvider(provider, profile))
 	if canProbeProvider {
