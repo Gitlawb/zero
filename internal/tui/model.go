@@ -218,18 +218,23 @@ type model struct {
 	// notifyMode and notifyFocusMode track the user's in-session notify
 	// preference (from options.Notify, updated by /notify). The notifier built
 	// at startup is independent, so changes apply on the NEXT permission prompt.
-	notifyMode        string
-	notifyFocusMode   string
-	userAgent         string
-	compactRequests   int
-	compactInFlight   bool
-	compactFrame      int
-	lastCompactResult *CompactResult
-	lastCompactError  string
-	unpricedRequests  int
-	unpricedTokens    int
-	lastUsage         usage.Normalized
-	lastUsageSeen     bool
+	notifyMode string
+	// notifyConfiguredMode holds the RAW configured mode ("" when the user
+	// never set one) so state output can label the effective default as
+	// "(default)" — mirroring the CLI's `mode: (default)` for the same state
+	// (maintainer review, PR #1001). Cleared once the user picks a mode.
+	notifyConfiguredMode string
+	notifyFocusMode      string
+	userAgent            string
+	compactRequests      int
+	compactInFlight      bool
+	compactFrame         int
+	lastCompactResult    *CompactResult
+	lastCompactError     string
+	unpricedRequests     int
+	unpricedTokens       int
+	lastUsage            usage.Normalized
+	lastUsageSeen        bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
@@ -1054,6 +1059,7 @@ func newModel(ctx context.Context, options Options) model {
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
 		notifyMode:                  string(effectiveTUINotifyMode(options.Notify.Mode)),
+		notifyConfiguredMode:        strings.TrimSpace(options.Notify.Mode),
 		notifyFocusMode:             strings.TrimSpace(options.Notify.FocusMode),
 		userAgent:                   options.UserAgent,
 		usageTracker:                usageTracker,

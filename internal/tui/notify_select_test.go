@@ -429,3 +429,44 @@ func readNotifyBlock(t *testing.T, path string) config.NotifyConfig {
 	}
 	return cfg.Notify
 }
+
+// Maintainer regression (PR #1001): a blank stored mode must read as a
+// DEFAULT on every first-party surface — the TUI says "(default)" like the
+// CLI's `mode: (default)`, not a bare effective value the user cannot
+// distinguish from a stored "both". The mode line mirrors focus, which
+// already labels its built-in default ("unfocused (default)").
+func TestNotifyStateLabelsEffectiveDefaultMode(t *testing.T) {
+	// Nothing stored, nothing resolved: the TUI applies its effective
+	// default ("both") and must say so.
+	m := newModel(context.Background(), Options{})
+	state := m.notifyStateText()
+	if !strings.Contains(state, "active mode: both (default)") {
+		t.Errorf("unconfigured state should label the effective mode as (default), got:\n%s", state)
+	}
+
+	// A stored/resolved explicit "both" renders bare — the user chose it.
+	// (The focus line may still say "unfocused (default)"; only the MODE
+	// line is under assertion.)
+	m = newModel(context.Background(), Options{Notify: config.NotifyConfig{Mode: "both"}})
+	state = m.notifyStateText()
+	if strings.Contains(state, "active mode: both (default)") {
+		t.Errorf("an explicit both must not carry the (default) label, got:\n%s", state)
+	}
+	if !strings.Contains(state, "active mode: both") {
+		t.Errorf("explicit both should still show the mode, got:\n%s", state)
+	}
+
+	// A mode-only change from unconfigured commits an explicit choice: the
+	// change line and later state output render it bare, never as a default.
+	m = newModel(context.Background(), Options{})
+	m, out := m.handleNotifyCommand("bell")
+	if strings.Contains(out, "active mode: bell (default)") {
+		t.Errorf("explicit /notify bell change line should render bare, got:\n%s", out)
+	}
+	if !strings.Contains(out, "active mode: bell") {
+		t.Errorf("change line should show the new mode, got:\n%s", out)
+	}
+	if state := m.notifyStateText(); strings.Contains(state, "active mode: bell (default)") {
+		t.Errorf("state after an explicit choice should render bare, got:\n%s", state)
+	}
+}

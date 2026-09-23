@@ -103,6 +103,7 @@ func (m model) handleNotifyCommand(args string) (model, string) {
 		focusExplicit = true
 	}
 	m.notifyMode = mode
+	m.notifyConfiguredMode = mode
 	m.notifyFocusMode = liveFocus
 	// Apply to the live notifier so the change takes effect on the next
 	// notification in this session, not just after a restart. A blank
@@ -115,7 +116,7 @@ func (m model) handleNotifyCommand(args string) (model, string) {
 	}
 	lines := []string{
 		"Notify",
-		"active mode: " + mode + ", focus: " + effectiveFocusLabel(liveFocus),
+		"active mode: " + effectiveModeLabel(mode, m.notifyConfiguredMode) + ", focus: " + effectiveFocusLabel(liveFocus),
 	}
 	if note := m.persistNotifyPreference(mode, liveFocus, focusExplicit); note != "" {
 		lines = append(lines, note)
@@ -130,6 +131,19 @@ func effectiveFocusLabel(focus string) string {
 		return "unfocused (default)"
 	}
 	return focus
+}
+
+// effectiveModeLabel renders the notify mode for state lines: when the mode in
+// effect came from the built-in default rather than an explicit choice (stored
+// or in-session), label it "(default)" so the TUI agrees with the CLI's
+// `mode: (default)` for the same configuration (maintainer review, PR #1001).
+// A mode the user actually chose — including a previously stored "both" —
+// renders bare.
+func effectiveModeLabel(mode, configuredMode string) string {
+	if strings.TrimSpace(mode) == strings.TrimSpace(configuredMode) {
+		return mode
+	}
+	return mode + " (default)"
 }
 
 // persistNotifyPreference writes the choice to user config so it survives a
@@ -168,7 +182,7 @@ func (m model) notifyStateText() string {
 	sections := []commandSection{{
 		Title: "State",
 		Lines: []string{
-			"active mode: " + m.notifyMode,
+			"active mode: " + effectiveModeLabel(m.notifyMode, m.notifyConfiguredMode),
 			"active focus: " + effectiveFocusLabel(m.notifyFocusMode),
 		},
 	}}
