@@ -1,6 +1,7 @@
 package redaction
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -198,5 +199,184 @@ func TestCompactionDoesNotRewriteTextItDoesNotRedact(t *testing.T) {
 		if got := redactControlSplitSecrets(value, RedactedSecret); got != value {
 			t.Errorf("redactControlSplitSecrets(%q) = %q, want it unchanged", value, got)
 		}
+	}
+}
+
+// The separators the tests below need by name, built from their code points so
+// no escape in this file can be mangled into the character it stands for.
+var (
+	nulSeparator  = string(rune(0x00))
+	escSeparator  = string(rune(0x1b))
+	zwspSeparator = string(rune(0x200b))
+)
+
+const (
+	slackKey  = "xoxb-EXAMPLE-NOT-A-REAL-TOKEN-AAAAAAAAAA"
+	googleKey = "AIzaSyD-0123456789abcdefghijklmnopqrstuv"
+	jwtToken  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r0W1gFWFOEjXkPY"
+	otherJWT  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5ODc2NTQzMjEwIn0.QWxpY2VCb2JDYXJvbERhdmVFdmVGcmFua0dyYWNlSA"
+)
+
+// splitInTheMiddle puts one separator inside the body of a secret.
+func splitInTheMiddle(secret, separator string) string {
+	half := len(secret) / 2
+	return secret[:half] + separator + secret[half:]
+}
+
+// A SEPARATOR IN FRONT OF A KEY IS A DELIMITER, ONE INSIDE IT IS FILLER.
+//
+// #969 asks for one thing: the split form is redacted the same as the unsplit
+// form. That is the whole assertion here, run over every kind of byte a key can
+// follow. It catches the two ways of getting it wrong from opposite sides. Drop
+// the separators and then ask the pattern for a word boundary, and a key written
+// after a NUL stops redacting the moment a second separator lands inside it,
+// even though the unsplit key after that same NUL redacts today. Ignore the
+// boundary instead, and a key glued to the end of a word starts redacting when
+// it is split, although the unsplit form never did.
+func TestSplitRedactionMatchesTheUnsplitVerdictAtEveryLeadingBoundary(t *testing.T) {
+	leaders := map[string]string{
+		"start of string": "",
+		"space":           "before ",
+		"quote":           `{"k":"`,
+		"equals":          "key=",
+		"NUL":             "prefix" + nulSeparator,
+		"ESC":             "prefix" + escSeparator,
+		"zero width":      "prefix" + zwspSeparator,
+		"letter":          "prefix",
+		"digit":           "7",
+		"underscore":      "field_",
+	}
+	secrets := map[string]string{"aws": awsKey, "github": githubKey, "openai": openaiKey, "slack": slackKey, "google": googleKey}
+	for secretName, secret := range secrets {
+		for leaderName, leader := range leaders {
+			unsplit := leader + secret
+			split := leader + splitInTheMiddle(secret, escSeparator)
+			wantRedacted := !strings.Contains(RedactString(unsplit, Options{}), secret)
+			out := RedactString(split, Options{})
+			gotRedacted := !strings.Contains(rejoin(out), secret)
+			if gotRedacted == wantRedacted {
+				continue
+			}
+			if wantRedacted {
+				t.Errorf("%s key after a %s leader: the unsplit form redacts and the split form does not: %q rejoins to %q",
+					secretName, leaderName, out, rejoin(out))
+				continue
+			}
+			t.Errorf("%s key after a %s leader: the unsplit form is left alone and the split form is redacted: %q",
+				secretName, leaderName, out)
+		}
+	}
+}
+
+// A MATCH MUST NOT REACH OUT OF ONE CREDENTIAL AND INTO THE NEXT.
+//
+// The JWT shapes end on a run of body characters with no trailing boundary, so
+// a matcher reading a copy with the separators removed can start in the key in
+// front and run through the header of the JWT behind it, replacing both with one
+// marker and eating the delimiter between them. The contiguous pass claims whole
+// credentials before this one runs, which is what keeps them apart.
+func TestSplitRedactionKeepsNeighbouringCredentialsApart(t *testing.T) {
+	separators := map[string]string{"NUL": nulSeparator, "ESC": escSeparator, "zero width": zwspSeparator}
+	leaders := map[string]string{
+		"jwt":       jwtToken,
+		"github":    githubKey,
+		"anthropic": anthropicKey,
+		"openai":    openaiKey,
+		"slack":     slackKey,
+		"google":    googleKey,
+		"aws":       awsKey,
+	}
+	for leaderName, leader := range leaders {
+		for sepName, separator := range separators {
+			value := leader + separator + otherJWT
+			want := RedactedSecret + separator + RedactedSecret
+			if got := RedactString(value, Options{}); got != want {
+				t.Errorf("a %s key %s a JWT: RedactString(...) = %q, want %q", leaderName, sepName, got, want)
+			}
+		}
+	}
+}
+
+// ORDINARY TEXT AFTER A KEY IS NOT PART OF THE KEY. Removing the separator
+// between them joins the word behind it onto the end of the key, and an
+// unbounded shape then carries the replacement over text that was never secret.
+func TestSplitRedactionLeavesTextBehindAKeyAlone(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"word", openaiKey + nulSeparator + "ordinary prose here", RedactedSecret + nulSeparator + "ordinary prose here"},
+		{"escape then word", openaiKey + escSeparator + "ordinary", RedactedSecret + escSeparator + "ordinary"},
+		{"zero width then word", githubKey + zwspSeparator + "ordinary", RedactedSecret + zwspSeparator + "ordinary"},
+		{"digits", awsKey + nulSeparator + "0123456789", RedactedSecret + nulSeparator + "0123456789"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := RedactString(testCase.value, Options{}); got != testCase.want {
+				t.Errorf("RedactString(...) = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+// THE OFFSET TABLE IS SIZED BY THE MATCHES, NOT BY THE TEXT IT SEARCHED.
+//
+// RedactString is handed whole command output, verification stdout and
+// notification bodies, none of which is bounded before it runs, and an index
+// carrying a start and an end for every source byte costs sixteen bytes per byte
+// of input on a 64-bit build. Measured against the same text with no separator
+// in it, so the regex work and the output copy cancel out and what is left is
+// what the split path added.
+func TestSplitRedactionDoesNotIndexEverySourceByte(t *testing.T) {
+	const line = "plain log output line with no secret in it "
+	filler := strings.Repeat(line, (1<<20)/len(line))
+	split := filler + " " + splitInTheMiddle(awsKey, escSeparator)
+	plain := filler + " " + awsKey
+	if got := RedactString(split, Options{}); !strings.HasSuffix(got, RedactedSecret) {
+		t.Fatalf("SETUP INVALID: the split key in the large input is not redacted, so nothing indexes it: %q", got[len(got)-64:])
+	}
+	// Four times the input still fails an index of two ints per source byte,
+	// which needs sixteen, and clears the copy this path actually makes.
+	limit := int64(4 * len(split))
+	overhead := redactAllocBytes(split) - redactAllocBytes(plain)
+	if overhead > limit {
+		t.Errorf("redacting %d bytes with a split key allocated %d bytes more than the same text without one, over the %d byte limit",
+			len(split), overhead, limit)
+	}
+}
+
+// redactAllocBytes is the smallest number of bytes any of three RedactString
+// calls allocated. Smallest rather than mean because a garbage collection or an
+// unrelated goroutine can only ever add to the figure.
+func redactAllocBytes(value string) int64 {
+	smallest := int64(-1)
+	for i := 0; i < 3; i++ {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		out := RedactString(value, Options{})
+		runtime.ReadMemStats(&after)
+		if len(out) == 0 {
+			panic("RedactString returned nothing")
+		}
+		used := int64(after.TotalAlloc - before.TotalAlloc)
+		if smallest < 0 || used < smallest {
+			smallest = used
+		}
+	}
+	return smallest
+}
+
+// A REPLACEMENT ALREADY ON THE PAGE IS A BARRIER. The default marker is spelled
+// with brackets, which no credential body admits, so it stops a match by
+// itself. A caller is free to supply one made of ordinary word characters, and
+// then the text left by the contiguous pass would read as the middle of a key
+// and carry the replacement out over both delimiters and the text behind them.
+func TestSplitRedactionStopsAtACallerSuppliedReplacement(t *testing.T) {
+	options := Options{Replacement: "REDACTED"}
+	value := "sk-aaaaa" + nulSeparator + awsKey + nulSeparator + "bbbbbbbbbbbbbbb"
+	want := "sk-aaaaa" + nulSeparator + "REDACTED" + nulSeparator + "bbbbbbbbbbbbbbb"
+	if got := RedactString(value, options); got != want {
+		t.Errorf("RedactString(...) = %q, want %q", got, want)
 	}
 }

@@ -224,10 +224,6 @@ func RedactString(value string, options Options) string {
 		}
 		return parts[1] + parts[2] + "=" + replacement
 	})
-	// Credentials broken up by invisible characters are redacted before the
-	// contiguous matchers run, because those matchers cannot see them at all and
-	// would leave the fragments in place. No-op for text with no such character.
-	redacted = redactControlSplitSecrets(redacted, replacement)
 	// openai keys first so the filter can drop kebab-case false positives
 	// before any other pattern rewrites nearby text.
 	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
@@ -239,6 +235,11 @@ func RedactString(value string, options Options) string {
 	for _, pattern := range textSecretPatterns {
 		redacted = pattern.ReplaceAllString(redacted, replacement)
 	}
+	// Credentials broken up by invisible characters last, over what the
+	// contiguous matchers left: a whole credential is already claimed by its own
+	// strict match, so this pass cannot reach out of one and into the next. It is
+	// a no-op for text with no such character, which is nearly all text.
+	redacted = redactControlSplitSecrets(redacted, replacement)
 	return redacted
 }
 
