@@ -157,7 +157,8 @@ func writeConfigNotifyHelp(w io.Writer) error {
 		"firing only when the terminal is unfocused, while an unconfigured\n"+
 		"headless run stays silent. Omitted flags preserve the values stored in\n"+
 		"YOUR config file; --reset clears both so the TUI's effective default\n"+
-		"applies again.\n"+
+		"applies again. If --reset is combined with --mode/--focus, --reset wins\n"+
+		"and the explicit values are ignored.\n"+
 		"\n"+
 		"Examples:\n"+
 		"  zero config notify\n"+

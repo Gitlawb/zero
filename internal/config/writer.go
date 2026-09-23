@@ -826,7 +826,10 @@ func validateNotify(value NotifyConfig) (NotifyConfig, error) {
 // disabled: false, which the typed serializer's omitempty cannot round-trip —
 // through the existing temp-file-and-rename atomic publish. Locking only the
 // final write would leave the stale-field merge outside the transaction, so
-// the whole sequence runs under one lock. The release error is joined into the
+// the whole sequence runs under one lock — the SAME lockConfigFileFn authority
+// every other config mutator uses (provider/theme/credential/MCP writes), not
+// a private lock: two authorities over the same file would not contend
+// (maintainer review, PR #1001). The release error is joined into the
 // result like every other writer: a failed unlock would leave the advisory
 // lock held and later updates blocked while the caller is told success.
 func UpdateNotify(path string, merge func(current NotifyConfig) NotifyConfig) (result NotifyConfig, err error) {
@@ -837,7 +840,7 @@ func UpdateNotify(path string, merge func(current NotifyConfig) NotifyConfig) (r
 	if merge == nil {
 		return NotifyConfig{}, fmt.Errorf("merge function is required")
 	}
-	release, err := acquireConfigLock(path)
+	release, err := lockConfigFileFn(path)
 	if err != nil {
 		return NotifyConfig{}, err
 	}

@@ -1343,3 +1343,83 @@ func TestEditProviderRejectsCollisionAndUnknown(t *testing.T) {
 		t.Fatalf("config was rewritten by a rejected edit")
 	}
 }
+
+// Maintainer regression (PR #1001): notify writes must contend with EXISTING
+// config mutators, not only each other. UpdateNotify originally took a private
+// lock (acquireConfigLock); on Windows its LockFileEx range did not overlap
+// lockutil's, so `zero config notify --mode off` could race a theme (or
+// provider/credential/MCP) write and silently discard it — the later rename
+// wins and the other acknowledged change is gone. UpdateNotify now uses the
+// same lockConfigFileFn authority as every other mutator; this race holds it
+// against SetTheme and requires BOTH acknowledged edits to survive.
+func TestUpdateNotifyRacesExistingConfigMutatorWithoutLoss(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	if err := os.WriteFile(path, []byte(`{"notify":{"mode":"both","focusMode":"unfocused"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := UpdateNotify(path, func(NotifyConfig) NotifyConfig {
+			return NotifyConfig{Mode: "off", FocusMode: "always"}
+		}); err != nil {
+			errs <- fmt.Errorf("notify write: %w", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := SetTheme(path, "dracula"); err != nil {
+			errs <- fmt.Errorf("theme write: %w", err)
+		}
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+
+	cfg := readConfigFixture(t, path)
+	if cfg.Notify.Mode != "off" || cfg.Notify.FocusMode != "always" {
+		t.Errorf("notify lost the race: %+v, want off/always — the two writers did not contend on one lock", cfg.Notify)
+	}
+	if cfg.Preferences.Theme != "dracula" {
+		t.Errorf("theme lost the race: %q, want dracula — the two writers did not contend on one lock", cfg.Preferences.Theme)
+	}
+}
+
+// Maintainer regression (PR #1001, jatmn review): Go's decoder MERGES the
+// fields of duplicate JSON members into one struct, so a full replacement that
+// omits a field could inherit it from an earlier duplicate —
+// {"notify":{"mode":"off"},"notify":{"focusMode":"focused"}} +
+// SetNotify({FocusMode:"always"}) must yield blank/always, not off/always.
+// The editor removes every duplicate and inserts the replacement fresh.
+func TestSetNotifyReplacementInheritsNoFieldFromEarlierDuplicate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	duplicated := `{"notify":{"mode":"off"},"notify":{"focusMode":"focused"},"activeProvider":"openai"}`
+	if err := os.WriteFile(path, []byte(duplicated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetNotify(path, NotifyConfig{FocusMode: "always"}); err != nil {
+		t.Fatalf("SetNotify: %v", err)
+	}
+	stored, err := UserNotify(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Mode != "" || stored.FocusMode != "always" {
+		t.Fatalf("replacement inherited a field from an earlier duplicate: %+v, want blank/always", stored)
+	}
+
+	// Unrelated bytes still survive the rewrite.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"activeProvider":"openai"`) {
+		t.Fatalf("unrelated member lost through the replace: %s", string(raw))
+	}
+}

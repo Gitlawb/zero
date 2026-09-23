@@ -254,13 +254,17 @@ func petJSONObject(encodedPet []byte) []byte {
 // (maintainer review, PR #1001). An empty notify block removes the member
 // entirely so a reset leaves no `"notify": {}` husk behind.
 //
-// A hand-edited file may contain DUPLICATE notify members (tolerated by JSON
-// decoders, where the last occurrence wins). The reset path therefore removes
-// every notify member — deleting only the last would leave an earlier block
-// behind, and that survivor becomes the effective preference on the next
-// decode, so the reset would silently fail. Mirrors setPetPreferenceJSON's
-// duplicate handling. The replace path edits the LAST member, which is the one
-// a decoder treats as effective, so an earlier duplicate stays inert.
+// A hand-edited file may contain DUPLICATE notify members. Go's decoder
+// MERGES the fields of duplicate object members into the same struct, so an
+// earlier duplicate's field survives a replacement that omits it — e.g.
+// {"notify":{"mode":"off"},"notify":{"focusMode":"focused"}} + a
+// replacement {"focusMode":"always"} would leave mode "off" effective.
+// The nonempty path therefore removes EVERY duplicate and inserts the
+// replacement fresh (full-replace semantics: nothing inherited), and the
+// reset path removes every member the same way. UpdateNotify's partial
+// merge is unaffected: it seeds omitted fields from the stored value BEFORE
+// calling this editor, so the value it passes is already complete.
+// Mirrors setPetPreferenceJSON's duplicate handling.
 func setNotifyJSONObject(data []byte, notify NotifyConfig) ([]byte, error) {
 	encoded, err := json.Marshal(notify)
 	if err != nil {
@@ -285,10 +289,22 @@ func setNotifyJSONObject(data []byte, notify NotifyConfig) ([]byte, error) {
 		}
 		return data, nil
 	}
-	if notifyIndex < 0 {
+	if notifyIndex >= 0 {
+		// Remove every duplicate, then insert the complete replacement where
+		// the last one lived, so no field can be inherited from an earlier
+		// block (Go merges duplicate members' fields at decode time).
+		for notifyIndex >= 0 {
+			data = removeJSONMember(data, root, notifyIndex)
+			rootStart = skipJSONSpace(data, 0)
+			root, err = parseJSONObject(data, rootStart)
+			if err != nil {
+				return nil, err
+			}
+			notifyIndex = lastJSONMember(root.members, "notify")
+		}
 		return insertJSONMember(data, root, "notify", encoded), nil
 	}
-	return replaceJSONRange(data, root.members[notifyIndex].valueStart, root.members[notifyIndex].valueEnd, encoded), nil
+	return insertJSONMember(data, root, "notify", encoded), nil
 }
 
 func replaceJSONRange(data []byte, start, end int, replacement []byte) []byte {
