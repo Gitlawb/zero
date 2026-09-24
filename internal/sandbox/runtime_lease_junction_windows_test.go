@@ -54,23 +54,31 @@ func TestRuntimeLeaseRefusesAJunctionPlantedAfterTheCheck(t *testing.T) {
 	// the pathname lease open used to follow it.
 	previous := runtimeLeasePreCreateBarrier
 	t.Cleanup(func() { runtimeLeasePreCreateBarrier = previous })
-	planted := false
+	attempted, planted := false, false
 	runtimeLeasePreCreateBarrier = func() {
-		if planted {
+		if attempted {
+			return
+		}
+		attempted = true
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", owned, target).CombinedOutput(); err != nil {
+			t.Logf("mklink /J unavailable: %v: %s", err, out)
 			return
 		}
 		planted = true
-		if out, err := exec.Command("cmd", "/c", "mklink", "/J", owned, target).CombinedOutput(); err != nil {
-			t.Logf("mklink /J unavailable: %v: %s", err, out)
-		}
 	}
 
 	lease, _, err := prepareSandboxRuntimeLeaseRecording(root)
 	if lease != nil {
 		lease.release()
 	}
-	if !planted {
+	if !attempted {
 		t.Skip("the pre-create barrier never ran, so the race was not reproduced")
+	}
+	// Bound to mklink's result, not to the attempt. When it fails, acquisition
+	// goes on to create an ordinary directory at the same name, the check below
+	// finds it, and a correct acquisition would be failed as a junction bypass.
+	if !planted {
+		t.Skip("mklink /J could not create the junction here, so the race was not reproduced")
 	}
 	if _, statErr := os.Lstat(owned); statErr != nil {
 		t.Skipf("the junction could not be created here: %v", statErr)

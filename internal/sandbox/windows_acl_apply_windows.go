@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unsafe"
@@ -146,6 +147,19 @@ func verifyStampRootIdentity(handle windows.Handle, path string, stamp *windowsA
 // close and the apply's open, which is where a substitution can actually land.
 // Nil in production.
 var windowsACLStampIdentitySwapHook func(path string)
+
+// windowsSameRuntimeRootPath compares two runtime roots the way the filesystem
+// does, so the stamp rides along with the right target regardless of spelling.
+// Beside its only caller: in the shared file it was dead code on every other
+// platform.
+func windowsSameRuntimeRootPath(left, right string) bool {
+	left = filepath.Clean(strings.TrimSpace(left))
+	right = filepath.Clean(strings.TrimSpace(right))
+	if left == "" || right == "" {
+		return false
+	}
+	return strings.EqualFold(left, right)
+}
 
 // writeRidingStamp writes the stamp through the handle the capability ACE was
 // applied on, or through the test hook when one is installed.

@@ -34,6 +34,13 @@ const windowsFileAddFile = 0x00000002
 // follows. NtCreateFile is what allows a relative open at all; Win32 CreateFile
 // has no equivalent.
 
+// runtimeTailNotOwned wraps errRuntimeTailNotOwned with the path refused. It
+// lives here rather than beside the sentinel because this traversal is its only
+// caller, and in the shared file it was dead code on every other platform.
+func runtimeTailNotOwned(root string) error {
+	return fmt.Errorf("%w: %s", errRuntimeTailNotOwned, root)
+}
+
 // openWindowsRuntimeTailDirectory walks the components Zero owns and returns a
 // handle to the runtime root itself. The caller closes it.
 func openWindowsRuntimeTailDirectory(root string, access uint32) (windows.Handle, error) {
@@ -136,14 +143,6 @@ func openWindowsChildNoFollow(parent windows.Handle, name string, access uint32,
 	return handle, nil
 }
 
-// writeWindowsRuntimeStampThroughHandle writes the setup stamp INTO the object
-// the traversal reached, not into whatever the pathname resolves to now.
-//
-// The old writer used MkdirAll and a pathname write, which left a second
-// unbound interval: a tree replaced after the ACL apply could be recreated and
-// stamped without ever carrying the capability grant, and marker validation
-// still passed because it only reads the stamp's contents. The restricted
-// process then got a marker-valid runtime path with no grant on it.
 // writeWindowsRuntimeStampToDirectoryHandle writes the stamp into an ALREADY
 // OPEN directory, naming nothing. The caller holds the handle the capability ACE
 // was applied through, so the stamp cannot land anywhere else.
@@ -158,6 +157,15 @@ func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, name st
 		Attributes:    windows.OBJ_CASE_INSENSITIVE,
 	}
 	attributes.Length = uint32(unsafe.Sizeof(attributes))
+	// BEFORE THE OPEN, because FILE_OVERWRITE_IF truncates at open time. Resolved
+	// after it, a reader that could not be established returned an error with the
+	// previous run's stamp already at zero length, or a fresh empty one left
+	// behind. Everything that can fail without touching the stamp now fails
+	// before it is touched. Reported by CodeRabbit.
+	reader, err := windowsRuntimeStampReader(directory)
+	if err != nil {
+		return err
+	}
 
 	var handle windows.Handle
 	var iosb windows.IO_STATUS_BLOCK
@@ -179,10 +187,6 @@ func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, name st
 	}
 	file := os.NewFile(uintptr(handle), name)
 	defer file.Close()
-	reader, err := windowsRuntimeStampReader(directory)
-	if err != nil {
-		return err
-	}
 	// PROTECTED BEFORE ANYTHING IS WRITTEN, because the stamp lives inside the
 	// tree it attests. See protectWindowsRuntimeStamp.
 	if err := protectWindowsRuntimeStamp(windows.Handle(file.Fd()), reader); err != nil {
@@ -367,57 +371,24 @@ func protectWindowsRuntimeStamp(handle windows.Handle, reader *windows.SID) erro
 	return nil
 }
 
+// writeWindowsRuntimeStampThroughHandle writes the setup stamp INTO the object
+// the traversal reached, not into whatever the pathname resolves to now.
+//
+// The old writer used MkdirAll and a pathname write, which left a second
+// unbound interval: a tree replaced after the ACL apply could be recreated and
+// stamped without ever carrying the capability grant, and marker validation
+// still passed because it only reads the stamp's contents. The restricted
+// process then got a marker-valid runtime path with no grant on it.
+//
+// ONE WRITER. This path used to carry its own copy of the create, protect and
+// write sequence, so an ordering fix to one copy left the other behind. It
+// delegates now, and the stamp is protected and ordered the same way whichever
+// handle it arrives through.
 func writeWindowsRuntimeStampThroughHandle(root string, planHash string) error {
 	directory, err := openWindowsRuntimeTailDirectory(root, windows.FILE_TRAVERSE|windowsFileAddFile|windows.READ_CONTROL|windows.SYNCHRONIZE)
 	if err != nil {
 		return err
 	}
 	defer windows.CloseHandle(directory)
-
-	name := windowsSandboxRuntimeStampName(planHash)
-	objectName, err := windows.NewNTUnicodeString(name)
-	if err != nil {
-		return fmt.Errorf("encode sandbox runtime setup stamp name: %w", err)
-	}
-	attributes := windows.OBJECT_ATTRIBUTES{
-		RootDirectory: directory,
-		ObjectName:    objectName,
-		Attributes:    windows.OBJ_CASE_INSENSITIVE,
-	}
-	attributes.Length = uint32(unsafe.Sizeof(attributes))
-
-	var handle windows.Handle
-	var iosb windows.IO_STATUS_BLOCK
-	err = windows.NtCreateFile(
-		&handle,
-		windows.GENERIC_WRITE|windows.READ_CONTROL|windows.WRITE_DAC|windows.SYNCHRONIZE,
-		&attributes,
-		&iosb,
-		nil,
-		windows.FILE_ATTRIBUTE_NORMAL,
-		windows.FILE_SHARE_READ,
-		windows.FILE_OVERWRITE_IF,
-		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
-		0,
-		0,
-	)
-	if err != nil {
-		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
-	}
-	file := os.NewFile(uintptr(handle), name)
-	defer file.Close()
-	reader, err := windowsRuntimeStampReader(directory)
-	if err != nil {
-		return err
-	}
-	// Both writers protect. This one is the fallback path, and a stamp written
-	// here would inherit the same capability grant as one written through the
-	// ACL handle.
-	if err := protectWindowsRuntimeStamp(windows.Handle(file.Fd()), reader); err != nil {
-		return err
-	}
-	if _, err := file.WriteString(planHash); err != nil {
-		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
-	}
-	return nil
+	return writeWindowsRuntimeStampToDirectoryHandle(directory, windowsSandboxRuntimeStampName(planHash), planHash)
 }

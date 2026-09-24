@@ -2,9 +2,7 @@ package sandbox
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -64,24 +62,6 @@ func windowsSandboxRuntimeOwnedTail(root string) (string, []string, bool) {
 // errRuntimeTailNotOwned reports a path the rooted traversal will not handle.
 // Callers must fail rather than quietly opening it by name.
 var errRuntimeTailNotOwned = errors.New("path is not a sandbox runtime root")
-
-// windowsSameRuntimeRootPath compares two runtime roots the way the filesystem
-// does, so the stamp rides along with the right target regardless of spelling.
-func windowsSameRuntimeRootPath(left, right string) bool {
-	left = filepath.Clean(strings.TrimSpace(left))
-	right = filepath.Clean(strings.TrimSpace(right))
-	if left == "" || right == "" {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(left, right)
-	}
-	return left == right
-}
-
-func runtimeTailNotOwned(root string) error {
-	return fmt.Errorf("%w: %s", errRuntimeTailNotOwned, root)
-}
 
 // windowsRuntimeOwnedNameMatches reports whether one component of a candidate
 // tail is a name Zero owns at that position.

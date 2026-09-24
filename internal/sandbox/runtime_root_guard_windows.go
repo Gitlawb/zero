@@ -22,12 +22,22 @@ func refuseForeignRuntimeComponent(string, os.FileInfo) error {
 // Windows TEMP is already per-user, so this is belt and braces rather than the
 // load-bearing separation it is on Unix. Kept so the derived path has the same
 // shape on every platform and one code path builds it.
+//
+// FROM THE TOKEN, NOT THE ENVIRONMENT. Setup derives the fallback root in the
+// elevated terminal and records it; a command later re-derives it in an
+// ordinary one to decide whether that record belongs to this workspace. Those
+// are two processes with independent environments, so a USERNAME that differed
+// between them made the command reject the root setup had provisioned and
+// select one that carries no capability ACE. The token's user SID is the same
+// in both, because setup refuses to run as any account other than the one that
+// will use Zero. The Unix build reads the uid for the same reason. Reported by
+// CodeRabbit.
 func sandboxRuntimeUserScope() string {
-	name := strings.TrimSpace(os.Getenv("USERNAME"))
-	if name == "" {
+	sid, err := currentProcessSID()
+	if err != nil {
 		return "u"
 	}
-	return "u" + strings.ToLower(name)
+	return "u" + strings.ToLower(sid)
 }
 
 // sandboxRuntimeFallbackOwnedNames are the components the temp-derived runtime

@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,7 +43,15 @@ func compensateRuntimeStampBound(root string, identity string, name string, prio
 func removeCreatedRuntimeDirBound(path string, identity string) error {
 	current, ok := runtimeDirIdentity(path)
 	if !ok {
-		return nil
+		// ONLY ABSENCE MEANS THERE IS NOTHING TO UNDO. Any lookup failure used to
+		// return here, so a directory that exists but could not be identified was
+		// reported as cleanly removed while it stayed on disk. The Windows build
+		// already draws this line, and the rollback it serves promises to report
+		// what it could not remove. Reported by CodeRabbit.
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("sandbox runtime root %s was created by this run but could not be identified for removal; leaving it in place", path)
 	}
 	if current != identity {
 		return fmt.Errorf("sandbox runtime root %s is no longer the directory this run created; "+

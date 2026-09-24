@@ -65,7 +65,7 @@ func TestRuntimeLeaseRefusesALinkPlantedAfterTheCheck(t *testing.T) {
 	root := unixLeaseRootUnder(t, base)
 
 	owned := filepath.Join(canonicalSandboxWorkspaceRoot(base), "zero")
-	if !filepath.HasPrefix(root, owned) {
+	if !pathWithinRoot(owned, root) {
 		t.Fatalf("SETUP INVALID: %s does not sit under the owned component %s", root, owned)
 	}
 
