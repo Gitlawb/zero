@@ -106,6 +106,14 @@ type acpSession struct {
 	restrictModels bool
 	cancel         context.CancelFunc
 	history        []turnRecord
+
+	// readOnly marks a session published by session/load for a kind that is
+	// not resumable (a child, side or spec sub-run). Load still replays its
+	// transcript, which is the render-only use a client needs, but a prompt
+	// would continue the sub-run as a standalone conversation, which every
+	// other resume path refuses (sessions.IsResumableKind). Set once when the
+	// session is first registered and never changed, so it is read without mu.
+	readOnly bool
 }
 
 // NewAgent builds the ACP server and registers its method handlers on conn.
@@ -204,7 +212,7 @@ func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (a
 	if err != nil {
 		return nil, RPCError(codeInternalError, "create session: "+err.Error())
 	}
-	sess, _ := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels)
+	sess, _ := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels, false)
 	return NewSessionResult{
 		SessionID:     sess.id,
 		ConfigOptions: a.configOptions(sess),
@@ -311,7 +319,10 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 			models = append(models, SessionConfigOptionValue{Value: persistedModel, Name: persistedModel})
 		}
 	}
-	sess, existed := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
+	// Resume has already refused a non-resumable kind above, so only load can
+	// reach here with one, and it publishes that session for viewing only.
+	readOnly := !sessions.IsResumableKind(meta.SessionKind)
+	sess, existed := a.registerSession(meta.SessionID, root, history, model, models, restrictModels, readOnly)
 	if existed {
 		_, messages, historyWarning, historyErr = a.refreshSessionHistory(sess, requireHistoryLog)
 		if operation == persistedSessionResume && historyErr != nil {
@@ -432,6 +443,9 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage)
 	sess := a.session(p.SessionID)
 	if sess == nil {
 		return nil, RPCError(codeInvalidParams, "unknown session: "+p.SessionID)
+	}
+	if sess.readOnly {
+		return nil, RPCError(codeInvalidParams, "session is not resumable, so it was loaded for viewing only and cannot be prompted: "+p.SessionID)
 	}
 
 	// Serialize turns for this session so two prompts can't interleave history or
@@ -1154,13 +1168,13 @@ func promptImages(blocks []ContentBlock) []zeroruntime.ImageBlock {
 // The bool reports that case so persisted activation can re-read and apply disk
 // history under turnMu. history is set BEFORE first publication so no concurrent
 // prompt can read a half-initialized session.
-func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool) (*acpSession, bool) {
+func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool, readOnly bool) (*acpSession, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if existing := a.sessions[id]; existing != nil {
 		return existing, true
 	}
-	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, model: model, models: models, restrictModels: restrictModels, history: history}
+	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, model: model, models: models, restrictModels: restrictModels, history: history, readOnly: readOnly}
 	a.sessions[id] = sess
 	return sess, false
 }
