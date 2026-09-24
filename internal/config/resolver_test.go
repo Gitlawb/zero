@@ -2254,6 +2254,19 @@ func TestResolveRejectsInvalidCrossSessionInbound(t *testing.T) {
 }
 
 func TestResolveReportsExplicitMaxTurns(t *testing.T) {
+	// A nil ResolveOptions.Env means "read the real process environment" (see
+	// envValue), so a case that leaves it nil inherits whatever the developer
+	// happens to export. ANTHROPIC_BASE_URL alone is enough: applyProviderEnv
+	// synthesizes a second, keyless "anthropic" profile from a base URL on its
+	// own, the single-provider shortcut in normalizeProviders stops applying,
+	// and Resolve fails with `active provider "" not found` before this test
+	// reaches its assertion. Every variable the resolver reads does it, so the
+	// cases below state an EMPTY environment rather than no environment, and
+	// these three are set to a hostile value so the test proves it.
+	t.Setenv("ANTHROPIC_BASE_URL", "https://proxy.example/v1")
+	t.Setenv("OPENAI_API_KEY", "from-the-developer-shell")
+	t.Setenv(MaxTurnsEnv, "7")
+
 	const providerJSON = `{
 		"activeProvider": "p",
 		"providers": [{"name": "p", "provider_kind": "openai-compatible", "base_url": "https://x.example/v1", "apiKey": "k", "model": "m"}]
@@ -2266,10 +2279,15 @@ func TestResolveReportsExplicitMaxTurns(t *testing.T) {
 		set  bool
 	}{
 		{"built-in default only", ResolveOptions{
+			Env:       map[string]string{},
 			Overrides: Overrides{Provider: ProviderProfile{Name: "p", ProviderKind: "openai-compatible", BaseURL: "https://x.example/v1", APIKey: "k", Model: "m"}},
 		}, false},
-		{"user config", ResolveOptions{UserConfigPath: writeConfig(t, providerWithTurns)}, true},
+		{"user config", ResolveOptions{
+			Env:            map[string]string{},
+			UserConfigPath: writeConfig(t, providerWithTurns),
+		}, true},
 		{"project config", ResolveOptions{
+			Env:               map[string]string{},
 			UserConfigPath:    writeConfig(t, providerJSON),
 			ProjectConfigPath: writeConfig(t, `{"maxTurns": 40}`),
 		}, true},
@@ -2278,6 +2296,7 @@ func TestResolveReportsExplicitMaxTurns(t *testing.T) {
 			Overrides: Overrides{Provider: ProviderProfile{Name: "p", ProviderKind: "openai-compatible", BaseURL: "https://x.example/v1", APIKey: "k", Model: "m"}},
 		}, true},
 		{"cli override", ResolveOptions{
+			Env: map[string]string{},
 			Overrides: Overrides{
 				MaxTurns: 42,
 				Provider: ProviderProfile{Name: "p", ProviderKind: "openai-compatible", BaseURL: "https://x.example/v1", APIKey: "k", Model: "m"},
