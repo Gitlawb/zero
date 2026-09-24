@@ -44,9 +44,8 @@ import (
 // This pass runs AFTER the contiguous matchers, over their output, and never
 // across a replacement. A credential that is whole is claimed by its own strict
 // match, so two whole credentials with a separator between them stay two
-// replacements with the separator still between them. The shapes run one at a
-// time, like the contiguous pass, so a replacement can give the next shape the
-// boundary it would otherwise lack.
+// replacements with the separator still between them. Two split credentials do
+// too: see spansFor.
 //
 // A match never starts or ends on a separator, so the separators on either side
 // of a credential stay where they were: "<NUL>AKIA..." becomes
@@ -55,13 +54,14 @@ import (
 // ONE KNOWN LIMIT, from running the contiguous matchers first. When the part of
 // a split key BEFORE its first separator is already a complete credential on
 // its own, the contiguous matcher claims that part and stops at the separator,
-// so what follows is judged by itself. Usually that is only the tail of the key,
-// which is not a credential alone. It matters only when another credential is
-// glued straight onto that tail with no boundary between them: the unsplit key
-// would have run on and swallowed it, and here it stays. Extending the
-// contiguous match across the separator instead would bring back what running
-// first exists to prevent, prose after a whole key being eaten and a following
-// JWT losing its header.
+// and what follows is judged by itself. That is the rest of the key, which is no
+// credential alone, so it stays visible: a fragment of the key, never the whole
+// of it, because the part in front is replaced. For the same reason a credential
+// glued straight onto that rest is left, where the unsplit key would have run on
+// and swallowed it. Carrying the contiguous match across the separator instead
+// would bring back what running first exists to prevent, since nothing tells the
+// rest of a key from prose written after a whole one: that prose would be eaten,
+// and a following JWT would lose its header.
 //
 // WHAT THIS DELIBERATELY DOES NOT TREAT AS A SEPARATOR: tab, newline and
 // carriage return. Those three are real text structure rather than invisible
@@ -170,6 +170,146 @@ var (
 	splitOpenAIPattern = gapTolerant(openaiKeyPattern)
 	splitTextPatterns  = gapTolerantAll(textSecretPatterns)
 )
+
+// splitShape is one credential shape as the split pass uses it.
+type splitShape struct {
+	// free finds the shape anywhere, leftmost first. anchored matches it only
+	// where the text begins, and whole only when it spans the entire text.
+	free, anchored, whole *regexp.Regexp
+	// prefix is the literal every match of the shape begins with.
+	prefix string
+	// accept is the test a match has to pass to be a credential, or nil when
+	// every match is one.
+	accept func(match string) bool
+}
+
+var splitShapes = func() []splitShape {
+	shapes := []splitShape{newSplitShape(openaiKeyPattern, splitOpenAIPattern, func(match string) bool {
+		return openAIShapeIsSecret(stripSplitSeparators(match))
+	})}
+	for i, pattern := range textSecretPatterns {
+		shapes = append(shapes, newSplitShape(pattern, splitTextPatterns[i], nil))
+	}
+	return shapes
+}()
+
+func newSplitShape(original, free *regexp.Regexp, accept func(string) bool) splitShape {
+	return splitShape{
+		free:     free,
+		anchored: regexp.MustCompile(`\A(?:` + free.String() + `)`),
+		whole:    regexp.MustCompile(`\A(?:` + free.String() + `)\z`),
+		prefix:   leadingLiteral(original),
+		accept:   accept,
+	}
+}
+
+// leadingLiteral is the literal every match of pattern begins with, read past a
+// leading \b, or "" when the pattern does not open with one.
+func leadingLiteral(pattern *regexp.Regexp) string {
+	tree, err := syntax.Parse(pattern.String(), syntax.Perl)
+	if err != nil {
+		panic(fmt.Sprintf("redaction: parse %q: %v", pattern.String(), err))
+	}
+	nodes := []*syntax.Regexp{tree}
+	if tree.Op == syntax.OpConcat {
+		nodes = tree.Sub
+	}
+	for _, node := range nodes {
+		if node.Op == syntax.OpWordBoundary {
+			continue
+		}
+		if node.Op == syntax.OpLiteral {
+			return string(node.Rune)
+		}
+		return ""
+	}
+	return ""
+}
+
+// maxRunOnCandidates bounds the anchored matches tried inside one match, so a
+// match full of lookalike starts still costs a fixed number of them.
+const maxRunOnCandidates = 8
+
+// spansFor turns one match of the shape into the stretches to replace.
+//
+// A MATCH CAN RUN ON INTO THE NEXT CREDENTIAL OF ITS OWN SHAPE. Gaps are allowed
+// inside a match, and a separator between two credentials looks exactly like one
+// inside a credential, so a greedy body runs through it into whatever follows. A
+// credential of another shape is still found, because every shape is matched on
+// its own and the union is replaced. One of the SAME shape is not: matches of one
+// pattern never overlap, so the second credential cannot start inside the first
+// one's match. Most bodies swallow it whole, so nothing leaks, but a JWT stops at
+// the next token's first dot, and two split JWTs side by side left the second
+// one's payload and signature in the clear. And a match the filter rejects hides
+// whatever it ran into, so kebab-case prose in front of a split key took the key
+// down with it. Reported by @jatmn.
+//
+// So when a match runs through a run of separators into a position where the
+// same shape matches again and reaches at least as far, that credential is taken
+// on its own, and the first is cut at the separators if it is a complete match by
+// itself. The separators between the two then stay outside both replacements, as
+// they do between two whole credentials, and each piece is filtered on its own.
+// When the first is not complete alone, it keeps the whole of its match and the
+// union joins the two into one replacement.
+func (shape splitShape) spansFor(text string, start, end int) [][]int {
+	var spans [][]int
+	for {
+		next, gap, nextEnd := shape.runOn(text, start, end)
+		if next < 0 {
+			return shape.keep(spans, text, start, end)
+		}
+		if shape.whole.MatchString(text[start:gap]) {
+			spans = shape.keep(spans, text, start, gap)
+		} else {
+			spans = shape.keep(spans, text, start, end)
+		}
+		start, end = next, nextEnd
+	}
+}
+
+func (shape splitShape) keep(spans [][]int, text string, start, end int) [][]int {
+	if shape.accept != nil && !shape.accept(text[start:end]) {
+		return spans
+	}
+	return append(spans, []int{start, end})
+}
+
+// runOn looks inside the match [start, end) for where it ran through a run of
+// separators into another credential of the same shape. It returns where that
+// credential begins, where the separator run in front of it begins, and where the
+// credential's own match ends, or next = -1 when there is none.
+//
+// Latest first, because a match reaches into the next credential only as far as
+// its own pattern allows. Only where the text after the separators opens with the
+// shape's literal prefix, which is where a match of the shape can begin; the
+// separator in front supplies the word boundary, so matching from there judges it
+// the same as the whole text would.
+func (shape splitShape) runOn(text string, start, end int) (next, gap, nextEnd int) {
+	tried := 0
+	for at := end; at > start && tried < maxRunOnCandidates; {
+		r, size := utf8.DecodeLastRuneInString(text[start:at])
+		if !splitSecretSeparator(r) {
+			at -= size
+			continue
+		}
+		candidate := at
+		for at > start {
+			r, size = utf8.DecodeLastRuneInString(text[start:at])
+			if !splitSecretSeparator(r) {
+				break
+			}
+			at -= size
+		}
+		if !strings.HasPrefix(text[candidate:], shape.prefix) {
+			continue
+		}
+		tried++
+		if match := shape.anchored.FindStringIndex(text[candidate:]); match != nil && candidate+match[1] >= end {
+			return candidate, at, candidate + match[1]
+		}
+	}
+	return -1, 0, 0
+}
 
 func gapTolerantAll(patterns []*regexp.Regexp) []*regexp.Regexp {
 	tolerant := make([]*regexp.Regexp, 0, len(patterns))
@@ -330,15 +470,10 @@ func redactSplitRegion(value, replacement string, previous byte, gated bool) str
 		text, lead = string([]byte{previous})+value, 1
 	}
 	var spans [][]int
-	for _, span := range splitOpenAIPattern.FindAllStringIndex(text, -1) {
-		if span[0] >= lead && openAIShapeIsSecret(stripSplitSeparators(text[span[0]:span[1]])) {
-			spans = append(spans, span)
-		}
-	}
-	for _, pattern := range splitTextPatterns {
-		for _, span := range pattern.FindAllStringIndex(text, -1) {
-			if span[0] >= lead {
-				spans = append(spans, span)
+	for _, shape := range splitShapes {
+		for _, match := range shape.free.FindAllStringIndex(text, -1) {
+			if match[0] >= lead {
+				spans = append(spans, shape.spansFor(text, match[0], match[1])...)
 			}
 		}
 	}

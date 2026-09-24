@@ -300,6 +300,83 @@ func TestSplitRedactionKeepsNeighbouringCredentialsApart(t *testing.T) {
 	}
 }
 
+// splitThroughout puts a separator a quarter of the way into every dot-separated
+// segment of a token. Early, so the part in front is too short to be a
+// credential by itself and the strict pass cannot claim it; a split whose front
+// part is complete alone is the documented limit, not what these tests are about.
+func splitThroughout(secret, separator string) string {
+	parts := strings.Split(secret, ".")
+	for i, part := range parts {
+		quarter := len(part) / 4
+		parts[i] = part[:quarter] + separator + part[quarter:]
+	}
+	return strings.Join(parts, ".")
+}
+
+// TWO SPLIT CREDENTIALS OF ONE SHAPE ARE TWO CREDENTIALS.
+//
+// Matches of one pattern never overlap, so when the first one's body runs on
+// through the separator between them, the second cannot start a match of its
+// own. Whole neighbours are safe because the strict pass claims them first;
+// these are both split. A JWT body stops at the next token's first dot and a
+// classic GitHub body at the next token's underscore, which left the rest of the
+// second credential in the clear, and the bodies that swallow the next key whole
+// joined both keys and the separator between them into one replacement.
+func TestSplitRedactionKeepsTwoSplitCredentialsOfOneShapeApart(t *testing.T) {
+	separators := map[string]string{"NUL": nulSeparator, "ESC": escSeparator, "zero width": zwspSeparator}
+	pairs := map[string][2]string{
+		"jwt":       {jwtToken, otherJWT},
+		"github":    {githubKey, "ghp_ffffffffffffffffffffffffffffffffffff"},
+		"openai":    {openaiKey, "sk-proj-dddddddddddddddddddddddddddddddd"},
+		"anthropic": {anthropicKey, "sk-ant-api03-eeeeeeeeeeeeeeeeeeeeeeee9876543210WXYZ"},
+		"slack":     {slackKey, "xoxb-ANOTHER-NOT-REAL-TOKEN-BBBBBBBBBBBB"},
+	}
+	for name, pair := range pairs {
+		for sepName, separator := range separators {
+			value := splitThroughout(pair[0], escSeparator) + separator + splitThroughout(pair[1], escSeparator)
+			want := RedactedSecret + separator + RedactedSecret
+			if got := RedactString(value, Options{}); got != want {
+				t.Errorf("two split %s credentials with %s between them: RedactString(...) = %q, want %q", name, sepName, got, want)
+			}
+		}
+	}
+}
+
+// And a chain of them leaks nothing, however the markers fall.
+func TestSplitRedactionLeavesNothingOfAChainOfSplitJWTs(t *testing.T) {
+	chain := splitThroughout(jwtToken, escSeparator) + nulSeparator +
+		splitThroughout(otherJWT, escSeparator) + nulSeparator +
+		splitThroughout(jwtToken, zwspSeparator)
+	out := rejoin(RedactString(chain, Options{}))
+	for _, segment := range append(strings.Split(jwtToken, "."), strings.Split(otherJWT, ".")...) {
+		if strings.Contains(out, segment) {
+			t.Errorf("a JWT segment survived a chain of three split tokens: %q in %q", segment, out)
+		}
+	}
+}
+
+// A MATCH THE FILTER REJECTS MUST NOT HIDE THE KEY IT RAN INTO.
+//
+// The OpenAI shape is filtered, because kebab-case with no digit in it is prose
+// and not a key. A rejected match still spans the text it matched, and its body
+// runs on through a separator into whatever follows, so a split key after a
+// kebab-case name was rejected along with the name and printed in full.
+func TestSplitRedactionDoesNotLetARejectedNeighbourHideASplitKey(t *testing.T) {
+	const prose = "sk-some-kebab-case-name-here-ok"
+	const key = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh"
+	if !strings.Contains(RedactString(prose, Options{}), prose) {
+		t.Fatal("SETUP INVALID: the prose is redacted on its own, so it is not a rejected match")
+	}
+	if strings.Contains(RedactString(key, Options{}), key) {
+		t.Fatal("SETUP INVALID: the key is not redacted even whole, so it is not a credential")
+	}
+	value := prose + nulSeparator + splitInTheMiddle(key, escSeparator)
+	want := prose + nulSeparator + RedactedSecret
+	if got := RedactString(value, Options{}); got != want {
+		t.Errorf("RedactString(...) = %q, want %q", got, want)
+	}
+}
+
 // ORDINARY TEXT AFTER A KEY IS NOT PART OF THE KEY. Removing the separator
 // between them joins the word behind it onto the end of the key, and an
 // unbounded shape then carries the replacement over text that was never secret.
