@@ -1311,15 +1311,24 @@ func TestACPLoadPublishesSubRunsReadOnly(t *testing.T) {
 			err = h.client.Call(ctx, MethodSessionPrompt, PromptParams{
 				SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("continue")},
 			}, &PromptResult{})
-			refused := err != nil && strings.Contains(err.Error(), "loaded for viewing only")
-			if refused != tc.readOnly {
-				t.Fatalf("session/prompt after load of a %s session: refused as view-only = %v, want %v (err = %v)", tc.name, refused, tc.readOnly, err)
-			}
-			if tc.readOnly {
-				var rpcErr *rpcError
-				if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
-					t.Fatalf("view-only refusal = %v, want invalid params", err)
+			// A resumable session has to be genuinely promptable, not merely "not
+			// refused as view-only": any other failure would hide a broken
+			// writable path behind a passing test.
+			if !tc.readOnly {
+				if err != nil {
+					t.Fatalf("session/prompt after load of a %s session = %v, want success", tc.name, err)
 				}
+				return
+			}
+			// The decision is the RPC code; the message only distinguishes the
+			// view-only refusal from other invalid-params errors such as an
+			// unknown session id.
+			var rpcErr *rpcError
+			if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+				t.Fatalf("session/prompt after load of a %s session = %v, want invalid params", tc.name, err)
+			}
+			if !strings.Contains(rpcErr.Message, "loaded for viewing only") {
+				t.Fatalf("session/prompt after load of a %s session was refused for another reason: %v", tc.name, err)
 			}
 		})
 	}
