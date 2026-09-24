@@ -370,6 +370,25 @@ func TestSplitRedactionLeavesNothingOfAChainOfSplitJWTs(t *testing.T) {
 	}
 }
 
+// A CHAIN OF SPLIT CREDENTIALS COSTS WHAT ITS LENGTH COSTS.
+//
+// The run-on search once followed a chain to its end from every match inside it,
+// which is quadratic in the chain: a megabyte of split JWTs back to back
+// allocated seventeen gigabytes and ran for ten minutes. Measured as allocation,
+// which that walk multiplies with the chain and a linear pass does not.
+func TestSplitRedactionStaysLinearOnAChainOfSplitJWTs(t *testing.T) {
+	unit := splitThroughout(jwtToken, escSeparator) + nulSeparator
+	chain := strings.Repeat(unit, (64<<10)/len(unit))
+	signature := strings.Split(jwtToken, ".")[2]
+	if strings.Contains(rejoin(RedactString(chain, Options{})), signature) {
+		t.Fatal("SETUP INVALID: the chain is not redacted, so the run-on search never ran")
+	}
+	limit := int64(200 * len(chain))
+	if used := redactAllocBytes(chain); used > limit {
+		t.Errorf("redacting a %d byte chain of split JWTs allocated %d bytes, over the %d byte limit", len(chain), used, limit)
+	}
+}
+
 // A MATCH THE FILTER REJECTS MUST NOT HIDE THE KEY IT RAN INTO.
 //
 // The OpenAI shape is filtered, because kebab-case with no digit in it is prose

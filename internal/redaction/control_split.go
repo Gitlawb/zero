@@ -251,20 +251,25 @@ const maxRunOnCandidates = 8
 // they do between two whole credentials, and each piece is filtered on its own.
 // When the first is not complete alone, it keeps the whole of its match and the
 // union joins the two into one replacement.
+//
+// ONE STEP PER MATCH, NOT THE WHOLE CHAIN. The second credential's own match can
+// run on into a third, and following that from here would walk the rest of a
+// chain once for every match inside it, which is quadratic: a megabyte of split
+// JWTs ran for minutes. The scan's own next match starts inside the second
+// credential and takes the step after it, so the chain is still covered, and in
+// a chain of three or more the markers after the first pair can join into one.
 func (shape splitShape) spansFor(text string, start, end int) [][]int {
-	var spans [][]int
-	for {
-		next, gap, nextEnd := shape.runOn(text, start, end)
-		if next < 0 {
-			return shape.keep(spans, text, start, end)
-		}
-		if shape.whole.MatchString(text[start:gap]) {
-			spans = shape.keep(spans, text, start, gap)
-		} else {
-			spans = shape.keep(spans, text, start, end)
-		}
-		start, end = next, nextEnd
+	next, gap, nextEnd := shape.runOn(text, start, end)
+	if next < 0 {
+		return shape.keep(nil, text, start, end)
 	}
+	var spans [][]int
+	if shape.whole.MatchString(text[start:gap]) {
+		spans = shape.keep(spans, text, start, gap)
+	} else {
+		spans = shape.keep(spans, text, start, end)
+	}
+	return shape.keep(spans, text, next, nextEnd)
 }
 
 func (shape splitShape) keep(spans [][]int, text string, start, end int) [][]int {
