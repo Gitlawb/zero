@@ -304,6 +304,50 @@ func TestSplitRedactionNegativeCases(t *testing.T) {
 	})
 }
 
+// TestReviewFindingRegressions covers the blocking review findings on the
+// control-split redaction work: a credential glued to an already-claimed span
+// must still match (the claimed span acts as a word boundary), and a "/"
+// later in the same whitespace-free run must not defeat split handling.
+func TestReviewFindingRegressions(t *testing.T) {
+	jwt := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk" // gitleaks:allow -- synthetic redaction fixture
+
+	t.Run("JWT immediately after AWS key", func(t *testing.T) {
+		for _, key := range []string{"AKIAIOSFODNN7EXAMPLE", "ASIAIOSFODNN7EXAMPLE"} { // gitleaks:allow -- synthetic redaction fixture
+			for _, prefix := range []string{"", "id="} {
+				input := prefix + key + jwt
+				got := RedactString(input, Options{})
+				want := prefix + RedactedSecret + RedactedSecret
+				if got != want {
+					t.Fatalf("JWT after AWS key mismatch: got %q, want %q", got, want)
+				}
+			}
+		}
+	})
+
+	t.Run("Slash after split key still redacts", func(t *testing.T) {
+		aws := "AKIAIOSFODNN7EXAMPLE" // gitleaks:allow -- synthetic redaction fixture
+		cases := []struct {
+			name  string
+			input string
+			want  string
+		}{
+			{"DEL split before slash", aws[:8] + "\x7f" + aws[8:] + "/", RedactedSecret + "/"},
+			{"ESC split before slash", aws[:8] + "\x1b" + aws[8:] + "/", RedactedSecret + "/"},
+			{"NUL split before slash", aws[:8] + "\x00" + aws[8:] + "/", RedactedSecret + "/"},
+			{"raw C1 split before path", "ASIAIOSFODNN\x9b7EXAMPLE.path/to/x", RedactedSecret + ".path/to/x"}, // gitleaks:allow -- synthetic redaction fixture
+			{"ESC split gitlab before slash", "glpat-abcdef\x1bghij0123456789/", RedactedSecret + "/"},        // gitleaks:allow -- synthetic redaction fixture
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := RedactString(tc.input, Options{})
+				if got != tc.want {
+					t.Fatalf("slash after split key mismatch: got %q, want %q", got, tc.want)
+				}
+			})
+		}
+	})
+}
+
 func TestIncompletePrefixInsideValidOpenAIKey(t *testing.T) {
 	first := "sk-" + strings.Repeat("a", 24) + "123456"
 	for _, tail := range []string{"sk-proj-abcdefg", "sk-ant-abcdefgh", "github_pat_abcd", "glpat-abcdefghi", "AIzaabcdefghijk"} {

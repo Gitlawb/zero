@@ -326,10 +326,15 @@ func RedactString(value string, options Options) string {
 	// Match high-confidence specialized shapes first. In particular, the broad
 	// sk- pattern may reach its minimum before a control inside a longer
 	// Anthropic key; letting the Anthropic shape consume that split first avoids
-	// leaving a recognizable credential suffix behind.
+	// leaving a recognizable credential suffix behind. Spans are collected
+	// across shapes before applying so a later shape can still match a wider
+	// span enclosing an earlier one; each shape also retries matches starting
+	// exactly where an earlier shape's span ended, so an already-claimed span
+	// acts as a word boundary for the shapes after it (for example a JWT
+	// immediately after an AWS key, where the leading \b would otherwise fail).
 	var allSpans []span
 	for _, shape := range secretShapes {
-		allSpans = append(allSpans, findSpansForShape(redacted, shape, false)...)
+		allSpans = append(allSpans, findSpansForShape(redacted, shape, false, allSpans)...)
 	}
 	openaiShape := secretShape{
 		textPattern:  openaiKeyPattern,
@@ -337,7 +342,7 @@ func RedactString(value string, options Options) string {
 		minLen:       minOpenAILen,
 		requireDots:  false,
 	}
-	allSpans = append(allSpans, findSpansForShape(redacted, openaiShape, true)...)
+	allSpans = append(allSpans, findSpansForShape(redacted, openaiShape, true, allSpans)...)
 	redacted = applySpans(redacted, allSpans, replacement)
 	return redacted
 }
@@ -638,7 +643,16 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 			}
 		} else if idx := strings.IndexAny(tailWindow, "/\\"); idx >= 0 {
 			segment := tailWindow[:idx]
-			if len(segment) < 15 && !strings.Contains(segment, "\n") {
+			// A "/" or "\" after the gap abandons the candidate only for a
+			// digit-free OpenAI kebab fragment (prose such as v2/file.go after
+			// a kebab-case project name). Otherwise the credential may still
+			// complete past the gap (for example AKIAIOSF<DEL>ODNN7EXAMPLE/
+			// or a split GitLab token before a slash), and bailing here would
+			// leak the whole secret. checkCandidate still rejects the kebab
+			// false positive if accumulation continues.
+			digitFreeOpenAIKebab := isOpenAI && runningDigits == 0 &&
+				hasInteriorHyphen && !knownOpenAIKeyPrefix(logPre)
+			if len(segment) < 15 && !strings.Contains(segment, "\n") && digitFreeOpenAIKebab {
 				if lastConsumedEnd <= 0 {
 					lastConsumedEnd = cSpan.start
 				}
@@ -686,7 +700,28 @@ func extractSpansFromMatch(src string, matchStart, matchEnd int, shape secretSha
 	return spans, lastConsumedEnd
 }
 
-func findSpansForShape(src string, shape secretShape, isOpenAI bool) []span {
+// startAnchoredPatterns pins each shape's textPattern to the start of the
+// text. Phase-two matching in findSpansForShape uses these to retry a match
+// exactly where an earlier shape's span ended; the anchor means a miss fails
+// at the first byte instead of scanning the rest of the string.
+var startAnchoredPatterns = func() map[*regexp.Regexp]*regexp.Regexp {
+	patterns := []*regexp.Regexp{openaiKeyPattern}
+	for _, s := range secretShapes {
+		patterns = append(patterns, s.textPattern)
+	}
+	m := make(map[*regexp.Regexp]*regexp.Regexp, len(patterns))
+	for _, p := range patterns {
+		src := p.String()
+		if !strings.HasPrefix(src, `\b`) {
+			m[p] = p
+			continue
+		}
+		m[p] = regexp.MustCompile(`\A(?:` + src[len(`\b`):] + `)`)
+	}
+	return m
+}()
+
+func findSpansForShape(src string, shape secretShape, isOpenAI bool, claimed []span) []span {
 	var spans []span
 	lastIndex := 0
 	for lastIndex < len(src) {
@@ -722,6 +757,44 @@ func findSpansForShape(src string, shape secretShape, isOpenAI bool) []span {
 			lastIndex = matchEnd
 		} else {
 			lastIndex = matchStart + 1
+		}
+	}
+	// A span claimed by an earlier shape ends the preceding token, so a
+	// credential starting exactly there must match even though the pattern's
+	// leading \b sees a word byte on its left (for example a JWT glued to an
+	// AWS key). The loop above cannot see those positions, so retry each
+	// claimed end with the start-anchored variant of the pattern.
+	if len(claimed) > 0 {
+		ends := make([]int, 0, len(claimed))
+		for _, s := range claimed {
+			if s.end > 0 && s.end < len(src) {
+				ends = append(ends, s.end)
+			}
+		}
+		sort.Ints(ends)
+		for i, p := range ends {
+			if i > 0 && p == ends[i-1] {
+				continue
+			}
+			if !isWordByte(src[p-1]) {
+				continue
+			}
+			covered := false
+			for _, s := range spans {
+				if s.start <= p && p < s.end {
+					covered = true
+					break
+				}
+			}
+			if covered {
+				continue
+			}
+			loc := startAnchoredPatterns[shape.textPattern].FindStringIndex(src[p:])
+			if loc == nil || loc[0] != 0 {
+				continue
+			}
+			matchSpans, _ := extractSpansFromMatch(src, p, p+loc[1], shape, isOpenAI)
+			spans = append(spans, matchSpans...)
 		}
 	}
 	return spans
