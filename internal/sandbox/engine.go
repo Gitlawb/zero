@@ -80,6 +80,19 @@ func (engine *Engine) CanPersistGrants() bool {
 	return engine != nil && engine.store != nil
 }
 
+// DegradedNotice is the line a session shows when this engine's sandbox cannot
+// enforce what its policy asks for, or "" when it can or the sandbox is off.
+//
+// Built from the engine's own backend and policy through the same plan `zero
+// sandbox policy` prints, so the notice and the command that explains it cannot
+// describe two different sandboxes.
+func (engine *Engine) DegradedNotice() string {
+	if engine == nil {
+		return ""
+	}
+	return engine.backend.BuildPlan(engine.workspaceRoot, engine.policy).DegradedNotice()
+}
+
 func (engine *Engine) ConsumeGrantMigrationNotice() (string, error) {
 	if engine == nil || engine.store == nil {
 		return "", nil

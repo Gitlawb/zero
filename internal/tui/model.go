@@ -1095,6 +1095,11 @@ func newModel(ctx context.Context, options Options) model {
 	for _, warning := range keyBindingWarnings {
 		m = m.appendSystemNotice(warning)
 	}
+	for _, notice := range options.StartupNotices {
+		if strings.TrimSpace(notice) != "" {
+			m = m.appendSystemNotice(notice)
+		}
+	}
 	return m
 }
 

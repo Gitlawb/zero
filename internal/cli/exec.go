@@ -347,6 +347,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	} else if notice != "" {
 		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
 	}
+	// Before any tool runs, so a run that goes ahead with reduced isolation says
+	// so where its output starts, not only when someone runs `zero doctor`.
+	if notice := sandboxEngine.DegradedNotice(); notice != "" {
+		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
+	}
 	executionRunner.SetPreparer(sandboxEngine)
 	if permissionMode != agent.PermissionModePlan {
 		mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
