@@ -289,10 +289,19 @@ func (m model) savedProviderModelPickerItems(profile config.ProviderProfile, act
 	descriptor, hasDescriptor := m.descriptorForProfile(profile)
 	group := modelPickerProviderGroup(profile, descriptor, hasDescriptor)
 
+	endpointKey := providerEndpointKey(profile, descriptor)
+	var discovered []providermodeldiscovery.Model
+	if endpointKey != "" {
+		discovered = m.modelPickerLiveByProvider[endpointKey]
+	}
+	if len(discovered) == 0 && hasDescriptor && !genericProviderCatalogID(descriptor.ID) {
+		discovered = m.modelPickerLiveByProvider[descriptor.ID]
+	}
+
 	var raw []pickerItem
 	switch {
-	case hasDescriptor && len(m.modelPickerLiveByProvider[descriptor.ID]) > 0:
-		for _, model := range m.modelPickerLiveByProvider[descriptor.ID] {
+	case len(discovered) > 0:
+		for _, model := range discovered {
 			if strings.TrimSpace(model.ID) == "" {
 				continue
 			}
@@ -375,17 +384,24 @@ func (m model) openModelPicker() (model, tea.Cmd) {
 }
 
 // modelPickerDiscoveryCmds dispatches a live model-discovery command for each
-// usable provider (deduped by catalog descriptor), so /model shows the same real
+// usable provider (deduped by endpoint key), so /model shows the same real
 // models the provider-setup wizard discovers.
 func (m model) modelPickerDiscoveryCmds() tea.Cmd {
 	cmds := []tea.Cmd{}
 	seen := map[string]bool{}
 	for _, profile := range m.modelPickerProviders() {
 		descriptor, ok := m.descriptorForProfile(profile)
-		if !ok || seen[descriptor.ID] {
+		if !ok {
 			continue
 		}
-		seen[descriptor.ID] = true
+		endpointKey := providerEndpointKey(profile, descriptor)
+		if endpointKey == "" {
+			endpointKey = descriptor.ID
+		}
+		if seen[endpointKey] {
+			continue
+		}
+		seen[endpointKey] = true
 		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, profile); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -417,6 +433,7 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 		}
 	}
 	providerID := descriptor.ID
+	endpointKey := providerEndpointKey(profile, descriptor)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
 		defer cancel()
@@ -427,7 +444,12 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 			}
 		}
 		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k, authed.BaseURL))
-		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
+		return modelPickerModelsDiscoveredMsg{
+			providerID:  providerID,
+			endpointKey: endpointKey,
+			models:      models,
+			err:         err,
+		}
 	}
 }
 
@@ -711,7 +733,15 @@ func modelPickerTitleWord(word string) string {
 }
 
 func (m model) activeProviderDescriptor() (providercatalog.Descriptor, bool) {
-	return m.descriptorForProfile(m.providerProfile)
+	if descriptor, ok := m.descriptorForProfile(m.providerProfile); ok {
+		return descriptor, true
+	}
+	if name := strings.TrimSpace(m.providerName); name != "" {
+		if descriptor, ok := providercatalog.Get(name); ok {
+			return descriptor, true
+		}
+	}
+	return providercatalog.Descriptor{}, false
 }
 
 func customProviderDescriptorForProfile(profile config.ProviderProfile) (providercatalog.Descriptor, bool) {
@@ -782,10 +812,87 @@ func genericProviderCatalogID(id string) bool {
 	return strings.HasPrefix(strings.TrimSpace(id), "custom-")
 }
 
+// providerEndpointKey derives an endpoint route identity for profile discovery.
+// Profiles with an explicit Name use that name so distinct endpoints sharing a
+// generic descriptor (e.g. custom-openai-compatible) never collide.
+// Unnamed profiles qualify by base URL or descriptor ID.
+func providerEndpointKey(profile config.ProviderProfile, descriptor providercatalog.Descriptor) string {
+	if name := strings.TrimSpace(profile.Name); name != "" {
+		return name
+	}
+	if baseURL := normalizeProviderBaseURL(profile.BaseURL); baseURL != "" {
+		if descriptor.ID != "" {
+			return descriptor.ID + "@" + baseURL
+		}
+		return baseURL
+	}
+	if descriptor.ID != "" {
+		return descriptor.ID
+	}
+	if catID := strings.TrimSpace(profile.CatalogID); catID != "" {
+		return catID
+	}
+	return ""
+}
+
+// activeDiscoveryKeys returns candidate lookup keys for live-discovered models
+// belonging to the active provider endpoint route, in order of specificity.
+// Generic descriptors (custom-*) are excluded as fallback keys so one custom
+// endpoint's discovery cannot determine another endpoint's capabilities.
+func (m model) activeDiscoveryKeys() []string {
+	var keys []string
+	seen := map[string]bool{}
+	add := func(k string) {
+		k = strings.TrimSpace(k)
+		if k != "" && !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+
+	descriptor, hasDescriptor := m.activeProviderDescriptor()
+	if key := providerEndpointKey(m.providerProfile, descriptor); key != "" {
+		add(key)
+	}
+	if m.providerProfile.Name != "" {
+		add(m.providerProfile.Name)
+	}
+	if m.providerName != "" {
+		add(m.providerName)
+	}
+	if m.providerProfile.CatalogID != "" && !genericProviderCatalogID(m.providerProfile.CatalogID) {
+		add(m.providerProfile.CatalogID)
+	}
+	if hasDescriptor && !genericProviderCatalogID(descriptor.ID) {
+		add(descriptor.ID)
+	}
+	if len(keys) == 0 && len(m.modelPickerLiveByProvider) == 1 {
+		// When no active provider or profile is configured (e.g. dummy models in unit tests),
+		// accept the single available provider entry.
+		for id := range m.modelPickerLiveByProvider {
+			add(id)
+			break
+		}
+	}
+	return keys
+}
+
+// discoveredModelsForActiveRoute returns the live-discovered models for the active
+// endpoint route, if available in modelPickerLiveByProvider.
+func (m model) discoveredModelsForActiveRoute() ([]providermodeldiscovery.Model, bool) {
+	for _, key := range m.activeDiscoveryKeys() {
+		if models, ok := m.modelPickerLiveByProvider[key]; ok && len(models) > 0 {
+			return models, true
+		}
+	}
+	return nil, false
+}
+
 type modelPickerModelsDiscoveredMsg struct {
-	providerID string
-	models     []providermodeldiscovery.Model
-	err        error
+	providerID  string
+	endpointKey string
+	models      []providermodeldiscovery.Model
+	err         error
 }
 
 // ollamaContextWindowDiscoveredMsg carries the result of an async /api/show
@@ -876,10 +983,18 @@ func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredM
 	if msg.err != nil || len(msg.models) == 0 {
 		return m
 	}
-	if m.modelPickerLiveByProvider == nil {
-		m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{}
+	newMap := make(map[string][]providermodeldiscovery.Model, len(m.modelPickerLiveByProvider)+2)
+	for k, v := range m.modelPickerLiveByProvider {
+		newMap[k] = v
 	}
-	m.modelPickerLiveByProvider[msg.providerID] = append([]providermodeldiscovery.Model{}, msg.models...)
+	modelsCopy := append([]providermodeldiscovery.Model{}, msg.models...)
+	if msg.endpointKey != "" {
+		newMap[msg.endpointKey] = modelsCopy
+	}
+	if msg.providerID != "" && (!genericProviderCatalogID(msg.providerID) || msg.endpointKey == "") {
+		newMap[msg.providerID] = modelsCopy
+	}
+	m.modelPickerLiveByProvider = newMap
 	// Rebuild the open picker so this provider's section shows its live models,
 	// preserving the current query + selection.
 	if m.picker != nil && m.picker.kind == pickerModel {
