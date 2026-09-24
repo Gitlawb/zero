@@ -4,10 +4,30 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/tools"
 )
+
+// streamStillOpen asks Wait whether the stream is worth draining, without
+// letting it block the suite. An open, empty stream blocks Wait forever, which
+// is the very defect these tests pin, so an unbounded call hangs until the test
+// binary times out instead of failing. Past the bound the stream is reported
+// open and closed here, so the waiting goroutine returns.
+func streamStillOpen(t *testing.T, stream *StartupDisclosureStream) bool {
+	t.Helper()
+	result := make(chan bool, 1)
+	go func() { result <- stream.Wait() }()
+	select {
+	case open := <-result:
+		return open
+	case <-time.After(5 * time.Second):
+		stream.Close()
+		<-result
+		return true
+	}
+}
 
 // disclosingRuntime registers one server whose launch carried a startup notice,
 // so its runtime has something the stream could deliver.
@@ -49,7 +69,7 @@ func TestAStreamRequestedAfterCloseIsAlreadyClosed(t *testing.T) {
 	if queued := stream.Drain(); len(queued) != 0 {
 		t.Errorf("a stream requested after Close delivered %#v from a runtime that is gone", queued)
 	}
-	if stream.Wait() {
+	if streamStillOpen(t, stream) {
 		t.Error("the stream is still open after Close, so a pump started on it never returns")
 	}
 }
@@ -68,7 +88,7 @@ func TestCloseEndsTheStreamAnOwnerAlreadyHolds(t *testing.T) {
 	if queued := stream.Drain(); len(queued) != 1 {
 		t.Errorf("the disclosure queued before Close was lost: %#v", queued)
 	}
-	if stream.Wait() {
+	if streamStillOpen(t, stream) {
 		t.Error("Close did not end the stream the owner holds")
 	}
 }
@@ -100,7 +120,7 @@ func TestCloseAndTheFirstStreamRequestDoNotRace(t *testing.T) {
 		// queued before Close stays drainable, so drain before asking.
 		stream := runtime.StartupDisclosureStream()
 		stream.Drain()
-		if stream.Wait() {
+		if streamStillOpen(t, stream) {
 			t.Fatal("the stream survived Close")
 		}
 	}
