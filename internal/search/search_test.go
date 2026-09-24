@@ -3,10 +3,12 @@ package search
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sessions"
 )
 
@@ -106,4 +108,100 @@ func fixedSearchClock(value string) func() time.Time {
 		panic(err)
 	}
 	return func() time.Time { return parsed }
+}
+
+// EVERY TEXT FIELD, NOT A HAND-KEPT SUBSET.
+//
+// `zero search --json` prints Hit.Session straight to stdout, so a field
+// redactMetadata forgets is a field that reaches the terminal with whatever was
+// in it. The list in redactMetadata is written out by hand; this walks the
+// struct instead, so a string field added to sessions.Metadata (or to the Goal
+// hanging off it) fails here on the day it lands rather than the day someone
+// notices it in output. It named twenty uncovered fields when it was written,
+// including the review text the user types and the model's own draft reasoning.
+func TestRedactMetadataCoversEveryTextField(t *testing.T) {
+	const secret = "sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaa0123456789ABCD"
+
+	var session sessions.Metadata
+	fillMetadataStrings(reflect.ValueOf(&session).Elem(), secret)
+	session.Goal = &sessions.Goal{}
+	fillMetadataStrings(reflect.ValueOf(session.Goal).Elem(), secret)
+
+	// The premise: the secret is one RedactString already recognizes, so a field
+	// that still carries it was not passed through the redactor at all.
+	if redaction.RedactString(secret, redaction.Options{}) == secret {
+		t.Fatalf("SETUP INVALID: %q is not a shape RedactString redacts, so every leg below passes vacuously", secret)
+	}
+
+	var leaked []string
+	var checked int
+	walkMetadataStrings(reflect.ValueOf(redactMetadata(session, redaction.Options{})), "", func(name, value string) {
+		checked++
+		if strings.Contains(value, secret) {
+			leaked = append(leaked, name)
+		}
+	})
+	if checked == 0 {
+		t.Fatal("SETUP INVALID: the walk visited no fields, so it proves nothing")
+	}
+	if len(leaked) > 0 {
+		t.Errorf("redactMetadata left the secret in %d of %d text fields: %s",
+			len(leaked), checked, strings.Join(leaked, ", "))
+	}
+}
+
+// Metadata is passed by value, but Goal is a pointer inside it. Redacting
+// through that pointer would edit the session the caller still holds, so a
+// search would quietly rewrite the live record it was asked to report on.
+func TestRedactMetadataDoesNotRewriteTheCallersGoal(t *testing.T) {
+	const secret = "sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaa0123456789ABCD"
+	goal := &sessions.Goal{Objective: "ship " + secret, StatusReason: "blocked on " + secret}
+	session := sessions.Metadata{SessionID: "s", Goal: goal}
+
+	redacted := redactMetadata(session, redaction.Options{})
+
+	if goal.Objective != "ship "+secret || goal.StatusReason != "blocked on "+secret {
+		t.Errorf("redactMetadata rewrote the caller's goal: %+v", *goal)
+	}
+	if redacted.Goal == goal {
+		t.Error("redacted metadata still points at the caller's goal")
+	}
+	if strings.Contains(redacted.Goal.Objective, secret) || strings.Contains(redacted.Goal.StatusReason, secret) {
+		t.Errorf("goal text was not redacted: %+v", *redacted.Goal)
+	}
+}
+
+// fillMetadataStrings sets every string-kinded field of one struct value.
+func fillMetadataStrings(value reflect.Value, text string) {
+	for index := 0; index < value.NumField(); index++ {
+		field := value.Field(index)
+		if field.Kind() == reflect.String && field.CanSet() {
+			field.SetString(text)
+		}
+	}
+}
+
+// walkMetadataStrings visits every string-kinded field, descending into nested
+// structs and non-nil pointers so the Goal is not skipped.
+func walkMetadataStrings(value reflect.Value, prefix string, visit func(name, value string)) {
+	switch value.Kind() {
+	case reflect.Pointer:
+		if !value.IsNil() {
+			walkMetadataStrings(value.Elem(), prefix, visit)
+		}
+	case reflect.Struct:
+		for index := 0; index < value.NumField(); index++ {
+			name := value.Type().Field(index).Name
+			if prefix != "" {
+				name = prefix + "." + name
+			}
+			field := value.Field(index)
+			switch field.Kind() {
+			case reflect.String:
+				visit(name, field.String())
+			case reflect.Struct, reflect.Pointer:
+				walkMetadataStrings(field, name, visit)
+			}
+		}
+	}
 }
