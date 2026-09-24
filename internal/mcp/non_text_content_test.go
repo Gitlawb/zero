@@ -668,3 +668,65 @@ func TestMCPResultUninspectedImageLimitingReasonNotes(t *testing.T) {
 		}
 	})
 }
+
+// The pre-decode encoded-length cap is the decode-DoS guard: it keeps a
+// hostile server from making Zero decode a payload of any size (up to the
+// inspection cap times per result) before the post-decode backstop drops it.
+// Removing the cap changes nothing that is forwarded, so no existing test
+// notices; this pins the guard on the decode hook instead. A payload one
+// byte over the encoded cap must be rejected without the decoder ever being
+// called.
+func TestOverCapEncodedPayloadIsRejectedBeforeDecoding(t *testing.T) {
+	previous := decodeImageBase64
+	decodes := 0
+	decodeImageBase64 = func(s string) ([]byte, error) {
+		decodes++
+		return previous(s)
+	}
+	t.Cleanup(func() { decodeImageBase64 = previous })
+
+	// An at-limit PNG would decode to exactly MaxImageBytes and forward; a
+	// single extra base64 character pushes it one byte over the encoded cap,
+	// so only the pre-decode guard can be responsible for rejecting it.
+	payload := paddedPNGBase64(imageinput.MaxImageBytes) + "A"
+	content := []Content{{Type: "image", MimeType: "image/png", Data: payload}}
+
+	if images := ImageBlocks(content); len(images) != 0 {
+		t.Fatalf("ImageBlocks forwarded %d images from an over-cap payload, want 0", len(images))
+	}
+	if decodes != 0 {
+		t.Fatalf("decoder ran %d times, want 0: the pre-decode cap must reject before any decode work", decodes)
+	}
+	if got := DroppedContentSummary(content); got != "1 image/png block" {
+		t.Fatalf("DroppedContentSummary() = %q, want the over-cap payload named as dropped", got)
+	}
+}
+
+// The media type is sniffed from the decoded bytes, never taken from the
+// block's declared mimeType: a hostile server must not be able to relabel
+// HTML or a script as image/png and have it forwarded to the provider as an
+// image. Every other fixture pairs real PNG bytes with image/png, so
+// sniffing and trusting the declared type agree there and no test can tell
+// them apart; this fixture makes them disagree.
+func TestDeclaredMimeTypeDisagreeingWithSniffedBytesIsDropped(t *testing.T) {
+	html := []byte("<!doctype html><html><body><script>alert(1)</script></body></html>")
+	tool := registryTool{
+		client: &nonTextClient{content: []Content{
+			{Type: "image", MimeType: "image/png", Data: base64.StdEncoding.EncodeToString(html)},
+		}},
+		server: Server{Name: "shots"},
+		remote: RemoteTool{Name: "screenshot"},
+	}
+
+	result := tool.Run(context.Background(), map[string]any{})
+
+	if len(result.Images) != 0 {
+		t.Fatalf("forwarded %d images from an HTML payload declared as image/png, want 0", len(result.Images))
+	}
+	if strings.Contains(result.Output, "[image returned by tool]") {
+		t.Errorf("a non-image payload declared as image/png is still announced as a returned image:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "image/png") {
+		t.Errorf("the dropped block is not named in the drop summary:\n%s", result.Output)
+	}
+}
