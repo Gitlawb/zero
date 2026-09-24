@@ -13,7 +13,10 @@ import "testing"
 // USERNAME, so a value that differed between the two terminals made the command
 // reject the record and select a root with no capability ACE on it.
 func TestRecordedFallbackRootSurvivesADifferentUsernameVariable(t *testing.T) {
-	workspace := t.TempDir()
+	// Canonical, as selection hands it over. The record check canonicalizes on
+	// its own, so a raw t.TempDir() spelling digests differently wherever TEMP is
+	// an 8.3 short path, as it is on the CI runners.
+	workspace := canonicalSandboxWorkspaceRoot(t.TempDir())
 	tempHome := t.TempDir()
 	t.Setenv("TMP", tempHome)
 	t.Setenv("TEMP", tempHome)
