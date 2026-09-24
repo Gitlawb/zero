@@ -1,9 +1,12 @@
 package redaction
 
 import (
+	"fmt"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 const (
@@ -378,5 +381,131 @@ func TestSplitRedactionStopsAtACallerSuppliedReplacement(t *testing.T) {
 	want := "sk-aaaaa" + nulSeparator + "REDACTED" + nulSeparator + "bbbbbbbbbbbbbbb"
 	if got := RedactString(value, options); got != want {
 		t.Errorf("RedactString(...) = %q, want %q", got, want)
+	}
+}
+
+// A REJECTED MATCH MUST NOT SHADOW THE REAL KEY BEHIND IT. Raised by CodeRabbit
+// on #1067. With the separators removed before matching, the leftmost AWS match
+// in "xAKIA<NUL>AKIAIOSF<SOH>ODNN7EXAMPLE" began at the decoy AKIA, was rejected
+// for the "x" in front of it, and had already consumed the start of the real key,
+// so the real key was never tried. "ask-" in front of a split OpenAI key does the
+// same through "sk-", which is the ordinary-prose version of it. Each input is
+// checked against its unsplit counterpart, which main already redacts.
+func TestSplitRedactionDoesNotLetARejectedMatchShadowTheRealKey(t *testing.T) {
+	soh := string(rune(0x01))
+	for _, testCase := range []struct {
+		name    string
+		split   string
+		unsplit string
+	}{
+		{"decoy AKIA before a split key", "xAKIA" + nulSeparator + "AKIAIOSFODNN7E" + soh + "XAMPLE", "xAKIA" + nulSeparator + awsKey},
+		{"ask- before a split OpenAI key", "ask-" + nulSeparator + splitInTheMiddle(openaiKey, soh), "ask-" + nulSeparator + openaiKey},
+		{"task- before a split OpenAI key", "task-" + escSeparator + splitInTheMiddle(openaiKey, zwspSeparator), "task-" + escSeparator + openaiKey},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			want := RedactString(testCase.unsplit, Options{})
+			if strings.Contains(want, awsKey) || strings.Contains(want, openaiKey) {
+				t.Fatalf("SETUP INVALID: main does not redact the unsplit form either: %q", want)
+			}
+			if got := RedactString(testCase.split, Options{}); got != want {
+				t.Errorf("RedactString(split) = %q, want the unsplit form's %q", got, want)
+			}
+		})
+	}
+}
+
+// AN UNBOUNDED BODY MUST NOT TAKE A NEIGHBOUR'S PREFIX WITH IT. With gaps allowed
+// between body characters, a split key's body runs on across a separator into
+// whatever follows. When that is a JWT, it stops only at the JWT's first dot, and
+// if the shapes were applied one after another the JWT shape would then find its
+// header gone and leave the payload and signature in the clear. The shapes are
+// matched against the same text and their union replaced, so it cannot.
+func TestSplitRedactionKeepsANeighbourWhosePrefixASplitBodyWouldSwallow(t *testing.T) {
+	cut := len(jwtToken) / 2
+	splitJWT := jwtToken[:cut] + nulSeparator + jwtToken[cut:]
+	for _, testCase := range []struct {
+		name  string
+		value string
+	}{
+		{"split Anthropic key, a word, then a split JWT", splitInTheMiddle(anthropicKey, zwspSeparator) + escSeparator + "build" + escSeparator + splitJWT},
+		{"split GitHub key, then a split JWT", splitInTheMiddle(githubKey, nulSeparator) + escSeparator + splitJWT},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := rejoin(RedactString(testCase.value, Options{}))
+			for _, piece := range strings.Split(jwtToken, ".") {
+				if strings.Contains(got, piece) {
+					t.Errorf("part of the JWT survives: %q in %q", piece, got)
+				}
+			}
+		})
+	}
+}
+
+// A CREDENTIAL GLUED ONTO A SPLIT ONE GETS ITS BOUNDARY FROM THE REPLACEMENT.
+// Contiguous shapes cascade: once an AWS key is replaced, a JWT written straight
+// after it has the "]" in front of it and matches. A split key is replaced by
+// the second pass, so the JWT behind it needs a pass of its own after that one,
+// and the JWT is often whole, which means its region may hold no separator at
+// all by then. The second case adds a whole key elsewhere so that the strict
+// pass has already cut the text into regions.
+func TestSplitRedactionCascadesIntoACredentialGluedOntoASplitOne(t *testing.T) {
+	csi := string(rune(0x9b))
+	for _, testCase := range []struct {
+		name  string
+		value string
+	}{
+		{"whole JWT glued onto a split AWS key", splitInTheMiddle(awsKey, escSeparator) + jwtToken},
+		{"same, with a whole key elsewhere in the text", "user?q=" + "ASIAIOSFODNN7EXA" + csi + "MPLE" + jwtToken + "'" + awsKey + string(rune(0x7f)) + "ok"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := rejoin(RedactString(testCase.value, Options{}))
+			for _, piece := range strings.Split(jwtToken, ".") {
+				if strings.Contains(got, piece) {
+					t.Errorf("part of the JWT survives: %q in %q", piece, got)
+				}
+			}
+		})
+	}
+}
+
+// THE CLASS AND THE PREDICATE ARE ONE FACT. splitSeparatorClass is generated
+// from the same tables as splitSecretSeparator; this walks every code point and
+// fails on the first one they disagree about.
+func TestSplitSeparatorClassAgreesWithThePredicate(t *testing.T) {
+	class := regexp.MustCompile("^" + splitSeparatorClass + "$")
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if r >= 0xd800 && r <= 0xdfff {
+			continue // surrogates are not valid in a Go string
+		}
+		if got, want := class.MatchString(string(r)), splitSecretSeparator(r); got != want {
+			t.Fatalf("U+%04X: class matches = %v, predicate says %v", r, got, want)
+		}
+	}
+}
+
+// ON TEXT WITH NO SEPARATOR, EVERY GAP-TOLERANT SHAPE IS ITS ORIGINAL. The
+// rewrite only adds optional gaps, so a contiguous key has to produce exactly the
+// same match; anything else means the rewrite changed what a shape is.
+func TestGapTolerantShapesMatchContiguousKeysLikeTheOriginals(t *testing.T) {
+	inputs := []string{
+		"key=" + awsKey + " and " + githubKey,
+		"x" + awsKey,
+		anthropicKey + "." + openaiKey,
+		jwtToken + " then " + slackKey + ", " + googleKey,
+		"sk-this-is-kebab-case-prose-not-a-key",
+		"github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGH/glpat-abcdefghij0123456789",
+	}
+	originals := append([]*regexp.Regexp{openaiKeyPattern}, textSecretPatterns...)
+	tolerant := append([]*regexp.Regexp{splitOpenAIPattern}, splitTextPatterns...)
+	if len(originals) != len(tolerant) {
+		t.Fatalf("SETUP INVALID: %d original shapes and %d gap-tolerant ones", len(originals), len(tolerant))
+	}
+	for i := range originals {
+		for _, input := range inputs {
+			want := fmt.Sprint(originals[i].FindAllStringIndex(input, -1))
+			if got := fmt.Sprint(tolerant[i].FindAllStringIndex(input, -1)); got != want {
+				t.Errorf("shape %s on %q: gap-tolerant matched %s, original %s", originals[i], input, got, want)
+			}
+		}
 	}
 }
