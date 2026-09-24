@@ -10,8 +10,9 @@ import (
 // callbackReadHeaderTimeout bounds how long an accepted connection may take to
 // send its request header. A single-use loopback callback server has no reason
 // to wait longer, and without a bound a client that stalls mid-header holds the
-// connection, and the server goroutine, open indefinitely.
-const callbackReadHeaderTimeout = 5 * time.Second
+// connection, and the server goroutine, open indefinitely. A var so the
+// package tests can shorten it.
+var callbackReadHeaderTimeout = 5 * time.Second
 
 // callbackShutdownBudget is how long Close waits for in-flight requests before
 // it force-closes whatever is still open.
