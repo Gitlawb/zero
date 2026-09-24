@@ -1251,6 +1251,85 @@ func TestACPResumeAppliesStandaloneSessionKindPolicy(t *testing.T) {
 			}, &LoadSessionResult{}); err != nil {
 				t.Fatalf("session/load should retain render-only access: %v", err)
 			}
+			// The check above only showed the refused resume never registered the
+			// session. Load does register it, so the prompt that matters is the one
+			// AFTER the load: render-only means the transcript can be read and the
+			// sub-run cannot be continued.
+			err = h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+				SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("must stay closed after load")},
+			}, &PromptResult{})
+			if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+				t.Fatalf("session/prompt after load of a %s session = %v, want invalid params", tc.name, err)
+			}
+		})
+	}
+}
+
+// LOAD PUBLISHES A SUB-RUN FOR VIEWING, NOT FOR CONTINUING. Every other resume
+// path (the TUI, exec sessions, the exec CLI, and ACP's own session/resume)
+// refuses a kind sessions.IsResumableKind rejects. session/load has a real
+// render-only use, a client rebuilding a transcript it can scroll, so it keeps
+// loading those sessions; what it must not do is publish one that accepts a
+// prompt, because the prompt would carry on a child, side or spec sub-run as a
+// standalone conversation. Checked in both directions, so a gate that refused
+// everything would fail on the resumable kinds.
+func TestACPLoadPublishesSubRunsReadOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		kind     sessions.SessionKind
+		readOnly bool
+	}{
+		{name: "regular", kind: ""},
+		{name: "fork", kind: sessions.SessionKindFork},
+		{name: "child", kind: sessions.SessionKindChild, readOnly: true},
+		{name: "side", kind: sessions.SessionKindSide, readOnly: true},
+		{name: "spec draft", kind: sessions.SessionKindSpecDraft, readOnly: true},
+		{name: "spec impl", kind: sessions.SessionKindSpecImpl, readOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := !sessions.IsResumableKind(tc.kind); got != tc.readOnly {
+				t.Fatalf("SETUP INVALID: IsResumableKind(%q) disagrees with this table (readOnly=%v), so the cases no longer mean what they say", tc.kind, tc.readOnly)
+			}
+			deps := testDeps(t)
+			workspace := t.TempDir()
+			created, err := deps.Store.Create(sessions.CreateInput{
+				SessionID: "load-" + strings.ReplaceAll(tc.name, " ", "-"), Cwd: workspace, SessionKind: tc.kind,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, deps)
+			defer h.stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+				SessionID: created.SessionID, Cwd: workspace,
+			}, &LoadSessionResult{}); err != nil {
+				t.Fatalf("session/load of a %s session: %v", tc.name, err)
+			}
+			err = h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+				SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("continue")},
+			}, &PromptResult{})
+			// A resumable session has to be genuinely promptable, not merely "not
+			// refused as view-only": any other failure would hide a broken
+			// writable path behind a passing test.
+			if !tc.readOnly {
+				if err != nil {
+					t.Fatalf("session/prompt after load of a %s session = %v, want success", tc.name, err)
+				}
+				return
+			}
+			// The decision is the RPC code; the message only distinguishes the
+			// view-only refusal from other invalid-params errors such as an
+			// unknown session id.
+			var rpcErr *rpcError
+			if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+				t.Fatalf("session/prompt after load of a %s session = %v, want invalid params", tc.name, err)
+			}
+			if !strings.Contains(rpcErr.Message, "loaded for viewing only") {
+				t.Fatalf("session/prompt after load of a %s session was refused for another reason: %v", tc.name, err)
+			}
 		})
 	}
 }
