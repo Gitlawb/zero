@@ -277,6 +277,18 @@ func setNotifyJSONObject(data []byte, notify NotifyConfig) ([]byte, error) {
 		return nil, err
 	}
 	notifyIndex := lastJSONMember(root.members, "notify")
+	// Count duplicates: the ordinary file has exactly one notify member, and
+	// for it a positional replace keeps the key where the user put it and
+	// preserves their formatting (byte-preserving contract). The
+	// remove-all-and-reinsert path below is ONLY for files that actually
+	// contain duplicates, where Go's field-merging decode would otherwise let
+	// an earlier block's fields leak into the replacement.
+	duplicates := 0
+	for _, member := range root.members {
+		if member.key == "notify" {
+			duplicates++
+		}
+	}
 	if string(encoded) == "{}" {
 		for notifyIndex >= 0 {
 			data = removeJSONMember(data, root, notifyIndex)
@@ -289,20 +301,25 @@ func setNotifyJSONObject(data []byte, notify NotifyConfig) ([]byte, error) {
 		}
 		return data, nil
 	}
-	if notifyIndex >= 0 {
-		// Remove every duplicate, then insert the complete replacement where
-		// the last one lived, so no field can be inherited from an earlier
-		// block (Go merges duplicate members' fields at decode time).
-		for notifyIndex >= 0 {
-			data = removeJSONMember(data, root, notifyIndex)
-			rootStart = skipJSONSpace(data, 0)
-			root, err = parseJSONObject(data, rootStart)
-			if err != nil {
-				return nil, err
-			}
-			notifyIndex = lastJSONMember(root.members, "notify")
+	if duplicates <= 1 {
+		if notifyIndex < 0 {
+			return insertJSONMember(data, root, "notify", encoded), nil
 		}
-		return insertJSONMember(data, root, "notify", encoded), nil
+		// Single member: replace its value in place — no key movement, no
+		// reformatting of the surrounding bytes.
+		return replaceJSONRange(data, root.members[notifyIndex].valueStart, root.members[notifyIndex].valueEnd, encoded), nil
+	}
+	// Multiple duplicates: Go merges their fields at decode time, so the
+	// replacement must not inherit anything — remove every duplicate and
+	// insert the complete value fresh.
+	for notifyIndex >= 0 {
+		data = removeJSONMember(data, root, notifyIndex)
+		rootStart = skipJSONSpace(data, 0)
+		root, err = parseJSONObject(data, rootStart)
+		if err != nil {
+			return nil, err
+		}
+		notifyIndex = lastJSONMember(root.members, "notify")
 	}
 	return insertJSONMember(data, root, "notify", encoded), nil
 }

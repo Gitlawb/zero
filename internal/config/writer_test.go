@@ -1423,3 +1423,29 @@ func TestSetNotifyReplacementInheritsNoFieldFromEarlierDuplicate(t *testing.T) {
 		t.Fatalf("unrelated member lost through the replace: %s", string(raw))
 	}
 }
+
+// Maintainer regression (PR #1001, Vasanthdev2004 review): the duplicate-key
+// fix must not reach the ORDINARY single-member file. Removing and re-inserting
+// the notify member there moved the key to the end of the object and collapsed
+// its formatting, so every /notify toggle reordered the user's config — JSON
+// member order carries no meaning, but a byte-preserving write should not
+// reformat anything it does not have to. A single notify member is replaced
+// in place: key position and surrounding formatting unchanged.
+func TestSetNotifySingleMemberReplacedInPlace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	original := "{\n  \"activeProvider\": \"openai\",\n  \"notify\": {\"mode\": \"both\", \"focusMode\": \"unfocused\"},\n  \"preferences\": {\"theme\": \"dracula\"}\n}\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
+		t.Fatalf("SetNotify: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"activeProvider\": \"openai\",\n  \"notify\": {\"mode\":\"off\",\"focusMode\":\"always\"},\n  \"preferences\": {\"theme\": \"dracula\"}\n}\n"
+	if string(raw) != want {
+		t.Fatalf("single-member replace moved or reformatted unrelated bytes:\n got: %q\nwant: %q", string(raw), want)
+	}
+}
