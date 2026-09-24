@@ -23,11 +23,24 @@ import (
 // are not.
 func hostSandboxNotice(t *testing.T) string {
 	t.Helper()
-	notice := sandbox.SelectBackend(sandbox.BackendOptions{}).BuildPlan(t.TempDir(), sandbox.DefaultPolicy()).DegradedNotice()
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: t.TempDir(),
+		Policy:        sandbox.DefaultPolicy(),
+		Backend:       sandbox.SelectBackend(sandbox.BackendOptions{}),
+	})
+	notice := engine.DegradedNotice()
 	if notice == "" {
 		return ""
 	}
 	return "[zero] " + notice + "\n"
+}
+
+// clearSandboxNestingMarkers keeps a test that pins the notice from inheriting
+// the nesting markers when the suite itself runs inside a Zero sandbox.
+func clearSandboxNestingMarkers(t *testing.T) {
+	t.Helper()
+	t.Setenv(sandbox.EnvSandboxed, "")
+	t.Setenv(sandbox.EnvSandboxBackend, "")
 }
 
 // unavailableTestSandbox is the backend a Linux box without the helper gets,
@@ -69,6 +82,7 @@ func runExecWithSandbox(t *testing.T, args []string, backend func(sandbox.Backen
 // doctor` and `zero sandbox policy` did, so `zero exec` ran every tool with the
 // native sandbox effectively off and printed nothing about it. #1041.
 func TestExecSaysOnStderrWhenTheSandboxIsDegraded(t *testing.T) {
+	clearSandboxNestingMarkers(t)
 	exitCode, _, stderr := runExecWithSandbox(t, []string{"exec", "hello"}, unavailableTestSandbox, config.SandboxConfig{})
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr %q", exitCode, stderr)
@@ -81,6 +95,7 @@ func TestExecSaysOnStderrWhenTheSandboxIsDegraded(t *testing.T) {
 // The notice goes to stderr in the JSON modes as well, so stdout stays one JSON
 // object per line for whatever reads it.
 func TestExecKeepsTheDegradedNoticeOffStdoutInJSONMode(t *testing.T) {
+	clearSandboxNestingMarkers(t)
 	exitCode, stdout, stderr := runExecWithSandbox(t, []string{"exec", "--output-format", "json", "hello"}, unavailableTestSandbox, config.SandboxConfig{})
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr %q", exitCode, stderr)
@@ -98,6 +113,7 @@ func TestExecKeepsTheDegradedNoticeOffStdoutInJSONMode(t *testing.T) {
 
 // A sandbox the user turned off is their choice, not a degradation.
 func TestExecSaysNothingWhenTheSandboxIsTurnedOff(t *testing.T) {
+	clearSandboxNestingMarkers(t)
 	off := false
 	exitCode, _, stderr := runExecWithSandbox(t, []string{"exec", "hello"}, unavailableTestSandbox, config.SandboxConfig{Enabled: &off})
 	if exitCode != 0 {
@@ -111,6 +127,7 @@ func TestExecSaysNothingWhenTheSandboxIsTurnedOff(t *testing.T) {
 // The TUI shows the same notice when the session opens, taken from the engine
 // its commands run through.
 func TestTUILaunchCarriesTheDegradedNotice(t *testing.T) {
+	clearSandboxNestingMarkers(t)
 	for _, testCase := range []struct {
 		name    string
 		sandbox config.SandboxConfig
