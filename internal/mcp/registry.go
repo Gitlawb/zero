@@ -430,6 +430,21 @@ func (runtime *Runtime) Close() error {
 		// End disclosure delivery FIRST. A launch that resolves while the clients
 		// are being closed has no owner left to print it, and the runtime must not
 		// leave a subscriber holding a writer whose lifetime it does not know.
+		//
+		// THROUGH THE ONCE, NOT THE FIELD. Reading disclosureStream directly raced
+		// a first StartupDisclosureStream call on another goroutine, and a Close
+		// that came before any call found nil and closed nothing, so a later call
+		// built a fresh, open stream and subscribed it to launches from a runtime
+		// that was already gone. Reported by CodeRabbit.
+		//
+		// If nobody asked for the stream before this, nobody is draining it, so it
+		// is published EMPTY rather than built the usual way: no sink is
+		// subscribed and nothing is queued for an owner that does not exist. Every
+		// later caller then gets this stream, already closed. The read after Do is
+		// ordered by the Once whichever call got there first.
+		runtime.disclosureStreamOnce.Do(func() {
+			runtime.disclosureStream = newStartupDisclosureStream()
+		})
 		runtime.disclosureStream.Close()
 		for _, client := range runtime.clients {
 			if err := client.Close(); err != nil && runtime.err == nil {

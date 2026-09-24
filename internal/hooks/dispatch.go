@@ -223,7 +223,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 		if blocked {
 			outcome.Blocked = true
 			outcome.BlockedBy = hook.ID
-			outcome.Reason = blockReason(result)
+			outcome.Reason = blockCause(result)
 			// Stop on the first veto: the action is already denied.
 			return outcome
 		}
@@ -300,28 +300,17 @@ func hookMessage(result commandResult) string {
 	return message
 }
 
-func withHookEnforcementNotices(message string, notices []string) string {
-	joined := strings.TrimSpace(strings.Join(notices, "\n"))
-	if joined == "" {
-		return message
-	}
-	if strings.TrimSpace(message) == "" {
-		return joined
-	}
-	return joined + "\n\n" + message
-}
-
-// blockReason explains a veto, and carries the enforcement disclosure with it.
+// blockCause explains a veto in the hook's own words, and says nothing about
+// enforcement.
 //
-// THE BLOCKING BRANCH IS THE ONE A USER ALWAYS SEES. hookMessage composes the
-// notices into DispatchOutcome.Messages, but a vetoing beforeTool hook builds
-// Reason separately and returns immediately, so a hook that blocked an action
-// while running without write confinement reported only the veto. Both fields
-// reach a person, so both have to carry it.
-func blockReason(result commandResult) string {
-	return withHookEnforcementNotices(blockCause(result), result.Notices)
-}
-
+// THE SAME RULE AS hookMessage. The blocking hook's notices used to be folded in
+// here as well, from before the typed slice existed, and Dispatch had already
+// appended them to DispatchOutcome.Notices, so a hook that vetoed while running
+// without write confinement put one disclosure on two channels. The one consumer
+// made up for it by dropping every notice whose text appeared anywhere in the
+// reason, which also dropped an EARLIER hook's disclosure whenever the blocking
+// hook's output happened to quote it. The notice now travels on the typed slice
+// only, whichever hook in the chain produced it. Reported by CodeRabbit.
 func blockCause(result commandResult) string {
 	if result.TimedOut {
 		if trimmed := strings.TrimSpace(result.Stderr); trimmed != "" {

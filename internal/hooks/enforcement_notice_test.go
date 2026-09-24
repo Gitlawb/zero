@@ -68,11 +68,14 @@ func TestAHookMessageCarriesOnlyTheHooksOwnOutput(t *testing.T) {
 
 // THROUGH Dispatch, NOT A HAND-BUILT commandResult.
 //
-// The blocking branch builds DispatchOutcome.Reason with blockReason and returns
-// immediately, so it never touches hookMessage. A vetoing beforeTool hook that
-// ran without write confinement reported only the veto, and Reason is the field
-// the agent turns into the model-visible result.
-func TestABlockedBeforeToolHookCarriesTheNoticeIntoItsReason(t *testing.T) {
+// The blocking branch returns immediately, so it never touches hookMessage, and a
+// vetoing beforeTool hook that ran without write confinement once reported only
+// the veto. The disclosure still has to come out of that branch, and it has to
+// come out ONCE: the blocking hook's notices used to be folded into Reason as well
+// as appended to Notices, so the same fact travelled on two channels and the
+// consumer had to guess which copy to drop. Reason is the hook's words, and the
+// notice travels on the typed slice like every other hook's.
+func TestABlockedBeforeToolHookCarriesItsNoticeOnTheTypedSliceOnly(t *testing.T) {
 	const notice = "denyRead is configured, so the write jail is not confining writes"
 
 	dispatcher := NewDispatcher(DispatcherOptions{
@@ -86,14 +89,15 @@ func TestABlockedBeforeToolHookCarriesTheNoticeIntoItsReason(t *testing.T) {
 	if !outcome.Blocked {
 		t.Fatal("SETUP INVALID: the hook did not block, so the blocking branch was never taken")
 	}
-	if !strings.Contains(outcome.Reason, notice) {
-		t.Errorf("the veto reason lost the enforcement notice:\n%s", outcome.Reason)
+	if len(outcome.Notices) != 1 || outcome.Notices[0] != notice {
+		t.Errorf("the veto lost the enforcement notice from the typed slice: %#v", outcome.Notices)
 	}
-	if !strings.Contains(outcome.Reason, "policy violation") {
-		t.Errorf("the veto reason lost the hook's own explanation:\n%s", outcome.Reason)
+	if outcome.Reason != "policy violation" {
+		t.Errorf("Reason = %q, want the hook's own explanation and nothing else", outcome.Reason)
 	}
-	if strings.Count(outcome.Reason, notice) != 1 {
-		t.Errorf("the notice appears %d times in the reason, want once:\n%s", strings.Count(outcome.Reason, notice), outcome.Reason)
+	// Across BOTH channels, because a copy in each is the defect this pins.
+	if got := strings.Count(outcome.Reason, notice) + strings.Count(strings.Join(outcome.Notices, "\n"), notice); got != 1 {
+		t.Errorf("the notice appears %d times across Reason and Notices, want once", got)
 	}
 }
 

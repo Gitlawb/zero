@@ -2055,28 +2055,14 @@ func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResul
 	}
 	// Dispatch runs hooks in order and stops at the first veto, so an earlier hook
 	// may already have run under a weakened token before this one said no. Its
-	// notice describes something that happened and has to survive the veto.
+	// notice describes something that happened and has to survive the veto, and so
+	// does the blocking hook's own.
 	//
-	// blockReason has already folded the BLOCKING hook's own notices into Reason,
-	// which is inside message above, so those are dropped here rather than said
-	// twice.
-	return withAppliedHookNotices(result, noticesBefore(outcome), nil)
-}
-
-// noticesBefore returns the accumulated notices minus the blocking hook's own,
-// which blockReason has already put in the veto message.
-func noticesBefore(outcome hooks.DispatchOutcome) []string {
-	if !outcome.Blocked {
-		return outcome.Notices
-	}
-	kept := make([]string, 0, len(outcome.Notices))
-	for _, notice := range outcome.Notices {
-		if strings.Contains(outcome.Reason, strings.TrimSpace(notice)) {
-			continue
-		}
-		kept = append(kept, notice)
-	}
-	return kept
+	// ALL OF THEM, FROM THE TYPED SLICE. Reason carries the hook's words only, so
+	// nothing here is said twice and nothing has to be filtered out. The filter
+	// this replaced matched notices against the reason text, and dropped an
+	// earlier hook's disclosure whenever the blocking hook's output quoted it.
+	return withAppliedHookNotices(result, outcome.Notices, nil)
 }
 
 // withAppliedHookNotices is the single place a hook enforcement notice

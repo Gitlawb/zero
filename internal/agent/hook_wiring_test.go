@@ -84,6 +84,52 @@ func TestBlockedByHookResultFallsBackWhenReasonEmpty(t *testing.T) {
 	}
 }
 
+// THE BLOCKING HOOK'S OWN NOTICE IS A NOTICE, NOT PART OF THE VETO TEXT.
+//
+// It used to arrive folded into Reason, so it reached the model inside the error
+// message and never reached EnforcementNotices, which is what every surface
+// renders as the disclosure and what the session record keeps apart from the
+// body.
+func TestBlockedByHookResultCarriesTheBlockersNoticeOnTheTypedSlice(t *testing.T) {
+	const notice = "denyRead is configured, so the write jail is not confining writes"
+	out := blockedByHookResult(
+		ToolCall{ID: "c4", Name: "bash"},
+		hooks.DispatchOutcome{Blocked: true, BlockedBy: "policy", Reason: "policy violation", Notices: []string{notice}},
+	)
+	if len(out.EnforcementNotices) != 1 || out.EnforcementNotices[0] != notice {
+		t.Fatalf("EnforcementNotices = %#v, want the blocking hook's notice", out.EnforcementNotices)
+	}
+	if strings.Contains(out.Output, notice) {
+		t.Errorf("the notice is also inside the veto message, so it is said twice:\n%s", out.Output)
+	}
+	if got := strings.Count(out.ModelOutput(), notice); got != 1 {
+		t.Errorf("the model sees the notice %d times, want once:\n%s", got, out.ModelOutput())
+	}
+}
+
+// AN EARLIER HOOK'S NOTICE SURVIVES A REASON THAT QUOTES IT.
+//
+// The veto path used to drop every notice whose text appeared anywhere in the
+// blocking hook's reason, on the theory that the reason already carried it. A
+// blocking hook that printed the same sentence, for example by relaying another
+// tool's stderr, therefore removed an earlier hook's disclosure from the typed
+// slice.
+func TestBlockedByHookResultKeepsAnEarlierNoticeTheReasonQuotes(t *testing.T) {
+	const notice = "denyRead is configured, so the write jail is not confining writes"
+	out := blockedByHookResult(
+		ToolCall{ID: "c5", Name: "bash"},
+		hooks.DispatchOutcome{
+			Blocked:   true,
+			BlockedBy: "veto",
+			Reason:    "refusing: the last run reported \"" + notice + "\"",
+			Notices:   []string{notice},
+		},
+	)
+	if len(out.EnforcementNotices) != 1 || out.EnforcementNotices[0] != notice {
+		t.Fatalf("the earlier hook's notice was dropped because the veto quoted it: %#v", out.EnforcementNotices)
+	}
+}
+
 func TestDispatchHelpersAreNoopWithoutDispatcher(t *testing.T) {
 	options := Options{} // Hooks is nil
 	if _, blocked := dispatchBeforeTool(context.Background(), options, ToolCall{Name: "bash"}, nil); blocked {

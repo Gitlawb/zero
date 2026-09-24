@@ -131,8 +131,14 @@ func TestAnMCPServerThatNeverLaunchedClaimsNoEnforcement(t *testing.T) {
 				client.Close()
 				t.Fatal("the server started even though its launch was supposed to fail")
 			}
+			// THE CARRIER, NOT THE TEXT. A connect failure hands its notices on
+			// startupDisclosureError, whose Error() prints only the cause, so a
+			// check of the message could never see a notice that was carried.
+			if carried := startupNoticesFromError(err); len(carried) != 0 {
+				t.Errorf("a launch that never happened claimed an enforcement trade: %#v", carried)
+			}
 			if strings.Contains(err.Error(), startupNotice) {
-				t.Errorf("a launch that never happened claimed an enforcement trade: %v", err)
+				t.Errorf("a launch that never happened claimed an enforcement trade in its error: %v", err)
 			}
 		})
 	}

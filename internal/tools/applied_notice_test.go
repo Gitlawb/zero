@@ -36,6 +36,37 @@ func TestCommandNoticesFollowAppliedExecutionState(t *testing.T) {
 		}
 	})
 
+	// A command that ran and then FAILED still ran under the token it was given,
+	// and a failure is when the reader most needs to know that. Only success was
+	// pinned, so a rule keyed on the result status rather than on the launch would
+	// have passed everything above.
+	t.Run("launched and failed", func(t *testing.T) {
+		outcome := execution.Outcome{
+			Kind:        execution.OutcomeApplicationFailure,
+			Launched:    true,
+			Enforcement: execution.Enforcement{Notices: []string{appliedNotice}},
+		}
+		got := finalizeToolOutcome(Result{
+			Status: StatusError, Output: "exit status 1: permission denied", Meta: planned, ExecutionOutcome: &outcome,
+			Display: Display{Summary: "command failed", Kind: "shell"},
+		}, "exit status 1: permission denied")
+		if len(got.EnforcementNotices) != 1 {
+			t.Fatalf("a command that ran and failed lost its disclosure: %#v", got.EnforcementNotices)
+		}
+		model := got.ModelOutput()
+		for _, want := range []string{appliedNotice, "permission denied"} {
+			if !strings.Contains(model, want) {
+				t.Errorf("the model view of a failed command is missing %q:\n%s", want, model)
+			}
+		}
+		summary := got.HumanDisplay().Summary
+		for _, want := range []string{appliedNotice, "command failed"} {
+			if !strings.Contains(summary, want) {
+				t.Errorf("the display of a failed command is missing %q: %q", want, summary)
+			}
+		}
+	})
+
 	t.Run("never launched", func(t *testing.T) {
 		outcome := execution.Outcome{
 			Kind:        execution.OutcomeSandboxSetupFailure,

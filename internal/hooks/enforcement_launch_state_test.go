@@ -130,8 +130,9 @@ func TestTheHookRunnerOnlyDisclosesEnforcementForAChildThatLaunched(t *testing.T
 	}
 }
 
-// And the same rule has to hold on the veto path, which builds its reason
-// separately and is what the model actually sees.
+// And the same rule has to hold on the veto path, which returns early and is what
+// the model actually sees. Both channels are checked: the notice travels on
+// Notices, and Reason must not grow a copy of it either.
 func TestAVetoingHookThatNeverLaunchedClaimsNoEnforcement(t *testing.T) {
 	dispatcher := NewDispatcher(DispatcherOptions{
 		Config: beforeToolConfig(Definition{ID: "policy", Event: EventBeforeTool, Command: "policy-check", Enabled: true}),
@@ -148,12 +149,16 @@ func TestAVetoingHookThatNeverLaunchedClaimsNoEnforcement(t *testing.T) {
 	if !outcome.Blocked {
 		t.Fatal("SETUP INVALID: a beforeTool hook that could not run must fail closed, or the veto path is not exercised")
 	}
+	if len(outcome.Notices) != 0 {
+		t.Errorf("the dispatch outcome claims an enforcement trade for a hook that never started: %#v", outcome.Notices)
+	}
 	if strings.Contains(outcome.Reason, launchStateNotice) {
 		t.Errorf("the veto reason claims an enforcement trade for a hook that never started:\n%s", outcome.Reason)
 	}
 }
 
-// A launched hook still carries it all the way into the dispatch outcome.
+// A launched hook still carries it all the way into the dispatch outcome, on the
+// typed slice and only there.
 func TestALaunchedHookCarriesTheNoticeIntoTheDispatchOutcome(t *testing.T) {
 	dispatcher := NewDispatcher(DispatcherOptions{
 		Config:    beforeToolConfig(Definition{ID: "policy", Event: EventBeforeTool, Command: "policy-check", Enabled: true}),
@@ -164,8 +169,11 @@ func TestALaunchedHookCarriesTheNoticeIntoTheDispatchOutcome(t *testing.T) {
 	if !outcome.Blocked {
 		t.Fatal("SETUP INVALID: the hook did not veto, so the reason path is not exercised")
 	}
-	if !strings.Contains(outcome.Reason, launchStateNotice) {
-		t.Errorf("a hook that really ran under the weakened token disclosed nothing:\n%s", outcome.Reason)
+	if got := strings.Count(strings.Join(outcome.Notices, "\n"), launchStateNotice); got != 1 {
+		t.Errorf("a hook that really ran under the weakened token disclosed it %d times on Notices, want once: %#v", got, outcome.Notices)
+	}
+	if strings.Contains(outcome.Reason, launchStateNotice) {
+		t.Errorf("the veto reason carries a second copy of the notice:\n%s", outcome.Reason)
 	}
 }
 
