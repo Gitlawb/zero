@@ -300,7 +300,7 @@ func (shape splitShape) runOn(text string, start, end int) (next, gap, nextEnd i
 			}
 			at -= size
 		}
-		if !strings.HasPrefix(text[candidate:], shape.prefix) {
+		if !hasGappedPrefix(text[candidate:], shape.prefix) {
 			continue
 		}
 		tried++
@@ -309,6 +309,34 @@ func (shape splitShape) runOn(text string, start, end int) (next, gap, nextEnd i
 		}
 	}
 	return -1, 0, 0
+}
+
+// hasGappedPrefix reports whether text opens with prefix, allowing a run of
+// separators between its characters the way the shapes themselves do. A plain
+// prefix test missed a token split inside its first few characters, and the run
+// that swallowed it then went unnoticed.
+func hasGappedPrefix(text, prefix string) bool {
+	at := 0
+	for index, want := range prefix {
+		if index > 0 {
+			for at < len(text) {
+				r, size := utf8.DecodeRuneInString(text[at:])
+				if !splitSecretSeparator(r) {
+					break
+				}
+				at += size
+			}
+		}
+		if at >= len(text) {
+			return false
+		}
+		r, size := utf8.DecodeRuneInString(text[at:])
+		if r != want {
+			return false
+		}
+		at += size
+	}
+	return true
 }
 
 func gapTolerantAll(patterns []*regexp.Regexp) []*regexp.Regexp {

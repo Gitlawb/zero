@@ -342,6 +342,21 @@ func TestSplitRedactionKeepsTwoSplitCredentialsOfOneShapeApart(t *testing.T) {
 	}
 }
 
+// The search for where the next credential begins is bounded, so it has to be
+// spent on positions where one can begin. Here the second token's header is split
+// at every character inside the part the first match swallowed, which puts dozens
+// of separator runs between the end of that match and the real boundary.
+func TestSplitRedactionFindsTheNextCredentialPastItsOwnSplits(t *testing.T) {
+	parts := strings.Split(otherJWT, ".")
+	header := strings.Join(strings.Split(parts[0], ""), escSeparator)
+	second := header + "." + strings.Join(parts[1:], ".")
+	value := splitThroughout(jwtToken, escSeparator) + nulSeparator + second
+	want := RedactedSecret + nulSeparator + RedactedSecret
+	if got := RedactString(value, Options{}); got != want {
+		t.Errorf("RedactString(...) = %q, want %q", got, want)
+	}
+}
+
 // And a chain of them leaks nothing, however the markers fall.
 func TestSplitRedactionLeavesNothingOfAChainOfSplitJWTs(t *testing.T) {
 	chain := splitThroughout(jwtToken, escSeparator) + nulSeparator +
