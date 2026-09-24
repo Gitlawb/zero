@@ -494,31 +494,28 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 		err  error
 	}
 	resultChan := make(chan callbackResult, 1)
-	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/callback" {
-				http.NotFound(w, r)
-				return
-			}
-			code, parseErr := flow.parseCallback(r.URL.Query())
-			if parseErr != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = io.WriteString(w, "Authorization failed. You may close this window.")
-			} else {
-				_, _ = io.WriteString(w, "Authorization complete. You may close this window.")
-			}
-			select {
-			case resultChan <- callbackResult{code: code, err: parseErr}:
-			default:
-			}
-		}),
-	}
-	go func() { _ = server.Serve(listener) }()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
+	// The shared callback server bounds header reads, force-closes a client
+	// still connected when shutdown runs out of time, and waits for Serve to
+	// return. The bare http.Server this used to build did none of that, so a
+	// client stalled mid-header outlived Login (#1028).
+	server := oauth.StartCallbackServer(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/callback" {
+			http.NotFound(w, r)
+			return
+		}
+		code, parseErr := flow.parseCallback(r.URL.Query())
+		if parseErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, "Authorization failed. You may close this window.")
+		} else {
+			_, _ = io.WriteString(w, "Authorization complete. You may close this window.")
+		}
+		select {
+		case resultChan <- callbackResult{code: code, err: parseErr}:
+		default:
+		}
+	}))
+	defer server.Close()
 
 	open := options.OpenBrowser
 	if open == nil {
