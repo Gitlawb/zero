@@ -141,3 +141,125 @@ func containsCircular(v any) bool {
 	}
 	return false
 }
+
+func TestRedactStringCatchesSecretsSplitByControlBytes(t *testing.T) {
+	// Unsplit passing is not coverage: a NUL/ESC/C1 in the body splits the
+	// shape so the patterns miss it unless matching allows those controls as
+	// gaps between body characters (without joining unrelated tokens).
+	const prefix = "sk-ant-api03-"
+	const body = "abcdefghijklmnopqrstuvwxyz"
+	unsplit := prefix + body
+	if got := RedactString(unsplit, Options{}); strings.Contains(got, body) {
+		t.Fatalf("unsplit secret not redacted (test setup): %q", got)
+	}
+
+	cases := []struct {
+		name  string
+		split string
+	}{
+		{name: "NUL", split: "\x00"},
+		{name: "ESC", split: "\x1b"},
+		{name: "C1", split: "\x9b"},
+		{name: "UTF-8 C1", split: string(rune(0x9B))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inputs := []struct {
+				placement string
+				input     string
+			}{
+				{placement: "prefix-body boundary", input: prefix + tc.split + body},
+				{placement: "inside body", input: prefix + body[:13] + tc.split + body[13:]},
+			}
+			for _, input := range inputs {
+				t.Run(input.placement, func(t *testing.T) {
+					got := RedactString(input.input, Options{})
+					if got != RedactedSecret {
+						t.Fatalf("expected %q after %s %s split, got %q", RedactedSecret, tc.name, input.placement, got)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRedactStringPreservesControlAfterCredential(t *testing.T) {
+	const secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+	input := "key=" + secret + "\x00path/one.go\x00path/two.go"
+	want := "key=" + RedactedSecret + "\x00path/one.go\x00path/two.go"
+	if got := RedactString(input, Options{}); got != want {
+		t.Fatalf("terminal credential separator changed:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+func TestRedactStringSuffixCannotDisableOpenAIKeyMatch(t *testing.T) {
+	const secret = "sk-aaaaaaaaaaaaaaaaaaaabcdefgh"
+	input := "key " + secret + "\x1bkebab-case tail"
+	want := "key " + RedactedSecret + "\x1bkebab-case tail"
+	if got := RedactString(input, Options{}); got != want {
+		t.Fatalf("suffix changed OpenAI key classification:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+func TestRedactStringDistinguishesInvalidC1FromValidReplacementRune(t *testing.T) {
+	const prefix = "sk-ant-api03-"
+	const body = "abcdefghijklmnopqrstuvwxyz"
+
+	invalidC1 := prefix + body[:13] + "\x9b" + body[13:]
+	if got := RedactString(invalidC1, Options{}); got != RedactedSecret {
+		t.Fatalf("raw invalid C1 split was not redacted: %q", got)
+	}
+
+	validReplacement := prefix + body[:13] + "\uFFFD" + body[13:]
+	got := RedactString(validReplacement, Options{})
+	if !strings.Contains(got, "\uFFFD"+body[13:]) {
+		t.Fatalf("valid U+FFFD was treated as a control gap: %q", got)
+	}
+}
+
+func TestRedactStringPreservesAllowedWhitespaceAndUTF8(t *testing.T) {
+	input := "safe\tline\nnext\rfinal café"
+	if got := RedactString(input, Options{}); got != input {
+		t.Fatalf("unexpected normalization: %q", got)
+	}
+}
+
+func TestRedactStringWordcharBeforeNULAnthropicKey(t *testing.T) {
+	// Matching on a control-stripped copy joins "id42" and the key, so \b in
+	// textSecretPatterns misses and the secret leaks. Matching on the original
+	// treats the NUL as a boundary; leaked must be false.
+	const secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+	if got := RedactString(secret, Options{}); strings.Contains(got, "sk-ant-api03-") {
+		t.Fatalf("unsplit secret not redacted (test setup): %q", got)
+	}
+	input := "id42\x00" + secret
+	got := RedactString(input, Options{})
+	leaked := strings.Contains(got, secret) || strings.Contains(got, "sk-ant-api03-")
+	if leaked {
+		t.Fatalf("wordchar-before-NUL+anthropic-key leaked=true out=%q", got)
+	}
+	if !strings.Contains(got, RedactedSecret) {
+		t.Fatalf("wordchar-before-NUL+anthropic-key leaked=false want %q, got %q", RedactedSecret, got)
+	}
+}
+
+func TestRedactStringControlBytesWithoutSecretStayIdentical(t *testing.T) {
+	// scrubResultSecrets sets Result.Redacted when RedactString's result !=
+	// Output. Stripping is matching-time only: no-secret control bytes must
+	// remain byte-identical so Redacted stays false.
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{name: "form feed in source", input: "package main\n\ffunc main() {}\n"},
+		{name: "Windows-1252 quotes", input: "Don\x92t \x93quote\x94 me\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactString(tc.input, Options{})
+			if got != tc.input {
+				t.Fatalf("no-secret input not byte-identical:\n in=%q\nout=%q", tc.input, got)
+			}
+		})
+	}
+}
