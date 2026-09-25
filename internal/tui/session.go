@@ -236,13 +236,8 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	m.activeSession = *session
 	m.pendingSessionTitle = ""
 	m.sessionEvents = append([]sessions.Event{}, events...)
-	if session.SessionID != previousID && m.removedLiveRow != "" {
-		// A deleted row belongs to the previous session. Adopt the resumed
-		// metadata instead of carrying that retained identity into this one.
-		m.removedLiveRow = ""
-		m.providerName = session.Provider
-		m.modelName = session.ModelID
-	}
+	// Resume replaces conversation history, not the live client. Keep its
+	// identity (including a removed row) and model until an actual provider switch.
 	if m.providerName == "" {
 		m.removedLiveRow = ""
 		m.providerName = session.Provider

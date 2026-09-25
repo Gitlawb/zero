@@ -1499,6 +1499,27 @@ func TestRepairUnnamedProviderAllowsExplicitUniqueName(t *testing.T) {
 	}
 }
 
+func TestRepairUnnamedStoredProviderCaseCollisionExplainsManualRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "legacy",
+		Providers: []ProviderProfile{
+			{APIKeyStored: true},
+			{Name: "LEGACY"},
+		},
+	}, 0o600)
+	for _, name := range []string{"", "work", "Legacy"} {
+		_, _, err := RepairUnnamedProvider(path, name)
+		if err == nil || !strings.Contains(err.Error(), `manually rename the sibling "LEGACY" in config.json`) {
+			t.Fatalf("repair with name %q must explain the manual recovery: %v", name, err)
+		}
+		after, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(before, after) {
+			t.Fatal("refused repair changed config")
+		}
+	}
+}
+
 func TestEnsureCatalogProviderValidatesBeforeExistingProfileShortcut(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "xai"}, {Name: "XAI"}}}, 0o600)
