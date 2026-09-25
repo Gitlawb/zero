@@ -1243,7 +1243,7 @@ func TestResumeAfterDeletingLiveProjectRow(t *testing.T) {
 		deleteLiveRow bool
 		sameSession   bool
 	}{
-		{name: "different session clears retained identity", deleteLiveRow: true},
+		{name: "different session retains deleted identity", deleteLiveRow: true},
 		{name: "same session retains deleted identity", deleteLiveRow: true, sameSession: true},
 		{name: "no deletion preserves nonempty live fields"},
 	} {
@@ -1277,17 +1277,23 @@ func TestResumeAfterDeletingLiveProjectRow(t *testing.T) {
 				m.providerWizard = nil
 			}
 			wantProvider, wantModel, wantRemoved := m.providerName, m.modelName, m.removedLiveRow
+			liveClient, liveProfile := m.provider, m.providerProfile
+			builtBefore := len(built)
 			if tc.sameSession {
 				target = previous
-			} else if tc.deleteLiveRow {
-				wantProvider, wantModel, wantRemoved = "work", "resumed-model", ""
 			}
 			next, message := m.handleResumeCommand(target.SessionID)
 			if message != "" || next.activeSession.SessionID != target.SessionID {
 				t.Fatalf("resume failed: %s", message)
 			}
+			if next.provider != liveClient || !reflect.DeepEqual(next.providerProfile, liveProfile) || len(built) != builtBefore {
+				t.Fatal("resume changed the live client or its endpoint, model, or credentials")
+			}
 			if next.removedLiveRow != wantRemoved || next.providerName != wantProvider || next.modelName != wantModel || next.activeProviderRowName() != wantProvider {
 				t.Fatalf("resume identity = (%q, %q, %q, %q), want (%q, %q, %q, %q)", next.removedLiveRow, next.providerName, next.modelName, next.activeProviderRowName(), wantRemoved, wantProvider, wantModel, wantProvider)
+			}
+			if !tc.sameSession && !transcriptContains(next.transcript, "model: project-model (recorded: resumed-model)") {
+				t.Fatal("resume summary must distinguish the live model from recorded metadata")
 			}
 			assertUserRowUntouched(t, next, before)
 		})
