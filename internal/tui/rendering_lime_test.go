@@ -1894,10 +1894,42 @@ func TestModelPickerRowsCarryCapabilityMeta(t *testing.T) {
 	}
 }
 
+func TestModelPickerRowShowsOwnerInMixedGroups(t *testing.T) {
+	for _, group := range []string{"Recent", "Favorites"} {
+		for _, owner := range []string{"chatgpt", "openai", "work-openai"} {
+			for _, selected := range []bool{false, true} {
+				item := pickerItem{Group: group, Label: "GPT-5.6", Value: "gpt-5.6", Provider: "openai", OwnerProvider: owner, Favorite: group == "Favorites"}
+				want := owner + " · GPT-5.6"
+				if item.Favorite {
+					want = "* " + want
+				}
+				got := plainRender(t, renderModelPickerRow(60, selected, item))
+				if !strings.Contains(got, want) {
+					t.Errorf("group=%s selected=%v: row = %q, want %q", group, selected, got, want)
+				}
+			}
+		}
+	}
+	item := pickerItem{Group: "Recent", Value: "custom-model"}
+	if got := strings.TrimSpace(plainRender(t, renderModelPickerRow(60, false, item))); got != "custom-model" {
+		t.Fatalf("ownerless fallback row = %q", got)
+	}
+}
+
+func TestModelPickerWidthIncludesOwner(t *testing.T) {
+	item := pickerItem{Group: "Recent", Label: strings.Repeat("m", 40), OwnerProvider: "subscription-profile", Favorite: true}
+	picker := &commandPicker{items: []pickerItem{item}}
+	width := modelPickerOverlayWidth(120, picker)
+	got := plainRender(t, renderModelPickerRow(width-4, false, item))
+	if want := "* subscription-profile · " + item.Label; !strings.Contains(got, want) {
+		t.Fatalf("row clipped at overlay width %d: %q, want %q", width, got, want)
+	}
+}
+
 func TestModelPickerRowOmitsProviderTag(t *testing.T) {
 	// The provider is shown as a section header above each group, so a row renders
 	// just the model label — no repeated right-aligned provider tag.
-	item := pickerItem{Label: "Claude Sonnet 4.6", Value: "claude-sonnet-4-6", Provider: "anthropic", Remote: true}
+	item := pickerItem{Group: "anthropic", Label: "Claude Sonnet 4.6", Value: "claude-sonnet-4-6", Provider: "anthropic", OwnerProvider: "anthropic", Remote: true}
 	got := plainRender(t, renderModelPickerRow(60, false, item))
 	if !strings.Contains(got, "Claude Sonnet 4.6") {
 		t.Fatalf("row = %q, missing model label", got)

@@ -1120,10 +1120,7 @@ func modelPickerOverlayWidth(terminalWidth int, picker *commandPicker) int {
 	target = maxInt(target, lipgloss.Width("  Using built-in model list"))
 	if picker != nil {
 		for _, item := range picker.items {
-			labelWidth := lipgloss.Width(item.Label)
-			if item.Favorite {
-				labelWidth += lipgloss.Width("* ")
-			}
+			labelWidth := lipgloss.Width(modelPickerRowLabel(item))
 			target = maxInt(target, lipgloss.Width("❯ ")+labelWidth)
 			if detail := modelPickerItemDetail(item); detail != "" {
 				target = maxInt(target, lipgloss.Width("  "+detail))
@@ -1158,18 +1155,25 @@ func renderModelPickerRow(width int, selected bool, item pickerItem) string {
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
+	left := marker + surface(zeroTheme.ink).Render(modelPickerRowLabel(item))
+	return fillPaletteLine(left, width, surface)
+}
+
+func modelPickerRowLabel(item pickerItem) string {
 	label := strings.TrimSpace(item.Label)
 	if label == "" {
 		label = strings.TrimSpace(item.Value)
 	}
-	prefix := ""
-	if item.Favorite {
-		prefix = "* "
+	// Mixed-provider groups cannot convey ownership through their header.
+	if item.Group == "Recent" || item.Group == "Favorites" {
+		if owner := strings.TrimSpace(item.OwnerProvider); owner != "" {
+			label = owner + " · " + label
+		}
 	}
-	left := marker + surface(zeroTheme.ink).Render(prefix+label)
-	// The provider is shown as a section header above each group, so rows no longer
-	// repeat it as a right-aligned tag (matches a grouped provider+model list).
-	return fillPaletteLine(left, width, surface)
+	if item.Favorite {
+		label = "* " + label
+	}
+	return label
 }
 
 func modelPickerItemDetail(item pickerItem) string {
