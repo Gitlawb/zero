@@ -7,10 +7,12 @@ import (
 	"testing"
 )
 
-// makeFileWriteOnly drops read permission while leaving the file writable, the
-// shape that lets an overwrite succeed even though its prior bytes cannot be
-// captured. The returned func restores the original mode so the test can read
-// the file back and the temp dir can be cleaned up.
+// makeFileWriteOnly drops read permission while leaving the file writable, so
+// the target can still be opened for writing but its prior bytes cannot be read.
+// write_file must refuse that overwrite, since those bytes are the only evidence
+// of the BOM and line endings to preserve. The returned func restores the
+// original mode so the test can read the file back and the temp dir can be
+// cleaned up.
 func makeFileWriteOnly(t *testing.T, path string) func() {
 	t.Helper()
 	info, err := os.Stat(path)

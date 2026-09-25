@@ -27,8 +27,8 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 					"path":         {Type: "string", Description: "Absolute or relative path of the file to write."},
 					"content":      {Type: "string", Description: "Full file contents to write."},
 					"overwrite":    {Type: "boolean", Description: "Whether to allow overwriting an existing file.", Default: false},
-					"bom":          {Type: "string", Enum: []string{"auto", "add", "remove"}, Default: "auto", Description: "Existing-file overwrites only: auto preserves an existing or supplied UTF-8 BOM; add/remove explicitly sets its presence. New files retain content bytes. Applied before optional formatting."},
-					"line_endings": {Type: "string", Enum: []string{"auto", "lf", "crlf"}, Default: "auto", Description: "Existing-file overwrites only: auto preserves dominant existing endings (or supplied dominant CRLF); lf/crlf explicitly selects endings, independently of bom. New files retain content bytes. Applied before optional formatting."},
+					"bom":          {Type: "string", Enum: []string{"auto", "add", "remove"}, Default: "auto", Description: "Existing-file overwrites only: auto preserves an existing or supplied UTF-8 BOM; add/remove explicitly sets its presence. New files retain content bytes. Reapplied after optional formatting."},
+					"line_endings": {Type: "string", Enum: []string{"auto", "lf", "crlf"}, Default: "auto", Description: "Existing-file overwrites only: auto preserves dominant existing endings (or supplied dominant CRLF); lf/crlf explicitly selects endings, independently of bom. New files retain content bytes. Reapplied after optional formatting."},
 				},
 				Required:             []string{"path", "content"},
 				AdditionalProperties: false,
@@ -123,6 +123,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// destroy exactly what this read exists to preserve.
 	priorContent := ""
 	priorContentKnown := !existed
+	var encoding writeFileEncoding
 	if existed {
 		prev, rerr := tool.readFile(absolutePath)
 		if rerr != nil {
@@ -130,7 +131,8 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		}
 		priorContent = string(prev)
 		priorContentKnown = true
-		content = preserveWriteFileEncoding(prev, content, bom, lineEndings)
+		encoding = resolveWriteFileEncoding(prev, content, bom, lineEndings)
+		content = encoding.apply(content)
 	}
 	modelEquivalentContent := content
 
@@ -162,6 +164,26 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	newInfo := formatting.Info
 	if newInfo == nil {
 		newInfo, _ = os.Stat(absolutePath)
+	}
+	// Encoding preservation must be the last thing to touch the bytes. Formatters
+	// such as gofmt normalize endings to LF, so re-impose the same BOM and ending
+	// decision on their output and publish it through the same guarded commit.
+	// The result is then the preserved form of what the model sent whenever the
+	// formatter changed nothing else, which keeps the whole-file observation.
+	if existed && finalContentKnown {
+		if reencoded := encoding.apply(content); reencoded != content {
+			if newInfo == nil {
+				options.FileTracker.Forget(absolutePath)
+				return errorResult("Error writing file " + relativePath + ": cannot restore line endings and BOM after formatting: the formatted file could not be inspected")
+			}
+			formatted := content
+			if err := commitFileContents(absolutePath, newInfo, &formatted, reencoded); err != nil {
+				options.FileTracker.Forget(absolutePath)
+				return errorResult("Error writing file " + relativePath + ": cannot restore line endings and BOM after formatting: " + err.Error())
+			}
+			content = reencoded
+			newInfo, _ = os.Stat(absolutePath)
+		}
 	}
 	if finalContentKnown {
 		options.FileTracker.Record(absolutePath, []byte(content), newInfo)
@@ -214,33 +236,48 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 
 var utf8BOM = []byte{0xef, 0xbb, 0xbf}
 
-// preserveWriteFileEncoding restores byte-level features hidden by read_file's
+// writeFileEncoding is the BOM and line-ending convention an overwrite
+// publishes. It is decided once, from the existing bytes and the model's
+// content, so formatter output can be brought back to the same convention
+// without the formatter's own LF output looking like a request for LF.
+type writeFileEncoding struct {
+	bom  bool
+	crlf bool
+}
+
+// resolveWriteFileEncoding restores byte-level features hidden by read_file's
 // normalized text view. It keeps line endings consistent with the existing
 // file, while still allowing an LF file to be explicitly replaced with
 // consistently CRLF content. Explicit BOM and line-ending intent independently
-// overrides this automatic behavior, before optional formatting.
-func preserveWriteFileEncoding(existing []byte, content, bom, lineEndings string) string {
-	updated := []byte(content)
-	if bom == "remove" {
-		updated = bytes.TrimPrefix(updated, utf8BOM)
-	} else if (bom == "add" || bytes.HasPrefix(existing, utf8BOM)) && !bytes.HasPrefix(updated, utf8BOM) {
-		updated = append(append([]byte(nil), utf8BOM...), updated...)
+// overrides this automatic behavior.
+func resolveWriteFileEncoding(existing []byte, content, bom, lineEndings string) writeFileEncoding {
+	encoding := writeFileEncoding{
+		bom: bom == "add" || (bom == "auto" && (bytes.HasPrefix(existing, utf8BOM) || strings.HasPrefix(content, string(utf8BOM)))),
 	}
-
 	existingCRLF, existingLF := lineEndingCounts(existing)
-	updatedCRLF, updatedLF := lineEndingCounts(updated)
-	useCRLF := existingCRLF > existingLF
-	if !useCRLF && updatedCRLF > updatedLF {
+	updatedCRLF, updatedLF := lineEndingCounts([]byte(content))
+	encoding.crlf = existingCRLF > existingLF
+	if !encoding.crlf && updatedCRLF > updatedLF {
 		// Unlike LF returned by read_file, caller-supplied dominant CRLF is an
 		// unambiguous request to change an LF file's convention.
-		useCRLF = true
+		encoding.crlf = true
 	}
 	if lineEndings != "auto" {
-		useCRLF = lineEndings == "crlf"
+		encoding.crlf = lineEndings == "crlf"
+	}
+	return encoding
+}
+
+// apply rewrites content into the convention. It is idempotent, so applying it
+// to bytes that already follow the convention returns them unchanged.
+func (encoding writeFileEncoding) apply(content string) string {
+	updated := bytes.TrimPrefix([]byte(content), utf8BOM)
+	if encoding.bom {
+		updated = append(append([]byte(nil), utf8BOM...), updated...)
 	}
 	updated = bytes.ReplaceAll(updated, []byte("\r\n"), []byte("\n"))
 	updated = bytes.ReplaceAll(updated, []byte("\r"), []byte("\n"))
-	if useCRLF {
+	if encoding.crlf {
 		updated = bytes.ReplaceAll(updated, []byte("\n"), []byte("\r\n"))
 	}
 	return string(updated)

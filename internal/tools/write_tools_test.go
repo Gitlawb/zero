@@ -315,6 +315,100 @@ func TestWriteFileToolEncodingPreservationKeepsWholeFileObservation(t *testing.T
 	}
 }
 
+// Format-on-write runs after encoding preservation, and gofmt normalizes endings
+// to LF. Preservation must be reapplied to the formatter's output, or the CRLF
+// file comes out LF anyway and the whole-file observation is dropped, so the
+// next overwrite is refused as unread.
+func TestWriteFileToolEncodingPreservationSurvivesFormatOnWrite(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	for _, tt := range []struct {
+		name, existing, bom string
+	}{
+		{name: "CRLF", existing: "package a\r\n\r\nfunc Old() {}\r\n"},
+		{name: "BOM and CRLF", existing: "\xef\xbb\xbfpackage a\r\n\r\nfunc Old() {}\r\n", bom: "\xef\xbb\xbf"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "a.go")
+			if err := os.WriteFile(path, []byte(tt.existing), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			trackedPath, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tracker := NewFileTracker()
+			options := RunOptions{FileTracker: tracker}
+			read := NewScopedReadFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{"path": "a.go"}, options)
+			if read.Status != StatusOK {
+				t.Fatalf("initial read failed: %s", read.Output)
+			}
+
+			// Already gofmt-clean, so the formatter's only change is the endings.
+			writeTool := NewScopedWriteFileTool(root, nil).(optionsAwareTool)
+			for _, name := range []string{"A", "B"} {
+				content := "package a\n\nfunc " + name + "() {}\n"
+				result := writeTool.RunWithOptions(context.Background(), map[string]any{
+					"path": "a.go", "content": content, "overwrite": true,
+				}, options)
+				if result.Status != StatusOK {
+					t.Fatalf("overwrite with func %s failed: %s", name, result.Output)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := tt.bom + "package a\r\n\r\nfunc " + name + "() {}\r\n"; string(got) != want {
+					t.Fatalf("written bytes = %q, want %q", got, want)
+				}
+				if !tracker.SeenWhole(trackedPath) {
+					t.Fatalf("format-on-write discarded the whole-file observation after writing func %s", name)
+				}
+			}
+		})
+	}
+}
+
+// A formatter that really changes the content still preserves the encoding, and
+// still clears the whole-file observation, because the model has not seen the
+// formatted bytes.
+func TestWriteFileToolFormatterEditsKeepEncodingButRequireARead(t *testing.T) {
+	requireGofmt(t)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	path := filepath.Join(root, "a.go")
+	if err := os.WriteFile(path, []byte("package a\r\n\r\nfunc Old() {}\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	trackedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := NewFileTracker()
+	options := RunOptions{FileTracker: tracker}
+	read := NewScopedReadFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{"path": "a.go"}, options)
+	if read.Status != StatusOK {
+		t.Fatalf("initial read failed: %s", read.Output)
+	}
+	result := NewScopedWriteFileTool(root, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path": "a.go", "content": "package a\n\nfunc  A( ) {   }\n", "overwrite": true,
+	}, options)
+	if result.Status != StatusOK {
+		t.Fatalf("overwrite failed: %s", result.Output)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "package a\r\n\r\nfunc A() {}\r\n"; string(got) != want {
+		t.Fatalf("written bytes = %q, want %q", got, want)
+	}
+	if tracker.SeenWhole(trackedPath) {
+		t.Fatal("formatter-changed content kept the whole-file observation")
+	}
+}
+
 func TestWriteFileToolNewFileRetainsCallerBytes(t *testing.T) {
 	root := t.TempDir()
 	want := []byte("\xef\xbb\xbfnew\r\ntext\n")
