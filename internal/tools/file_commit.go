@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 var errFileChangedDuringWrite = errors.New("file changed on disk before the write committed")
@@ -19,7 +22,7 @@ var fileWriteBeforeCommit func(path string)
 // the file descriptor directly.
 var fileWriteStat = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
 
-// commitFileContents binds an overwrite to the file identity and bytes that
+// commitRootedFileContents binds an overwrite to the file identity and bytes that
 // the caller observed. A create uses exclusive creation. An overwrite opens the
 // observed object without truncation, verifies identity/content through that
 // handle, then truncates and writes the same handle. A path replacement before
@@ -28,13 +31,20 @@ var fileWriteStat = func(file *os.File) (os.FileInfo, error) { return file.Stat(
 // expectedInfo nil means the caller observed a missing path. expectedContent
 // may be nil for an existing but unreadable file; that path may still be
 // overwritten, but callers must omit rich before/after evidence.
-func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *string, content string) error {
+func commitRootedFileContents(root *os.Root, relative string, expectedInfo os.FileInfo, expectedContent *string, content string) error {
+	path := filepath.Join(root.Name(), relative)
 	if fileWriteBeforeCommit != nil {
 		fileWriteBeforeCommit(path)
 	}
 
 	if expectedInfo == nil {
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err := protectedMutationDenied(path, root.Name()); err != nil {
+			return err
+		}
+		if err := root.MkdirAll(filepath.Dir(relative), 0o755); err != nil {
+			return err
+		}
+		file, err := root.OpenFile(relative, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
 			return err
 		}
@@ -43,14 +53,14 @@ func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *
 			_ = file.Close()
 			return err
 		}
-		return writeAndVerifyFileIdentity(path, file, openedInfo, content, false)
+		return writeAndVerifyFileIdentity(root, relative, file, openedInfo, content, false)
 	}
 
 	flags := os.O_WRONLY
 	if expectedContent != nil {
 		flags = os.O_RDWR
 	}
-	file, err := os.OpenFile(path, flags, 0)
+	file, err := root.OpenFile(relative, flags, 0)
 	if err != nil {
 		return err
 	}
@@ -59,11 +69,16 @@ func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *
 		_ = file.Close()
 		return err
 	}
+	exclusions := sandbox.ProtectedCredentialExclusions(root.Name())
+	if exclusions.FileHandleExcluded(path, file, openedInfo) {
+		_ = file.Close()
+		return protectedCredentialErr(path, "writable")
+	}
 	if !os.SameFile(expectedInfo, openedInfo) {
 		_ = file.Close()
 		return errFileChangedDuringWrite
 	}
-	pathInfo, err := os.Stat(path)
+	pathInfo, err := root.Stat(relative)
 	if err != nil || !os.SameFile(openedInfo, pathInfo) {
 		_ = file.Close()
 		return errFileChangedDuringWrite
@@ -79,10 +94,10 @@ func commitFileContents(path string, expectedInfo os.FileInfo, expectedContent *
 			return errFileChangedDuringWrite
 		}
 	}
-	return writeAndVerifyFileIdentity(path, file, openedInfo, content, true)
+	return writeAndVerifyFileIdentity(root, relative, file, openedInfo, content, true)
 }
 
-func writeAndVerifyFileIdentity(path string, file *os.File, openedInfo os.FileInfo, content string, truncate bool) error {
+func writeAndVerifyFileIdentity(root *os.Root, relative string, file *os.File, openedInfo os.FileInfo, content string, truncate bool) error {
 	if truncate {
 		if err := file.Truncate(0); err != nil {
 			_ = file.Close()
@@ -100,7 +115,7 @@ func writeAndVerifyFileIdentity(path string, file *os.File, openedInfo os.FileIn
 	if err := file.Close(); err != nil {
 		return err
 	}
-	pathInfo, err := os.Stat(path)
+	pathInfo, err := root.Stat(relative)
 	if err != nil || !os.SameFile(openedInfo, pathInfo) {
 		return fmt.Errorf("%w: path identity changed", errFileChangedDuringWrite)
 	}
