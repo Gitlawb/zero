@@ -369,8 +369,10 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 	writeTool := NewWriteStdinTool(manager)
 
+	// Force startup to outlast the first yield, rather than relying on CI load
+	// to exercise the readiness polling below.
 	start := execTool.Run(context.Background(), map[string]any{
-		"cmd":           helperCommand("http-server"),
+		"cmd":           helperCommand("delayed-http-server"),
 		"yield_time_ms": 500,
 	})
 	if start.Status != StatusOK {
@@ -380,16 +382,33 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreground server should return session_id, meta=%#v output=%q", start.Meta, start.Output)
 	}
-	addr := parseListeningAddress(start.Output)
-	if addr == "" {
-		t.Fatalf("server output did not include listening address: %q", start.Output)
-	}
 	t.Cleanup(func() {
 		writeTool.Run(context.Background(), map[string]any{
 			"session_id": sessionID,
 			"chars":      "\u0003",
 		})
 	})
+
+	// Yielding a session does not promise that the child has finished starting,
+	// especially when Windows must launch a shell first. Poll for readiness and
+	// register cleanup above so a startup failure cannot leak the server.
+	output := start.Output
+	addr := parseListeningAddress(output)
+	deadline := time.Now().Add(10 * time.Second)
+	for addr == "" && time.Now().Before(deadline) {
+		poll := writeTool.Run(context.Background(), map[string]any{
+			"session_id":    sessionID,
+			"yield_time_ms": 100,
+		})
+		output += "\n" + poll.Output
+		if poll.Status != StatusOK || poll.Meta["exit_code"] != "" {
+			t.Fatalf("server exited before readiness: %q", output)
+		}
+		addr = parseListeningAddress(output)
+	}
+	if addr == "" {
+		t.Fatalf("server output did not include listening address before deadline: %q", output)
+	}
 
 	response, err := http.Get("http://" + addr)
 	if err != nil {
