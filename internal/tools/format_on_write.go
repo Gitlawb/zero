@@ -134,6 +134,11 @@ func maybeFormatWrittenFile(ctx context.Context, root *os.Root, relativePath, ab
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
 	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
+	// Stdout is a pipe, so Run waits for every holder of it, not only the
+	// process the deadline kills. A formatter launched through a shim (every
+	// npm-installed one on Windows is a .cmd) leaves the real formatter holding
+	// that pipe after the shim dies. Kill the whole tree and bound the wait.
+	hardenProcessLifetime(formatter)
 	formatter.Dir = filepath.Dir(absolutePath)
 	formatter.Stdin = strings.NewReader(writtenContent)
 	var stdout bytes.Buffer
@@ -147,6 +152,13 @@ func maybeFormatWrittenFile(ctx context.Context, root *os.Root, relativePath, ab
 		return unformatted
 	}
 	formatted := stdout.Bytes()
+	// A formatter that declines a file can answer with silence and exit 0:
+	// clang-format does for a path matched by .clang-format-ignore. Publishing
+	// that would empty the file while the write reports success. Nothing went
+	// wrong, so there is no notice; the written bytes simply stand.
+	if len(bytes.TrimSpace(formatted)) == 0 && strings.TrimSpace(writtenContent) != "" {
+		return unformatted
+	}
 	if _, err := writeRootedFile(root, relativePath, absolutePath, workspaceRoot, formatted, mode, false); err != nil {
 		return unformatted
 	}

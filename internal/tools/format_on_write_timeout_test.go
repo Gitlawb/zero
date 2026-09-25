@@ -212,3 +212,79 @@ func partialOutputFormatterScript() string {
 	}
 	return "#!/bin/sh\necho CLOBBERED\nexit 3\n"
 }
+
+// A formatter that declines a file with empty stdout and exit 0 must leave the
+// written bytes alone. clang-format answers that way over stdin for a path its
+// .clang-format-ignore matches; publishing the silence emptied the file while
+// write_file reported success.
+func TestFormatOnWriteKeepsContentWhenTheFormatterPrintsNothing(t *testing.T) {
+	installFakeFormatter(t, ".silentfmt", "silentfmt", silentFormatterScript())
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const written = "int lib(void) { return 0; }\n"
+	for _, step := range []struct {
+		name      string
+		overwrite bool
+	}{{"create", false}, {"overwrite", true}} {
+		t.Run(step.name, func(t *testing.T) {
+			result := NewScopedWriteFileTool(dir, nil).Run(context.Background(), map[string]any{
+				"path": "lib.silentfmt", "content": written, "overwrite": step.overwrite,
+			})
+			if result.Status != StatusOK {
+				t.Fatalf("write failed: %q", result.Output)
+			}
+			onDisk, err := os.ReadFile(filepath.Join(dir, "lib.silentfmt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(onDisk) != written {
+				t.Fatalf("silent formatter replaced the file: disk=%q, want %q", onDisk, written)
+			}
+		})
+	}
+}
+
+// The deadline must bound the call even when the formatter is a shim whose
+// child keeps the stdout pipe open after the shim is killed. Every
+// npm-installed formatter on Windows is a .cmd shim hosting node.exe.
+func TestFormatOnWriteDeadlineBoundsAShimmedFormatter(t *testing.T) {
+	installFakeFormatter(t, ".shimfmt", "shimfmt", shimmedSlowFormatterScript())
+	shortenFormatOnWriteTimeout(t, 500*time.Millisecond)
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+
+	target := filepath.Join(t.TempDir(), "subject.shimfmt")
+	const written = "written\n"
+	if err := os.WriteFile(target, []byte(written), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	formatting := runTestFormatter(t, context.Background(), target, written)
+	elapsed := time.Since(started)
+
+	// The grandchild sleeps nine seconds. The deadline plus bashWaitDelay is
+	// well under five; waiting on the orphaned pipe is not.
+	if elapsed > 5*time.Second {
+		t.Fatalf("formatter call took %s; the deadline did not bound it", elapsed)
+	}
+	if !formatting.TimedOut || formatting.Content != written {
+		t.Fatalf("result = %+v, want the written content reported as a timeout", formatting)
+	}
+}
+
+func silentFormatterScript() string {
+	if runtime.GOOS == "windows" {
+		return "@echo off\r\nmore >nul\r\nexit /b 0\r\n"
+	}
+	return "#!/bin/sh\ncat >/dev/null\nexit 0\n"
+}
+
+// The sleeping child inherits stdout, as node.exe does under a .cmd shim.
+func shimmedSlowFormatterScript() string {
+	if runtime.GOOS == "windows" {
+		return "@echo off\r\nping -n 10 127.0.0.1\r\nexit /b 0\r\n"
+	}
+	return "#!/bin/sh\nsleep 9\nexit 0\n"
+}
