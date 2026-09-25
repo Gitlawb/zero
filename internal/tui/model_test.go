@@ -1243,7 +1243,7 @@ func TestResumeAfterDeletingLiveProjectRow(t *testing.T) {
 		deleteLiveRow bool
 		sameSession   bool
 	}{
-		{name: "different session clears retained identity", deleteLiveRow: true},
+		{name: "different session retains deleted identity", deleteLiveRow: true},
 		{name: "same session retains deleted identity", deleteLiveRow: true, sameSession: true},
 		{name: "no deletion preserves nonempty live fields"},
 	} {
@@ -1277,17 +1277,26 @@ func TestResumeAfterDeletingLiveProjectRow(t *testing.T) {
 				m.providerWizard = nil
 			}
 			wantProvider, wantModel, wantRemoved := m.providerName, m.modelName, m.removedLiveRow
+			liveClient := m.provider
 			if tc.sameSession {
 				target = previous
-			} else if tc.deleteLiveRow {
-				wantProvider, wantModel, wantRemoved = "work", "resumed-model", ""
 			}
 			next, message := m.handleResumeCommand(target.SessionID)
 			if message != "" || next.activeSession.SessionID != target.SessionID {
 				t.Fatalf("resume failed: %s", message)
 			}
+			if next.provider != liveClient || len(built) != 0 {
+				t.Fatal("resume must keep the live client without building another provider")
+			}
+			if next.providerProfile.Name != "WORK" || next.providerProfile.BaseURL != "https://project.example.com/v1" || next.providerProfile.Model != "project-model" || next.providerProfile.APIKey != "sk-project" {
+				t.Fatal("resume changed the live project provider profile")
+			}
 			if next.removedLiveRow != wantRemoved || next.providerName != wantProvider || next.modelName != wantModel || next.activeProviderRowName() != wantProvider {
 				t.Fatalf("resume identity = (%q, %q, %q, %q), want (%q, %q, %q, %q)", next.removedLiveRow, next.providerName, next.modelName, next.activeProviderRowName(), wantRemoved, wantProvider, wantModel, wantProvider)
+			}
+			summary := plainRender(t, transcriptText(next.transcript))
+			if !tc.sameSession && (!strings.Contains(summary, "project-model") || !strings.Contains(summary, "(recorded: resumed-model)")) {
+				t.Fatalf("resume summary must distinguish the live model from the recorded model: %s", summary)
 			}
 			assertUserRowUntouched(t, next, before)
 		})
