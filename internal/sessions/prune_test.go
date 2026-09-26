@@ -278,7 +278,7 @@ func TestPruneKeepsTheAncestorsOfASessionWrittenWhilePruning(t *testing.T) {
 		t.Fatalf("Prune: %v", err)
 	}
 	if strings.Join(seen, ",") != "child" {
-		t.Fatalf("removal reached %v, want the child first and the parent never", seen)
+		t.Errorf("removal reached %v, want the child first and the parent never", seen)
 	}
 	if reason := keptReason(report, "child"); reason != PruneKeptUpdated {
 		t.Errorf("child kept for %q, want %q", reason, PruneKeptUpdated)
