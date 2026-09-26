@@ -1278,7 +1278,6 @@ func TestResumeAfterDeletingLiveProjectRow(t *testing.T) {
 			}
 			wantProvider, wantModel, wantRemoved := m.providerName, m.modelName, m.removedLiveRow
 			liveClient, liveProfile := m.provider, m.providerProfile
-			builtBefore := len(built)
 			if tc.sameSession {
 				target = previous
 			}
@@ -1286,14 +1285,19 @@ func TestResumeAfterDeletingLiveProjectRow(t *testing.T) {
 			if message != "" || next.activeSession.SessionID != target.SessionID {
 				t.Fatalf("resume failed: %s", message)
 			}
-			if next.provider != liveClient || !reflect.DeepEqual(next.providerProfile, liveProfile) || len(built) != builtBefore {
-				t.Fatal("resume changed the live client or its endpoint, model, or credentials")
+			// Resume loads history, not a new provider. Labels and retained row
+			// ownership must still describe the client that answers the next turn.
+			if next.provider != liveClient || len(built) != 0 || !reflect.DeepEqual(next.providerProfile, liveProfile) {
+				t.Fatal("resume changed the live client or its endpoint/credential profile")
 			}
 			if next.removedLiveRow != wantRemoved || next.providerName != wantProvider || next.modelName != wantModel || next.activeProviderRowName() != wantProvider {
 				t.Fatalf("resume identity = (%q, %q, %q, %q), want (%q, %q, %q, %q)", next.removedLiveRow, next.providerName, next.modelName, next.activeProviderRowName(), wantRemoved, wantProvider, wantModel, wantProvider)
 			}
-			if !tc.sameSession && !transcriptContains(next.transcript, "model: project-model (recorded: resumed-model)") {
-				t.Fatal("resume summary must distinguish the live model from recorded metadata")
+			if !transcriptContains(next.transcript, "model: project-model") || !transcriptContains(next.transcript, "provider: WORK") {
+				t.Fatal("resume summary does not describe the live project client")
+			}
+			if !tc.sameSession && !transcriptContains(next.transcript, "(recorded: resumed-model)") {
+				t.Fatal("resume summary does not distinguish the recorded model from the live model")
 			}
 			assertUserRowUntouched(t, next, before)
 		})

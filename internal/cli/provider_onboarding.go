@@ -61,7 +61,7 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	resolvedName, persisted, err := resolvePersistedProviderName(configPath, options.name)
+	_, persisted, err := resolvePersistedProviderName(configPath, options.name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -77,7 +77,10 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 			return exit
 		}
 	} else {
-		options.name = resolvedName
+		options.name, err = resolveProviderMutationName(configPath, options.name, deps)
+		if err != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+		}
 	}
 	cfg, err := config.SetActiveProvider(configPath, options.name)
 	if err != nil {
@@ -721,7 +724,9 @@ func resolveProviderMutationName(path, name string, deps appDeps) (string, error
 		return "", err
 	}
 	row, lookup := config.LookupProviderName(names, name)
-	if lookup == config.ProviderNameExact {
+	// Concrete rows take precedence over catalog aliases, including requests
+	// that differ only in case from the concrete row's name.
+	if lookup.Resolved() {
 		owner, err := config.ProviderRowOwnershipAt(path, names, row)
 		if err != nil {
 			return "", err

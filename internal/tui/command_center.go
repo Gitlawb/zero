@@ -633,11 +633,11 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 		switch {
 		case err != nil:
 			persistErr = err
-			persistNote = "\nNote: the switch applies to this session, but config.json could not be read: " + redaction.RedactString(err.Error(), redaction.Options{})
+			persistNote = "\nNote: the switch applies to this session, but config.json could not be read."
 		case owner.UserBacked:
 			if _, err := config.SetActiveProviderModel(m.userConfigPath, owner.PersistedName, target.Model); err != nil {
 				persistErr = err
-				persistNote = "\nNote: the switch applies to this session, but config.json was not updated: " + redaction.RedactString(err.Error(), redaction.Options{})
+				persistNote = "\nNote: the switch applies to this session, but config.json was not updated."
 			} else {
 				persisted = true
 				// Reconcile the in-memory list the manager and picker read from,
