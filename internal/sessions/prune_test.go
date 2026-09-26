@@ -338,3 +338,53 @@ func TestPruneLeavesASessionAnotherProcessJustCreated(t *testing.T) {
 		t.Fatal("a session another process had just created was removed")
 	}
 }
+
+// A fork or child session holds the parent it is created from, and is refused
+// while prune holds that parent, rather than created under a session that is
+// about to go.
+func TestForkAndChildHoldTheParentTheyAreCreatedFrom(t *testing.T) {
+	for _, create := range []struct {
+		name string
+		do   func(store *Store) error
+	}{
+		{"fork", func(store *Store) error {
+			_, err := store.Fork("parent", ForkInput{SessionID: "new"})
+			return err
+		}},
+		{"child", func(store *Store) error {
+			_, err := store.CreateChild("parent", ChildInput{SessionID: "new"})
+			return err
+		}},
+	} {
+		t.Run(create.name, func(t *testing.T) {
+			root := t.TempDir()
+			createFinishedSession(t, root, "parent", "2026-06-01T00:00:00Z", "")
+			other := NewStore(StoreOptions{RootDir: root, Now: fixedClock("2026-06-01T00:00:00Z")})
+
+			lease, locked, err := pruneStore(root).acquireLeaseExclusive("parent")
+			if err != nil || !locked {
+				t.Fatalf("take the parent's lease the way prune does: locked=%v, %v", locked, err)
+			}
+			err = create.do(other)
+			unlockLease(lease)
+			_ = lease.Close()
+			if err == nil || !strings.Contains(err.Error(), "locked by zero sessions prune") {
+				t.Errorf("%s from a parent prune holds: err = %v, want it refused", create.name, err)
+			}
+			if sessionDirExists(t, root, "new") {
+				t.Errorf("the refused %s was created anyway", create.name)
+			}
+
+			if err := create.do(other); err != nil {
+				t.Fatalf("%s once prune let go: %v", create.name, err)
+			}
+			report, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays, DryRun: true})
+			if err != nil {
+				t.Fatalf("dry run: %v", err)
+			}
+			if reason := keptReason(report, "parent"); reason != PruneKeptOpen {
+				t.Errorf("parent kept for %q, want %q: the %s's process holds it", reason, PruneKeptOpen, create.name)
+			}
+		})
+	}
+}
