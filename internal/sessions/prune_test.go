@@ -388,3 +388,27 @@ func TestForkAndChildHoldTheParentTheyAreCreatedFrom(t *testing.T) {
 		})
 	}
 }
+
+// Where a delete only takes effect once the last handle closes, the lease Prune
+// holds would keep the session directory from being empty, so it lets go first.
+func TestPruneLetsGoOfTheLeaseBeforeRemovingTheDirectory(t *testing.T) {
+	root := t.TempDir()
+	createFinishedSession(t, root, "old", "2026-06-01T00:00:00Z", "")
+
+	var reached []string
+	pruneRemoveDirSeam = func(id string, leaseHeld bool) {
+		reached = append(reached, id)
+		if leaseHeld {
+			t.Errorf("%s: the directory is removed while prune still holds the lease", id)
+		}
+	}
+	defer func() { pruneRemoveDirSeam = nil }()
+
+	report, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays})
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if strings.Join(reached, ",") != "old" || strings.Join(pruneIDs(report.Removed), ",") != "old" || sessionDirExists(t, root, "old") {
+		t.Fatalf("reached %v and removed %v, want old reached and removed", reached, pruneIDs(report.Removed))
+	}
+}

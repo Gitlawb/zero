@@ -65,6 +65,10 @@ const (
 // before it re-reads the metadata. Nil in production.
 var pruneRemoveSeam func(sessionID string)
 
+// pruneRemoveDirSeam runs just before Prune removes a session's directory, and
+// says whether Prune still holds the lease. Nil in production.
+var pruneRemoveDirSeam func(sessionID string, leaseHeld bool)
+
 // Prune removes sessions last updated before the cutoff that OlderThan sets.
 //
 // Only on request: nothing in Zero calls it by itself (#971). It never removes:
@@ -239,10 +243,15 @@ func (store *Store) pruneSession(sessionID string, cutoff time.Time) (removed bo
 	if !locked {
 		return false, PruneKeptOpen, nil
 	}
-	defer func() {
-		unlockLease(lease)
-		_ = lease.Close()
-	}()
+	leaseHeld := true
+	letLeaseGo := func() {
+		if leaseHeld {
+			leaseHeld = false
+			unlockLease(lease)
+			_ = lease.Close()
+		}
+	}
+	defer letLeaseGo()
 	release, err := store.lockSessionWithoutLease(sessionID)
 	if err != nil {
 		return false, "", err
@@ -297,6 +306,14 @@ func (store *Store) pruneSession(sessionID string, cutoff time.Time) (removed bo
 	// alive, and its own write then fails: the metadata is already gone.
 	if err := os.Remove(store.lockPath(sessionID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return true, "", fmt.Errorf("remove the session lock: %w", err)
+	}
+	// Let go of the lease before the directory. lease.lock went with the rest, but
+	// where a delete only takes effect once the last handle closes (Windows without
+	// POSIX delete semantics: older builds, or FAT and exFAT volumes), this handle
+	// would keep the directory from being empty.
+	letLeaseGo()
+	if pruneRemoveDirSeam != nil {
+		pruneRemoveDirSeam(sessionID, leaseHeld)
 	}
 	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return true, "", fmt.Errorf("remove the session directory: %w", err)
