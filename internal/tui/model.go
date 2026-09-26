@@ -1103,6 +1103,13 @@ func newModel(ctx context.Context, options Options) model {
 
 // withStartupNotices appends the session's startup notices to rows as system
 // rows, in order, skipping blank ones so a caller can pass one unconditionally.
+//
+// EVERY SESSION THIS PROCESS OPENS IS TOLD. The notices describe the sandbox
+// every session here runs under, so they open the first session, and they come
+// back when /new or /resume rebuilds the transcript for another one; both
+// started from an empty transcript and dropped them. Rewind, compaction and
+// /clear stay in the same session and keep the notice in the scrollback above
+// their divider. Reported by CodeRabbit.
 func (m model) withStartupNotices(rows []transcriptRow) []transcriptRow {
 	for _, notice := range m.startupNotices {
 		if strings.TrimSpace(notice) != "" {

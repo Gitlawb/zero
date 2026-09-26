@@ -110,7 +110,7 @@ func (m model) startNewSession() model {
 		note = "New session started. Previous session saved as " + previousID +
 			" — resume it anytime with /resume " + previousID + "."
 	}
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
+	m.transcript = m.withStartupNotices(reduceTranscript(m.transcript, transcriptAction{kind: actionClear}))
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: note})
 	// Scrollback above can't be un-printed; a faint divider marks the boundary and
 	// the flush frontier restarts for the fresh transcript (mirrors /clear, /resume).
@@ -246,11 +246,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		m, loopsCleared = m.clearLoopsForSessionSwitch()
 	}
 
-	// SAID AGAIN FOR THE SESSION THIS SWITCHES TO. The startup notices describe
-	// the sandbox every session in this process runs under, and the rebuild below
-	// starts from an empty transcript, so a degraded sandbox went unmentioned for
-	// the resumed session. Rewind and compaction stay in the same session and keep
-	// the notice in the scrollback above their divider. Reported by CodeRabbit.
+	// Said again for the session this switches to; see withStartupNotices.
 	rows := m.withStartupNotices(initialTranscript())
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
 	if loopsCleared > 0 {

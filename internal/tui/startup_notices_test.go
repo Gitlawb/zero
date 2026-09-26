@@ -56,3 +56,21 @@ func TestResumeRepeatsTheStartupNotices(t *testing.T) {
 		}
 	}
 }
+
+// /new is a session opening too. It cleared the transcript and added only its
+// own note, so the new session started under a degraded sandbox without a
+// word. Reported by CodeRabbit.
+func TestNewSessionRepeatsTheStartupNotices(t *testing.T) {
+	m := newModel(context.Background(), Options{StartupNotices: []string{"sandbox notice", ""}})
+	next := m.startNewSession()
+
+	var shown []string
+	for _, row := range next.transcript {
+		if row.kind == rowSystem {
+			shown = append(shown, row.text)
+		}
+	}
+	if len(shown) != 2 || shown[0] != "sandbox notice" || shown[1] != "Started a new session." {
+		t.Fatalf("system rows after /new = %q, want the startup notice and then the new-session note", shown)
+	}
+}
