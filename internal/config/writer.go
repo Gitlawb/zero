@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -973,6 +974,22 @@ func writeConfigFile(path string, cfg FileConfig) error {
 	return writeConfigData(path, data)
 }
 
+// Sync seams allow tests to inject persistence failures at each barrier.
+var syncConfigFileFn = (*os.File).Sync
+var syncConfigDirFn = syncConfigDir
+
+// Windows cannot sync directory handles; rename durability is best effort there.
+func syncConfigDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
+}
+
 func writeConfigData(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {
@@ -999,11 +1016,19 @@ func writeConfigData(path string, data []byte) error {
 		_ = tmp.Close()
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
+	// Persist the complete contents before making the replacement visible.
+	if err := syncConfigFileFn(tmp); err != nil {
+		return fmt.Errorf("sync config %s: %w", path, errors.Join(err, tmp.Close()))
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	// The replacement is already visible if this fails; do not roll it back.
+	if err := syncConfigDirFn(dir); err != nil {
+		return fmt.Errorf("sync config directory %s: %w", dir, err)
 	}
 	return nil
 }

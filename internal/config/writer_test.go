@@ -13,6 +13,94 @@ import (
 	"testing"
 )
 
+func TestWriteConfigDataSync(t *testing.T) {
+	failure := errors.New("injected sync failure")
+	for _, stage := range []string{"success", "file", "directory"} {
+		t.Run(stage, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			oldData, newData := "{\"old\":true}\n", "{\"new\":true}\n"
+			if err := os.WriteFile(path, []byte(oldData), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			checkData := func(path, want string) {
+				t.Helper()
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != want {
+					t.Fatalf("read %s = %q, %v; want %q", path, got, err, want)
+				}
+			}
+			fileSync, dirSync := syncConfigFileFn, syncConfigDirFn
+			t.Cleanup(func() { syncConfigFileFn, syncConfigDirFn = fileSync, dirSync })
+			var tmp *os.File
+			var calls []string
+			syncConfigFileFn = func(f *os.File) error {
+				tmp = f
+				calls = append(calls, "file")
+				checkData(f.Name(), newData)
+				checkData(path, oldData)
+				if stage == "file" {
+					return failure
+				}
+				return fileSync(f)
+			}
+			syncConfigDirFn = func(got string) error {
+				calls = append(calls, "directory")
+				if got != dir || tmp == nil {
+					t.Fatalf("directory sync = %q, temp = %v", got, tmp)
+				}
+				if _, err := tmp.Stat(); !errors.Is(err, os.ErrClosed) {
+					t.Fatalf("temp must be closed before directory sync: %v", err)
+				}
+				checkData(path, newData)
+				if stage == "directory" {
+					return failure
+				}
+				return dirSync(got)
+			}
+			err := writeConfigData(path, []byte(strings.TrimSuffix(newData, "\n")))
+			if stage == "success" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, failure) {
+				t.Fatalf("error = %v, want injected sync failure", err)
+			}
+			wantCalls := []string{"file", "directory"}
+			wantData := newData
+			if stage == "file" {
+				wantCalls, wantData = []string{"file"}, oldData
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("sync calls = %v, want %v", calls, wantCalls)
+			}
+			checkData(path, wantData)
+			if _, err := tmp.Stat(); !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("temp must be closed on return: %v", err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 1 || entries[0].Name() != "config.json" {
+				t.Fatalf("temporary file not cleaned up: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestSyncConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := syncConfigDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	err := syncConfigDir(filepath.Join(dir, "missing"))
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("Windows must skip directory sync: %v", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("directory open error = %v, want not exist", err)
+	}
+}
+
 func TestSetActiveProviderSwitchesConfiguredProvider(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{
