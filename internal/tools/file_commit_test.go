@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -75,6 +76,13 @@ func TestOpenScopedWriteRootRejectsSubstitutedRoot(t *testing.T) {
 			t.Fatalf("error = %v, want errWriteRootSubstituted", err)
 		}
 	})
+}
+
+func installWritePreimageBeforeObserve(t *testing.T, hook func(string)) {
+	t.Helper()
+	prior := writePreimageBeforeObserve
+	writePreimageBeforeObserve = hook
+	t.Cleanup(func() { writePreimageBeforeObserve = prior })
 }
 
 func installFileWriteStat(t *testing.T, stat func(*os.File) (os.FileInfo, error)) {
@@ -222,5 +230,123 @@ func TestOverwriteDoesNotStatOpenedFileAfterFinalPreimageComparison(t *testing.T
 				t.Fatalf("opened file was statted %d times; the final byte comparison must be followed directly by mutation", statCalls)
 			}
 		})
+	}
+}
+
+// A pathname re-resolution after the write root is open must not supply the
+// preimage. The root handle still names the directory that was opened; a
+// same-name directory, or a symlink planted at the old path, is a different
+// object. Observing that object through the absolute path makes the later
+// identity check disagree with the rooted open and refuse a write the rooted
+// preimage would have committed. The commit must land in the rooted object and
+// leave the pathname substitute untouched.
+func TestWriteFilePreimageIgnoresDissentingPathname(t *testing.T) {
+	t.Run("same-name directory", func(t *testing.T) {
+		assertRootedPreimageNotPathnameSubstitute(t, false)
+	})
+	t.Run("symlink permutation", func(t *testing.T) {
+		assertRootedPreimageNotPathnameSubstitute(t, true)
+	})
+}
+
+func assertRootedPreimageNotPathnameSubstitute(t *testing.T, symlink bool) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows kernel locks open directory handles held by *os.Root, preventing directory swap")
+	}
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resolved, "existing.txt"), []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	moved := resolved + "-moved"
+	decoyHold := resolved + "-decoy"
+	t.Cleanup(func() {
+		_ = os.RemoveAll(moved)
+		_ = os.RemoveAll(decoyHold)
+	})
+
+	installWritePreimageBeforeObserve(t, func(absolutePath string) {
+		if filepath.Base(absolutePath) != "existing.txt" {
+			return
+		}
+		dir := filepath.Dir(absolutePath)
+		if err := os.Rename(dir, moved); err != nil {
+			t.Fatal(err)
+		}
+		if symlink {
+			if err := os.Mkdir(decoyHold, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(decoyHold, "existing.txt"), []byte("decoy\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(decoyHold, dir); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			return
+		}
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "existing.txt"), []byte("decoy\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	result := NewScopedWriteFileTool(resolved, nil).Run(context.Background(), map[string]any{
+		"path": "existing.txt", "content": "zero\n", "overwrite": true,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("rooted overwrite status = %s: %s", result.Status, result.Output)
+	}
+	movedBytes, err := os.ReadFile(filepath.Join(moved, "existing.txt"))
+	if err != nil || string(movedBytes) != "zero\n" {
+		t.Fatalf("rooted object = %q, err=%v; a dissenting pathname must not redirect the commit", movedBytes, err)
+	}
+	decoyPath := filepath.Join(resolved, "existing.txt")
+	if symlink {
+		decoyPath = filepath.Join(decoyHold, "existing.txt")
+	}
+	decoyBytes, err := os.ReadFile(decoyPath)
+	if err != nil || string(decoyBytes) != "decoy\n" {
+		t.Fatalf("pathname substitute = %q, err=%v", decoyBytes, err)
+	}
+}
+
+// Replacing the destination with a different file that carries the same bytes,
+// after the preimage and before the commit, must not be treated as the observed
+// object. On Windows, a FileInfo from os.Stat fills volume and file index only
+// when os.SameFile re-opens the path, so the byte comparison is the only check
+// left and it cannot see this substitution. The rooted preimage captures
+// identity at observation time, and the write must refuse.
+func TestWriteFileRefusesSameNameSubstitutionWithIdenticalBytes(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "existing.txt")
+	const observed = "original\n"
+	if err := os.WriteFile(target, []byte(observed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installFileWriteRace(t, func(path string) {
+		preserved := path + ".preserved"
+		if err := os.Rename(path, preserved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(observed), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "existing.txt", "content": "REPLACED BY THE TOOL\n", "overwrite": true,
+	})
+	if result.Status != StatusError || !strings.Contains(result.Output, errFileChangedDuringWrite.Error()) {
+		t.Fatalf("same-name substitution = %s: %s", result.Status, result.Output)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != observed {
+		t.Fatalf("substituted object = %q, err=%v; the write must not land in an object the preimage did not observe", got, err)
 	}
 }

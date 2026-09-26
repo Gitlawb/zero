@@ -578,6 +578,13 @@ func TestFormatOnWriteRejectsFormatterResolvedInsideWorkspace(t *testing.T) {
 	if formatting.Content != written || !formatting.ContentKnown {
 		t.Fatalf("workspace-planted formatter result = %q, known=%t", formatting.Content, formatting.ContentKnown)
 	}
+	if formatting.Skipped != formatSkippedInsideWriteRoot {
+		t.Fatalf("workspace-planted formatter skip = %q, want %q", formatting.Skipped, formatSkippedInsideWriteRoot)
+	}
+	notice := formatting.notice("subject.plantedfmt")
+	if !strings.Contains(notice, formatSkippedInsideWriteRoot) {
+		t.Fatalf("workspace-planted formatter notice = %q, want the skip reason", notice)
+	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("a formatter binary resolved inside the workspace was executed")
 	}
