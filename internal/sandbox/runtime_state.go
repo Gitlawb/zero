@@ -141,35 +141,16 @@ func prepareSandboxRuntime(workspaceRoot string, sandboxHome string) (SandboxRun
 		Data:  filepath.Join(root, "data"),
 		Temp:  filepath.Join(root, "tmp"),
 	}
-	directories := []string{
-		runtimeState.Root,
-		runtimeState.Cache,
-		runtimeState.Data,
-		runtimeState.Temp,
-		filepath.Join(runtimeState.Cache, "npm"),
-		filepath.Join(runtimeState.Cache, "yarn"),
-		filepath.Join(runtimeState.Cache, "corepack"),
-		filepath.Join(runtimeState.Cache, "pip"),
-		filepath.Join(runtimeState.Cache, "go-build"),
-		filepath.Join(runtimeState.Data, "go-mod"),
-		filepath.Join(runtimeState.Data, "cargo"),
-	}
 	// BEFORE ANYTHING IS CREATED. os.MkdirAll returns nil when Stat says the path
 	// is already a directory, and Stat follows links, so a link planted at an
 	// owned component is silently accepted and the whole tree is built inside
-	// whatever it points at. Chmod and Chtimes below follow it too, and the root
-	// then becomes a write root the backend binds read-write with TMPDIR and the
-	// build caches pointed inside it.
+	// whatever it points at, and the root then becomes a write root the backend
+	// binds read-write with TMPDIR and the build caches pointed inside it.
 	if err := refuseAliasedRuntimeComponents(runtimeState.Root); err != nil {
 		return SandboxRuntime{}, nil, err
 	}
-	for _, directory := range directories {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			return SandboxRuntime{}, nil, fmt.Errorf("create sandbox runtime directory %s: %w", directory, err)
-		}
-		if err := os.Chmod(directory, 0o700); err != nil {
-			return SandboxRuntime{}, nil, fmt.Errorf("secure sandbox runtime directory %s: %w", directory, err)
-		}
+	if err := os.MkdirAll(runtimeState.Root, 0o700); err != nil {
+		return SandboxRuntime{}, nil, fmt.Errorf("create sandbox runtime directory %s: %w", runtimeState.Root, err)
 	}
 	// AND AGAIN AFTER, because the check above is a check-then-use on its own: a
 	// component swapped during creation would still redirect the tree. Pairing the
@@ -177,9 +158,12 @@ func prepareSandboxRuntime(workspaceRoot string, sandboxHome string) (SandboxRun
 	if err := refuseAliasedRuntimeComponents(runtimeState.Root); err != nil {
 		return SandboxRuntime{}, nil, err
 	}
+	// Everything below the root goes through a handle on it. The children are
+	// the one part of the tree a sandboxed command can replace; see
+	// prepareSandboxRuntimeTree.
 	now := sandboxRuntimeNow()
-	if err := os.Chtimes(runtimeState.Root, now, now); err != nil {
-		return SandboxRuntime{}, nil, fmt.Errorf("touch sandbox runtime root: %w", err)
+	if err := prepareSandboxRuntimeTree(runtimeState.Root, now); err != nil {
+		return SandboxRuntime{}, nil, err
 	}
 	cleanupSandboxRuntimeRoots(filepath.Dir(runtimeState.Root), runtimeState.Root, now)
 	prepared = true
