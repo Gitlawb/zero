@@ -74,9 +74,11 @@ func (store *Store) hold(sessionID string) (busy bool) {
 	return false
 }
 
-// Release gives up this Store's lease on sessionID, for a long-lived process
-// that is done with a session before it exits. A process that exits releases
-// every lease with it.
+// Release gives up this Store's lease on sessionID. Nothing in Zero calls it
+// yet: a process holds every session it has touched until it exits, which
+// releases every lease with it, and tests use Release to stand in for that
+// exit. A long-lived process that switches sessions, like the TUI on /new, could
+// call it for the session it leaves.
 func (store *Store) Release(sessionID string) {
 	store.leasesMu.Lock()
 	defer store.leasesMu.Unlock()
