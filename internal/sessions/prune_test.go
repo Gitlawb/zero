@@ -296,6 +296,14 @@ func TestPruneKeepsASessionWhoseLastUpdateCannotBeRead(t *testing.T) {
 	createFinishedSession(t, root, "undated", "2026-06-01T00:00:00Z", "")
 	rewriteUpdatedAt(t, root, "undated", "sometime last spring")
 
+	preview, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if reason := keptReason(preview, "undated"); reason != PruneKeptUndated || len(preview.Removed) != 0 {
+		t.Fatalf("dry run kept reason %q and would remove %v", reason, pruneIDs(preview.Removed))
+	}
+
 	report, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays})
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
@@ -305,5 +313,28 @@ func TestPruneKeepsASessionWhoseLastUpdateCannotBeRead(t *testing.T) {
 	}
 	if !sessionDirExists(t, root, "undated") {
 		t.Fatal("a session with an unreadable update time was removed")
+	}
+}
+
+// A session another process has just created, and not yet written to, is as
+// open as one it has been writing for hours: a TUI creates its session before
+// the first prompt.
+func TestPruneLeavesASessionAnotherProcessJustCreated(t *testing.T) {
+	root := t.TempDir()
+	other := NewStore(StoreOptions{RootDir: root, Now: fixedClock("2026-07-01T00:00:00Z")})
+	if _, err := other.Create(CreateInput{SessionID: "fresh", Title: "not written yet"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer other.Release("fresh")
+
+	report, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays})
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if reason := keptReason(report, "fresh"); reason != PruneKeptOpen {
+		t.Fatalf("kept reason %q, want %q (report %+v)", reason, PruneKeptOpen, report)
+	}
+	if !sessionDirExists(t, root, "fresh") {
+		t.Fatal("a session another process had just created was removed")
 	}
 }
