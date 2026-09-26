@@ -4,7 +4,6 @@ package sandbox
 
 import (
 	"fmt"
-	"os"
 	"sync"
 	"unsafe"
 
@@ -143,59 +142,26 @@ func openWindowsChildNoFollow(parent windows.Handle, name string, access uint32,
 	return handle, nil
 }
 
-// writeWindowsRuntimeStampToDirectoryHandle writes the stamp into an ALREADY
+// writeWindowsRuntimeStampToDirectoryHandle publishes the stamp into an ALREADY
 // OPEN directory, naming nothing. The caller holds the handle the capability ACE
-// was applied through, so the stamp cannot land anywhere else.
+// was applied through, so the stamp cannot land anywhere else. The stamp is
+// replaced in one step; see publishWindowsRuntimeStamp.
 func writeWindowsRuntimeStampToDirectoryHandle(directory windows.Handle, name string, planHash string) error {
-	objectName, err := windows.NewNTUnicodeString(name)
-	if err != nil {
-		return fmt.Errorf("encode sandbox runtime setup stamp name: %w", err)
-	}
-	attributes := windows.OBJECT_ATTRIBUTES{
-		RootDirectory: directory,
-		ObjectName:    objectName,
-		Attributes:    windows.OBJ_CASE_INSENSITIVE,
-	}
-	attributes.Length = uint32(unsafe.Sizeof(attributes))
-	// BEFORE THE OPEN, because FILE_OVERWRITE_IF truncates at open time. Resolved
-	// after it, a reader that could not be established returned an error with the
-	// previous run's stamp already at zero length, or a fresh empty one left
-	// behind. Everything that can fail without touching the stamp now fails
-	// before it is touched. Reported by CodeRabbit.
+	// BEFORE ANYTHING IS CREATED. A reader that could not be established used to
+	// fail after the stamp had already been truncated. Everything that can fail
+	// without touching the stamp still fails before anything is created.
+	// Reported by CodeRabbit.
 	reader, err := windowsRuntimeStampReader(directory)
 	if err != nil {
 		return err
 	}
-
-	var handle windows.Handle
-	var iosb windows.IO_STATUS_BLOCK
-	err = windows.NtCreateFile(
-		&handle,
-		windows.GENERIC_WRITE|windows.READ_CONTROL|windows.WRITE_DAC|windows.SYNCHRONIZE,
-		&attributes,
-		&iosb,
-		nil,
-		windows.FILE_ATTRIBUTE_NORMAL,
-		windows.FILE_SHARE_READ,
-		windows.FILE_OVERWRITE_IF,
-		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
-		0,
-		0,
-	)
+	// PROTECTED FROM THE FIRST INSTANT, because the stamp lives inside the tree
+	// it attests. See windowsRuntimeStampDACL.
+	descriptor, err := windowsRuntimeStampSecurityDescriptor(reader)
 	if err != nil {
-		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
-	}
-	file := os.NewFile(uintptr(handle), name)
-	defer file.Close()
-	// PROTECTED BEFORE ANYTHING IS WRITTEN, because the stamp lives inside the
-	// tree it attests. See protectWindowsRuntimeStamp.
-	if err := protectWindowsRuntimeStamp(windows.Handle(file.Fd()), reader); err != nil {
 		return err
 	}
-	if _, err := file.WriteString(planHash); err != nil {
-		return fmt.Errorf("write sandbox runtime setup stamp: %w", err)
-	}
-	return nil
+	return publishWindowsRuntimeStamp(directory, name, []byte(planHash), descriptor)
 }
 
 // windowsRuntimeStampReader resolves the identity that has to read the stamp
@@ -268,7 +234,7 @@ func windowsRuntimeStampReader(directory windows.Handle) (*windows.SID, error) {
 	return owner, nil
 }
 
-// protectWindowsRuntimeStamp gives the stamp its own DACL, excluding the
+// windowsRuntimeStampDACL builds the stamp its own DACL, excluding the
 // capability SID the sandboxed command runs with.
 //
 // THE ATTESTATION CANNOT LIVE IN THE SUBJECT'S OWN WRITABLE NAMESPACE. The
@@ -288,17 +254,17 @@ func windowsRuntimeStampReader(directory windows.Handle) (*windows.SID, error) {
 //
 // PROTECTED, not merely explicit: without SE_DACL_PROTECTED the inherited
 // capability ACE stays in the DACL alongside whatever is set here.
-func protectWindowsRuntimeStamp(handle windows.Handle, reader *windows.SID) error {
+func windowsRuntimeStampDACL(reader *windows.SID) (*windows.ACL, error) {
 	if reader == nil {
-		return fmt.Errorf("resolve the reader SID for the sandbox runtime stamp: no identity was supplied")
+		return nil, fmt.Errorf("resolve the reader SID for the sandbox runtime stamp: no identity was supplied")
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
-		return fmt.Errorf("resolve LocalSystem SID for the sandbox runtime stamp: %w", err)
+		return nil, fmt.Errorf("resolve LocalSystem SID for the sandbox runtime stamp: %w", err)
 	}
 	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
-		return fmt.Errorf("resolve Administrators SID for the sandbox runtime stamp: %w", err)
+		return nil, fmt.Errorf("resolve Administrators SID for the sandbox runtime stamp: %w", err)
 	}
 	// Setup writes it, doctor and the elevated command read it; nothing else
 	// needs to reach it, and the capability SID is deliberately absent.
@@ -323,9 +289,8 @@ func protectWindowsRuntimeStamp(handle windows.Handle, reader *windows.SID) erro
 	//
 	// So: no FILE_WRITE_DATA, no WRITE_DAC, no WRITE_OWNER, which keeps an
 	// accidental in-place rewrite off the table, and DELETE so compensation can
-	// undo its own work. The write below still succeeds either way: the handle was
-	// opened GENERIC_WRITE before this DACL was applied, and Windows checks access
-	// at open time.
+	// undo its own work and the next publish can rename a replacement over it.
+	// The publish itself still writes: see createWindowsStampReplacement.
 	// The reader can BE one of the repair identities. A runtime root created by
 	// an elevated process is commonly owned by BUILTINAdministrators rather than
 	// by the invoking user, which is what CI runners do. Naming the same SID
@@ -358,17 +323,29 @@ func protectWindowsRuntimeStamp(handle windows.Handle, reader *windows.SID) erro
 	}
 	dacl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
-		return fmt.Errorf("build the sandbox runtime stamp DACL: %w", err)
+		return nil, fmt.Errorf("build the sandbox runtime stamp DACL: %w", err)
 	}
-	if err := windows.SetSecurityInfo(
-		handle,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, dacl, nil,
-	); err != nil {
-		return fmt.Errorf("protect the sandbox runtime setup stamp: %w", err)
+	return dacl, nil
+}
+
+// windowsRuntimeStampSecurityDescriptor is the descriptor a stamp is created
+// with: windowsRuntimeStampDACL, protected so nothing is inherited from the root.
+func windowsRuntimeStampSecurityDescriptor(reader *windows.SID) (*windows.SECURITY_DESCRIPTOR, error) {
+	dacl, err := windowsRuntimeStampDACL(reader)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	descriptor, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return nil, fmt.Errorf("build the sandbox runtime stamp security descriptor: %w", err)
+	}
+	if err := descriptor.SetDACL(dacl, true, false); err != nil {
+		return nil, fmt.Errorf("build the sandbox runtime stamp security descriptor: %w", err)
+	}
+	if err := descriptor.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+		return nil, fmt.Errorf("protect the sandbox runtime stamp security descriptor: %w", err)
+	}
+	return descriptor, nil
 }
 
 // writeWindowsRuntimeStampThroughHandle writes the setup stamp INTO the object

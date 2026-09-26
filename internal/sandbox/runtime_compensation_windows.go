@@ -93,10 +93,13 @@ func markForDeletion(handle windows.Handle) error {
 // compensateRuntimeStampBound restores or removes the stamp through a handle on
 // the directory whose identity still matches.
 //
-// Both branches DELETE first. The stamp carries a protected DACL that withholds
-// write from the root owner, so an in-place overwrite is denied under the very
-// token that wrote it; and recreating it through the ordinary writer is what
-// puts that DACL back, which a raw write would not.
+// RESTORED WITHOUT A GAP. This used to delete the stamp and then recreate the
+// previous one, so a command validating in between, or a process stopping
+// there, found no stamp at all where the previous setup had left a valid one.
+// The ordinary writer replaces the stamp in one step and puts the protected
+// DACL back, which a raw write would not, so a restore is just a publish of the
+// previous bytes. Only the branch that had no stamp before deletes, because
+// absent is the state it restores. Reported by @jatmn.
 func compensateRuntimeStampBound(root string, identity string, name string, prior []byte, existed bool) error {
 	directory, err := openVerifiedRuntimeDirectory(root, identity,
 		windows.FILE_TRAVERSE|windowsFileAddFile|windows.READ_CONTROL|windows.SYNCHRONIZE, "stamped")
@@ -109,14 +112,11 @@ func compensateRuntimeStampBound(root string, identity string, name string, prio
 		runtimeCompensationSwapSeam()
 	}
 
-	if err := deleteRuntimeStampChild(directory, name); err != nil {
-		return err
-	}
 	if !existed {
-		return nil
+		return deleteRuntimeStampChild(directory, name)
 	}
-	// Recreated through the ordinary writer so it is protected again, and so the
-	// reader ACE is resolved the same way a fresh setup resolves it.
+	// Through the ordinary writer so it is protected again, and so the reader ACE
+	// is resolved the same way a fresh setup resolves it.
 	if err := writeWindowsRuntimeStampToDirectoryHandle(directory, name, string(prior)); err != nil {
 		return fmt.Errorf("restore the previous sandbox runtime setup stamp: %w", err)
 	}

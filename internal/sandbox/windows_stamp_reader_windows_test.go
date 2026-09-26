@@ -122,29 +122,18 @@ func TestStampGrantsTheRuntimeRootOwnerReadOnly(t *testing.T) {
 }
 
 // An identity that could not be resolved is not permission to protect the stamp
-// with a DACL naming nobody.
-func TestProtectRefusesWithoutAResolvedReader(t *testing.T) {
-	// A REAL handle, so the refusal can only come from the missing identity.
-	// Handle 0 fails on its own, which made the first version of this test pass
-	// with the guard deleted.
-	stamp := filepath.Join(t.TempDir(), "stamp.json")
-	if err := os.WriteFile(stamp, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	handle, err := windows.CreateFile(windows.StringToUTF16Ptr(stamp),
-		windows.READ_CONTROL|windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
-	if err != nil {
-		t.Fatalf("open the stamp: %v", err)
-	}
-	defer windows.CloseHandle(handle)
-
-	err = protectWindowsRuntimeStamp(handle, nil)
+// with a DACL naming nobody. The builder is what refuses, so it is called
+// directly: nothing else in the path could produce this error first.
+func TestStampDACLRefusesWithoutAResolvedReader(t *testing.T) {
+	_, err := windowsRuntimeStampDACL(nil)
 	if err == nil {
-		t.Fatal("protecting the stamp with no resolved reader succeeded, which would lock out the identity that has to validate it")
+		t.Fatal("building the stamp DACL with no resolved reader succeeded, which would lock out the identity that has to validate it")
 	}
 	if !strings.Contains(err.Error(), "no identity was supplied") {
 		t.Fatalf("refused for the wrong reason, so this does not pin the guard: %v", err)
+	}
+	if _, err := windowsRuntimeStampSecurityDescriptor(nil); err == nil || !strings.Contains(err.Error(), "no identity was supplied") {
+		t.Fatalf("the descriptor the stamp is created with skipped the same guard: %v", err)
 	}
 }
 
@@ -175,27 +164,44 @@ func TestReaderThatIsARepairIdentityKeepsWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve the Administrators SID: %v", err)
 	}
-	stamp := filepath.Join(t.TempDir(), "stamp.json")
-	if err := os.WriteFile(stamp, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	handle, err := windows.CreateFile(windows.StringToUTF16Ptr(stamp),
-		windows.READ_CONTROL|windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
-	if err != nil {
-		t.Fatalf("open the stamp: %v", err)
-	}
-	if err := protectWindowsRuntimeStamp(handle, administrators); err != nil {
-		windows.CloseHandle(handle)
-		t.Fatalf("protect the stamp: %v", err)
-	}
-	windows.CloseHandle(handle)
+	restore := setWindowsSetupConsumerSID(administrators)
+	defer restore()
 
-	mask, present := stampACEMask(t, stamp, administrators)
+	root := t.TempDir()
+	directory := openStampTestDirectory(t, root)
+	name := windowsSandboxRuntimeStampName("planhash")
+	if err := writeWindowsRuntimeStampToDirectoryHandle(directory, name, "planhash"); err != nil {
+		t.Fatalf("publish the stamp: %v", err)
+	}
+
+	mask, present := stampACEMask(t, filepath.Join(root, name), administrators)
 	if !present {
 		t.Fatal("Administrators has no ACE at all")
 	}
 	if mask&windows.FILE_WRITE_DATA == 0 {
 		t.Errorf("Administrators lost write when it was also the resolved reader (mask 0x%08x)", mask)
 	}
+}
+
+// openStampTestDirectory opens root the way the rooted writer holds it.
+func openStampTestDirectory(t *testing.T, root string) windows.Handle {
+	t.Helper()
+	path, err := windows.UTF16PtrFromString(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory, err := windows.CreateFile(
+		path,
+		windows.FILE_TRAVERSE|windowsFileAddFile|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("open the runtime root: %v", err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(directory) })
+	return directory
 }

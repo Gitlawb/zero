@@ -1279,7 +1279,9 @@ func validateWindowsSandboxRuntimeStamp(profile PermissionProfile, planHash stri
 	if root == "" {
 		return nil
 	}
-	recorded, err := os.ReadFile(windowsSandboxRuntimeStampPath(root, planHash))
+	// Read with FILE_SHARE_DELETE on Windows, so a setup republishing the stamp
+	// while this runs replaces it instead of failing on this read.
+	recorded, err := readWindowsSandboxRuntimeStampFile(windowsSandboxRuntimeStampPath(root, planHash))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("the sandbox runtime directory for this workspace was removed since setup ran, so it no longer carries the permissions the sandbox needs — run `zero sandbox setup` from an elevated (Administrator) terminal (%s)", root)
