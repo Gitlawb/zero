@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -154,6 +155,11 @@ func readExecContextEvents(store *Store, sessionID string) ([]Event, error) {
 	contextEvents, err := store.ReadRehydratedEvents(sessionID)
 	if err == nil {
 		return contextEvents, nil
+	}
+	if errors.Is(err, ErrPruning) {
+		// Not a rehydration failure: the raw read would continue the session
+		// without holding it while prune may be removing it.
+		return nil, err
 	}
 	rawEvents, rawErr := store.ReadEvents(sessionID)
 	if rawErr != nil {

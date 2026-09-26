@@ -314,6 +314,11 @@ func (m model) resumeEvents(sessionID string) ([]sessions.Event, error) {
 	if err == nil {
 		return events, nil
 	}
+	if errors.Is(err, sessions.ErrPruning) {
+		// Not a rehydration failure: the raw read would resume the session without
+		// holding it while zero sessions prune may be removing it.
+		return nil, err
+	}
 	raw, rawErr := m.sessionStore.ReadEvents(sessionID)
 	if rawErr != nil {
 		// Surface the raw-read failure (the actual fallback error), not the earlier
