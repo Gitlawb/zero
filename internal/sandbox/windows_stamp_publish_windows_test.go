@@ -208,7 +208,7 @@ func TestStampPublishReplacesAStampTheValidatorHasOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the stamp the way validation does: %v", err)
 	}
-	defer held.Close()
+	defer func() { _ = held.Close() }()
 	if err := writeWindowsRuntimeStampToDirectoryHandle(directory, name, next); err != nil {
 		t.Fatalf("a publish could not replace a stamp the validator had open: %v", err)
 	}

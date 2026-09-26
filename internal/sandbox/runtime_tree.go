@@ -49,7 +49,7 @@ func prepareSandboxRuntimeTree(root string, now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("open sandbox runtime root %s: %w", root, err)
 	}
-	defer tree.Close()
+	defer func() { _ = tree.Close() }()
 	if err := secureRuntimeTreeDirectory(tree, ".", root); err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func secureRuntimeTreeDirectory(tree *os.Root, name string, path string) error {
 	if err != nil {
 		return fmt.Errorf("open sandbox runtime directory %s: %w", path, err)
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	if err := directory.Chmod(0o700); err != nil {
 		return fmt.Errorf("secure sandbox runtime directory %s: %w", path, err)
 	}
