@@ -446,3 +446,45 @@ func TestResumeIsRefusedWhilePruneHoldsTheSession(t *testing.T) {
 		t.Errorf("old kept for %q, want %q", reason, PruneKeptOpen)
 	}
 }
+
+// A lease that cannot be taken at all is not a free one: prune keeps the
+// session. That is why a process whose own hold fails the same way carries on
+// with the session instead of being refused. Prune cannot remove it either, and
+// refusing would stop resume and fork wherever locking does not work, for people
+// who never prune.
+func TestPruneKeepsASessionWhoseLeaseCannotBeChecked(t *testing.T) {
+	root := t.TempDir()
+	createFinishedSession(t, root, "old", "2026-06-01T00:00:00Z", "")
+	lease := filepath.Join(root, "old", leaseFileName)
+	if err := os.Remove(lease); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove the lease file: %v", err)
+	}
+	// A directory where the lease file goes cannot be opened as one.
+	if err := os.Mkdir(lease, 0o700); err != nil {
+		t.Fatalf("SETUP INVALID: %v", err)
+	}
+	if _, locked, err := pruneStore(root).HoldExclusive("old"); err == nil || locked {
+		t.Fatalf("SETUP INVALID: the lease could still be taken: locked=%v, %v", locked, err)
+	}
+
+	for _, dryRun := range []bool{true, false} {
+		report, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays, DryRun: dryRun})
+		if err != nil {
+			t.Fatalf("Prune (dry run %v): %v", dryRun, err)
+		}
+		if reason := keptReason(report, "old"); !strings.HasPrefix(reason, "its lease could not be checked") || len(report.Removed) != 0 || len(report.Failed) != 0 {
+			t.Fatalf("dry run %v: kept for %q, removed %v, failed %v, want it kept because its lease could not be checked", dryRun, reason, pruneIDs(report.Removed), pruneIDs(report.Failed))
+		}
+	}
+	if !sessionDirExists(t, root, "old") {
+		t.Fatal("a session whose lease could not be checked was removed")
+	}
+
+	other := NewStore(StoreOptions{RootDir: root})
+	if _, err := other.ReadRehydratedEvents("old"); err != nil {
+		t.Fatalf("resume a session whose lease cannot be taken: %v", err)
+	}
+	if _, err := other.Fork("old", ForkInput{SessionID: "fork"}); err != nil {
+		t.Fatalf("fork a session whose lease cannot be taken: %v", err)
+	}
+}
