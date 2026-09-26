@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -102,5 +104,84 @@ func TestEngineDegradedNoticeSpeaksWhenTheNestingMarkersSkipWrapping(t *testing.
 	disabled.Mode = ModeDisabled
 	if got := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: disabled, Backend: native}).DegradedNotice(); got != "" {
 		t.Errorf("a sandbox the user turned off still produced a notice under the markers: %q", got)
+	}
+}
+
+// NO GRANT REACHES A DEGRADED PLAN THE SESSION'S NOTICE MISSED.
+//
+// The notice is decided once, from the policy the session starts with, and
+// grants made during the session change the policy each command runs under.
+// They cannot open a gap: a grant only opens the network or adds allow and
+// deny paths, never the mode, and every mode but disabled builds a restricted
+// filesystem profile that needs the platform sandbox from the start. So a
+// degraded command plan means the notice already spoke, and a disabled sandbox
+// stays disabled whatever is granted. A deny path the backend cannot enforce is
+// refused at the command rather than run degraded. Raised by CodeRabbit.
+func TestNoGrantReachesADegradedPlanTheSessionNoticeMissed(t *testing.T) {
+	clearNestingMarkers(t)
+	cacheRoot, tempRoot := t.TempDir(), t.TempDir()
+	original := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = original })
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
+
+	root := t.TempDir()
+	extra := t.TempDir()
+	secret := filepath.Join(root, "secret.txt")
+	enabled := true
+	grants := []struct {
+		name    string
+		profile RequestPermissionProfile
+	}{
+		{"network", RequestPermissionProfile{Network: &NetworkPermissions{Enabled: &enabled}}},
+		{"write root", RequestPermissionProfile{FileSystem: &FileSystemPermissions{Write: []string{extra}}}},
+		{"deny read", RequestPermissionProfile{FileSystem: &FileSystemPermissions{DenyRead: []string{secret}}}},
+	}
+	unavailable := Backend{Name: BackendUnavailable, Platform: "linux", Fallback: true, Message: "Linux sandbox helper is not available"}
+	degradedAndSaid, refused := 0, 0
+	for _, mode := range []PolicyMode{ModeEnforce, ModeDisabled} {
+		for _, network := range []NetworkMode{NetworkAllow, NetworkDeny} {
+			for _, grant := range grants {
+				for _, scope := range []PermissionGrantScope{PermissionGrantScopeSession, PermissionGrantScopeTurn} {
+					name := fmt.Sprintf("%s/%s/%s/%s", mode, network, grant.name, scope)
+					policy := DefaultPolicy()
+					policy.Mode, policy.Network = mode, network
+					engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Backend: unavailable})
+					notice := engine.DegradedNotice()
+					undo, err := engine.GrantRequestPermissions(grant.profile, scope)
+					if err != nil {
+						t.Fatalf("%s: SETUP INVALID: grant: %v", name, err)
+					}
+					plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: root})
+					undo()
+					// The plan holds the runtime lease until it is cleaned up, and a lease
+					// file still open fails the temp directory removal on Windows.
+					plan.Cleanup()
+					if err != nil {
+						if grant.name != "deny read" || mode == ModeDisabled {
+							t.Errorf("%s: refused a command it should have planned: %v", name, err)
+						}
+						refused++
+						continue
+					}
+					if plan.EnforcementLevel == EnforcementDegraded {
+						if notice == "" {
+							t.Errorf("%s: the command plan is degraded but the session started with no notice", name)
+						}
+						degradedAndSaid++
+					}
+					if mode == ModeDisabled && plan.EnforcementLevel != EnforcementDisabled {
+						t.Errorf("%s: a grant took a disabled sandbox to %q", name, plan.EnforcementLevel)
+					}
+				}
+			}
+		}
+	}
+	// Not vacuous: the enforced modes did reach degraded plans, and the deny
+	// grants were refused rather than degraded.
+	if degradedAndSaid == 0 || refused == 0 {
+		t.Fatalf("SETUP INVALID: %d degraded plans and %d refusals, so the invariant was never exercised", degradedAndSaid, refused)
 	}
 }

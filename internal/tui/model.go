@@ -73,6 +73,7 @@ type model struct {
 	ctx                  context.Context
 	cwd                  string
 	appVersion           string
+	startupNotices       []string               // Options.StartupNotices, said again when a session is resumed
 	userCommands         []usercommands.Command // file-sourced /commands (.zero/commands)
 	loadSkills           func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
 	userConfigPath       string
@@ -984,6 +985,7 @@ func newModel(ctx context.Context, options Options) model {
 		ctx:                         ctx,
 		cwd:                         cwd,
 		appVersion:                  strings.TrimSpace(options.Version),
+		startupNotices:              options.StartupNotices,
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,
@@ -1095,12 +1097,19 @@ func newModel(ctx context.Context, options Options) model {
 	for _, warning := range keyBindingWarnings {
 		m = m.appendSystemNotice(warning)
 	}
-	for _, notice := range options.StartupNotices {
+	m.transcript = m.withStartupNotices(m.transcript)
+	return m
+}
+
+// withStartupNotices appends the session's startup notices to rows as system
+// rows, in order, skipping blank ones so a caller can pass one unconditionally.
+func (m model) withStartupNotices(rows []transcriptRow) []transcriptRow {
+	for _, notice := range m.startupNotices {
 		if strings.TrimSpace(notice) != "" {
-			m = m.appendSystemNotice(notice)
+			rows = appendRow(rows, rowSystem, notice)
 		}
 	}
-	return m
+	return rows
 }
 
 func (m model) doctorOptions(connectivity bool) doctor.Options {

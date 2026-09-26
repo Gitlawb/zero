@@ -246,7 +246,12 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		m, loopsCleared = m.clearLoopsForSessionSwitch()
 	}
 
-	rows := initialTranscript()
+	// SAID AGAIN FOR THE SESSION THIS SWITCHES TO. The startup notices describe
+	// the sandbox every session in this process runs under, and the rebuild below
+	// starts from an empty transcript, so a degraded sandbox went unmentioned for
+	// the resumed session. Rewind and compaction stay in the same session and keep
+	// the notice in the scrollback above their divider. Reported by CodeRabbit.
+	rows := m.withStartupNotices(initialTranscript())
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
 	if loopsCleared > 0 {
 		rows = appendRow(rows, rowSystem, fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", loopsCleared))
