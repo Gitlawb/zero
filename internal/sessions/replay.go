@@ -233,7 +233,11 @@ func (store *Store) ReadRehydratedEvents(sessionID string) ([]Event, error) {
 // ReadRehydratedEventsWithPresence carries the underlying event-log presence
 // through compaction projection without changing ReadRehydratedEvents' existing
 // empty-on-missing contract.
+//
+// It is how a session is loaded to be continued (the TUI's resume, `exec
+// --resume`, ACP session/load), so it holds the session open. See Hold.
 func (store *Store) ReadRehydratedEventsWithPresence(sessionID string) ([]Event, bool, error) {
+	store.Hold(sessionID)
 	events, present, err := store.ReadEventsWithPresence(sessionID)
 	if err != nil {
 		return nil, present, err

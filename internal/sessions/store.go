@@ -233,6 +233,10 @@ type Store struct {
 	// is accepted deliberately rather than risk an unsafe eviction.
 	sessionLocks map[string]*sync.Mutex
 	idCounter    atomic.Uint64
+
+	// leases are the sessions this Store holds open. See Hold.
+	leasesMu sync.Mutex
+	leases   map[string]*os.File
 }
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
@@ -332,6 +336,7 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 	if err := file.Close(); err != nil {
 		return Metadata{}, fmt.Errorf("close zero session events file: %w", err)
 	}
+	store.Hold(sessionID)
 	return session, nil
 }
 
@@ -897,6 +902,14 @@ func (store *Store) sessionLock(sessionID string) *sync.Mutex {
 // reverse order. The OS lock is best-effort: if it cannot be acquired (e.g. an
 // unsupported platform) the in-memory mutex still applies.
 func (store *Store) lockSession(sessionID string) (func(), error) {
+	// A process that writes a session has it open. See Hold.
+	store.Hold(sessionID)
+	return store.lockSessionWithoutLease(sessionID)
+}
+
+// lockSessionWithoutLease is lockSession for prune, which must not mark as open
+// the session it is about to remove.
+func (store *Store) lockSessionWithoutLease(sessionID string) (func(), error) {
 	mu := store.sessionLock(sessionID)
 	mu.Lock()
 	release, err := store.acquireFileLock(sessionID)
