@@ -296,6 +296,24 @@ func TestSidebarFileLinesOverflowExcludesLiveRow(t *testing.T) {
 
 // TestSidebarHasContentForLiveWrite: the sidebar counts an in-flight first
 // write as content, so the FILES pulse is visible before any result row lands.
+func TestSidebarFileHitsDistinguishSuffixPaths(t *testing.T) {
+	m := sidebarTestModel()
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolResult, tool: "edit_file", id: "a", status: tools.StatusOK, changedFiles: []string{"a.go"}},
+		transcriptRow{kind: rowToolResult, tool: "edit_file", id: "b", status: tools.StatusOK, changedFiles: []string{"dir/a.go"}},
+	)
+	_, hits := m.sidebarFileLines(80)
+	if len(hits) < 2 {
+		t.Fatalf("want two fileHit rows, got %#v", hits)
+	}
+	if hits[0].path == hits[1].path {
+		t.Fatal("fileHit paths must stay distinct")
+	}
+	if hits[0].lineOffset == hits[1].lineOffset {
+		t.Fatal("fileHit rows must not share a line offset")
+	}
+}
+
 func TestSidebarHasContentForLiveWrite(t *testing.T) {
 	m := sidebarTestModel()
 	m.plan.steps = nil // drop the helper's seeded plan: no agents/plan/files now
@@ -307,5 +325,51 @@ func TestSidebarHasContentForLiveWrite(t *testing.T) {
 	m.streamCallDecoder.feed(`{"path":"web/new.css","content":"body{}`)
 	if !m.sidebarHasContent() {
 		t.Fatal("a live in-flight write must count as sidebar content")
+	}
+}
+
+func TestRunDetailsFileMouseSelectionEndToEnd(t *testing.T) {
+	m := filesPanelTestModel()
+	m.width = 80
+	m.height = 24
+	m.altScreen = true
+	m.runDetailsOpen = true
+
+	overlay := m.runDetailsOverlay(m.width)
+	if overlay == "" {
+		t.Fatal("expected non-empty runDetailsOverlay")
+	}
+
+	inner := m.runDetailsInnerWidth()
+	layout := m.runDetailsLayout(inner)
+	if len(layout.fileHits) == 0 || layout.fileStart < 0 {
+		t.Fatalf("expected file hits in layout, got: %+v", layout)
+	}
+
+	targetHit := layout.fileHits[0] // "internal/tui/sidebar.go"
+	overlayLines := viewLines(overlay)
+	left, trimmedLines, overlayWidth := normalizeOverlayBlock(overlayLines, m.width)
+	if overlayWidth <= 0 || len(trimmedLines) == 0 {
+		t.Fatalf("invalid overlay block normalization: left=%d, width=%d", left, overlayWidth)
+	}
+
+	rect := m.overlayMouseRect(len(trimmedLines), m.width)
+	// Click on the target file row: top border is row 0 of the overlay, content starts at row 1
+	clickY := rect.y + 1 + layout.fileStart + targetHit.lineOffset
+	clickX := left + 4 // inside the border and padding
+
+	clickMsg := testMouseClick(tea.MouseLeft, clickX, clickY)
+
+	path, ok := m.runDetailsFileAtMouse(clickMsg)
+	if !ok || path != targetHit.path {
+		t.Fatalf("runDetailsFileAtMouse failed: ok=%v, got=%q, want=%q", ok, path, targetHit.path)
+	}
+
+	// Route the click through m.Update to verify end-to-end selection
+	updated, _ := m.Update(clickMsg)
+	m = updated.(model)
+
+	if m.selectedFile != targetHit.path {
+		t.Fatalf("expected selectedFile %q after mouse click, got %q", targetHit.path, m.selectedFile)
 	}
 }
