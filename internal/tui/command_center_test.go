@@ -207,6 +207,9 @@ func TestSwitchProviderModelReportsPersistenceFailures(t *testing.T) {
 		if !strings.Contains(status, "config.json could not be read") {
 			t.Fatalf("status = %q, want a persistence note", status)
 		}
+		if strings.Count(status, err.Error()) != 1 {
+			t.Fatal("persistence error must appear exactly once in the switch status")
+		}
 		// The session did switch, which is exactly why the note has to be there.
 		if next.providerName != "OpenAI" {
 			t.Fatalf("providerName = %q, want OpenAI", next.providerName)
@@ -226,6 +229,9 @@ func TestSwitchProviderModelReportsPersistenceFailures(t *testing.T) {
 		}
 		if !strings.Contains(status, "config.json was not updated") {
 			t.Fatalf("status = %q, want the active-provider persistence note", status)
+		}
+		if strings.Count(status, err.Error()) != 1 {
+			t.Fatal("persistence error must appear exactly once in the switch status")
 		}
 	})
 
