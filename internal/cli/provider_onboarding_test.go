@@ -13,6 +13,102 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 )
 
+func TestProviderCommandsRejectConcreteCatalogAlias(t *testing.T) {
+	for _, source := range []string{"project", "environment"} {
+		for _, command := range []string{"use", "remove", "rename"} {
+			for _, address := range []string{"openai", "OPENAI", "work"} {
+				for _, jsonOutput := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/%s/%s/json=%t", source, command, address, jsonOutput), func(t *testing.T) {
+						setCLIUserConfigRoot(t)
+						clearProviderEnv(t)
+						t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+						path := filepath.Join(t.TempDir(), "config.json")
+						writeProviderOnboardingConfig(t, path, config.FileConfig{
+							ActiveProvider: "other",
+							Providers: []config.ProviderProfile{
+								{Name: "work", CatalogID: "openai", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://user.example/v1", Model: "user-model", APIKeyStored: true},
+								{Name: "other", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://other.example/v1", Model: "other-model"},
+							},
+						})
+						workspace := t.TempDir()
+						if source == "project" {
+							writeProviderOnboardingConfig(t, filepath.Join(workspace, ".zero", "config.json"), config.FileConfig{Providers: []config.ProviderProfile{
+								{Name: "openai", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://project.example/v1", Model: "project-model"},
+							}})
+						} else {
+							t.Setenv("OPENAI_API_KEY", "env-key")
+							t.Setenv("OPENAI_BASE_URL", "https://env.example/v1")
+						}
+						resolveOptions, err := config.DefaultResolveOptions(workspace)
+						if err != nil {
+							t.Fatal(err)
+						}
+						resolveOptions.UserConfigPath = path
+						names, err := config.ResolveProviderSourceNames(resolveOptions)
+						if _, lookup := config.LookupProviderName(names, "openai"); err != nil || lookup != config.ProviderNameExact {
+							t.Fatalf("fixture must contain a concrete openai row: names=%v err=%v", names, err)
+						}
+						before, err := os.ReadFile(path)
+						if err != nil {
+							t.Fatal(err)
+						}
+						store, err := config.ProviderKeyStoreAt(filepath.Dir(path))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := store.Set("work", "user-key"); err != nil {
+							t.Fatal(err)
+						}
+						deps := providerSetupDeps(path)
+						deps.getwd = func() (string, error) { return workspace, nil }
+						args := []string{"providers", command, address}
+						if command == "rename" {
+							args = append(args, "renamed")
+						}
+						if jsonOutput {
+							args = append(args, "--json")
+						}
+						var stdout, stderr bytes.Buffer
+						code := runWithDeps(args, &stdout, &stderr, deps)
+						if address == "work" {
+							if code != exitSuccess || stdout.Len() == 0 {
+								t.Fatalf("exact saved row rejected: exit=%d stderr=%q", code, stderr.String())
+							}
+							cfg := readFileConfig(t, path)
+							switch command {
+							case "use":
+								if cfg.ActiveProvider != "work" {
+									t.Fatalf("activeProvider = %q, want work", cfg.ActiveProvider)
+								}
+							case "remove":
+								if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "other" {
+									t.Fatal("exact saved row was not removed")
+								}
+							case "rename":
+								if cfg.Providers[0].Name != "renamed" {
+									t.Fatal("exact saved row was not renamed")
+								}
+							}
+							return
+						}
+						if code != exitCrash || stdout.Len() != 0 || !strings.Contains(stderr.String(), "isn't saved in config.json") {
+							t.Errorf("concrete row should report ownership error, exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+						}
+						after, err := os.ReadFile(path)
+						if err != nil || !bytes.Equal(before, after) {
+							t.Errorf("concrete row request changed user config: %v", err)
+						}
+						key, ok, err := store.Get("work")
+						if err != nil || !ok || key != "user-key" {
+							t.Errorf("concrete row request changed user credential: present=%t error=%v", ok, err)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
 func TestProviderMutationsRejectProjectCaseSibling(t *testing.T) {
 	for _, command := range []string{"remove", "rename"} {
 		t.Run(command, func(t *testing.T) {

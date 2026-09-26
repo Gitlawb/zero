@@ -236,8 +236,8 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	m.activeSession = *session
 	m.pendingSessionTitle = ""
 	m.sessionEvents = append([]sessions.Event{}, events...)
-	// Resume restores history, not the client. Keep the live identity, including
-	// a removed provider row, until an explicit provider switch replaces it.
+	// Resume replaces conversation history, not the live client. Keep its
+	// identity (including a removed row) and model until an actual provider switch.
 	if m.providerName == "" {
 		m.removedLiveRow = ""
 		m.providerName = session.Provider

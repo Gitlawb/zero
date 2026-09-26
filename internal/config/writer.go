@@ -180,6 +180,11 @@ func RepairUnnamedProvider(path string, replacement string) (result FileConfig, 
 				name = "openai"
 			}
 		}
+		if cfg.Providers[unnamed].APIKeyStored {
+			if sibling, collides := conflictingProviderRowName(*cfg, unnamed, legacyName); collides && sibling != legacyName {
+				return fmt.Errorf("the unnamed provider's stored credential uses identity %q, which conflicts with persisted provider %q; manually rename the sibling %q in config.json and reconcile any of its credential references before retrying `zero providers repair-config`; --name cannot safely move the stored credential", legacyName, sibling, sibling)
+			}
+		}
 		if conflict, collides := conflictingProviderRowName(*cfg, unnamed, name); collides {
 			if explicit {
 				return fmt.Errorf(
