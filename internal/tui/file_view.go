@@ -1391,7 +1391,10 @@ func (m model) invalidateFileViewForUnknownMutation() (model, tea.Cmd) {
 }
 
 // recoverInvalidatedFileView schedules a snapshot for a surface whose shared
-// cache generation changed while another BTW surface handled the invalidation.
+// cache generation changed, or whose open path's required revision advanced,
+// while another BTW surface handled the invalidation. Path-reporting tools bump
+// only that revision: outside a git workspace no sweep follows, so the other
+// surface must notice the revision itself and reload immediately.
 func (m model) recoverInvalidatedFileView() (model, tea.Cmd) {
 	if !m.fileView.active || m.fileView.mode != fileViewFull {
 		return m, nil
@@ -1400,8 +1403,15 @@ func (m model) recoverInvalidatedFileView() (model, tea.Cmd) {
 	if m.fileView.loading {
 		generation = m.fileView.desiredGen
 	}
-	if generation == defaultFileViewCache.generation() {
-		return m, nil
+	if generation != defaultFileViewCache.generation() {
+		return m.startFileViewLoadCmd(m.chatColumnWidth())
 	}
-	return m.startFileViewLoadCmd(m.chatColumnWidth())
+	target := m.fileView.path
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(m.cwd, target)
+	}
+	if defaultFileViewCache.requiredRevision(target) > m.fileView.requiredSourceRev {
+		return m.startFileViewLoadCmd(m.chatColumnWidth())
+	}
+	return m, nil
 }

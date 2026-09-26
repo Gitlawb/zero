@@ -314,6 +314,21 @@ func (m model) routeBTWParentMessage(msg tea.Msg) (model, tea.Cmd, bool) {
 	return m.routeBTWMessageToParent(msg)
 }
 
+// refreshHiddenParentFileView reloads the hidden parent's full-file view when a
+// side-surface mutation advanced the shared path revision. The load completion
+// carries the parent's lifetime token, so routeBTWParentMessage delivers it
+// back to the hidden model without waiting for a git sweep or for /btw return.
+func (m model) refreshHiddenParentFileView() (model, tea.Cmd) {
+	if !m.btw.active || m.btw.parent == nil {
+		return m, nil
+	}
+	parent := *m.btw.parent
+	var cmd tea.Cmd
+	parent, cmd = parent.recoverInvalidatedFileView()
+	m.btw.parent = &parent
+	return m, cmd
+}
+
 func (m model) routeBTWMessageToParent(msg tea.Msg) (model, tea.Cmd, bool) {
 	parentNext, cmd := m.btw.parent.updateModel(msg)
 	parent, ok := parentNext.(model)

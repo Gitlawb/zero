@@ -3023,7 +3023,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, batchCommands(sweep, refresh)
 			}
 			var loadCmds []tea.Cmd
+			invalidated := false
 			for _, p := range msg.row.changedFiles {
+				invalidated = true
 				target := p
 				if !filepath.IsAbs(target) {
 					target = filepath.Join(m.cwd, target)
@@ -3042,6 +3044,17 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 							loadCmds = append(loadCmds, cmd)
 						}
 					}
+				}
+			}
+			// The handler above only reloads the surface that received the result.
+			// A side mutation must also wake the hidden parent when that parent is
+			// showing the same path; the reverse direction is recovered after the
+			// parent message is routed. Neither wait depends on a git sweep.
+			if invalidated {
+				var peerCmd tea.Cmd
+				m, peerCmd = m.refreshHiddenParentFileView()
+				if peerCmd != nil {
+					loadCmds = append(loadCmds, peerCmd)
 				}
 			}
 			if len(loadCmds) > 0 {

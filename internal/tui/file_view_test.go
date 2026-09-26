@@ -3931,3 +3931,148 @@ func TestFileViewPendingReloadPromptSubmissionReturnsToBottom(t *testing.T) {
 		t.Fatalf("completed reload must respect the bottom intent, got %d", m.chatScrollOffset)
 	}
 }
+
+// TestFileViewCrossSurfacePathMutationOutsideGit covers the review matrix for a
+// workspace with no git sweep: a path-reporting tool result on one surface must
+// reload the other surface's open full-file view immediately, without a turn-end
+// fallback or a git scan.
+func TestFileViewCrossSurfacePathMutationOutsideGit(t *testing.T) {
+	const (
+		before = "package before\n"
+		after  = "package after\n"
+	)
+	writeFile := func(t *testing.T, dir, name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nonGit := func(t *testing.T, dir string) model {
+		t.Helper()
+		m := newBTWTestModel(t)
+		m.cwd = dir
+		m.width = 100
+		m.height = 30
+		m.gitFileBaseline = nil
+		m.gitSweepUnavailable = true
+		return m
+	}
+	for _, tool := range []string{"edit_file", "write_file", "apply_patch"} {
+		t.Run("parent_"+tool+"_refreshes_side", func(t *testing.T) {
+			resetFileViewCacheForTest()
+			dir := t.TempDir()
+			name := "side_shown.go"
+			writeFile(t, dir, name, before)
+			m := nonGit(t, dir)
+			m.pending = true
+			m.runID = 4
+			m.activeRunID = 4
+			side, cmd := m.handleBTWCommand("")
+			if cmd != nil {
+				t.Fatal("bare /btw must not start work")
+			}
+			if !side.btw.active || side.btw.parent == nil || side.btw.parent.activeRunID != 4 {
+				t.Fatal("parent run was not preserved")
+			}
+			side = testOpenFile(side, name)
+			if side.fileView.mode != fileViewFull {
+				t.Fatal("side must open the untouched file in full mode")
+			}
+			if !strings.Contains(plainRender(t, side.renderFileViewFull(80)), "package before") {
+				t.Fatal("side snapshot must show the pre-mutation content")
+			}
+			writeFile(t, dir, name, after)
+			updated, cmd := side.Update(agentRowMsg{
+				runID: 4,
+				row: transcriptRow{
+					kind:         rowToolResult,
+					tool:         tool,
+					status:       tools.StatusOK,
+					changedFiles: []string{"other.go", name},
+				},
+			})
+			side = updated.(model)
+			if cmd == nil {
+				t.Fatalf("%s on the parent must schedule a side reload without a git sweep", tool)
+			}
+			side = deliverCommandMessages(t, side, cmd)
+			got := plainRender(t, side.renderFileViewFull(80))
+			if !strings.Contains(got, "package after") || strings.Contains(got, "package before") {
+				t.Fatalf("%s left the side stale outside git: %s", tool, got)
+			}
+		})
+		t.Run("side_"+tool+"_refreshes_parent", func(t *testing.T) {
+			resetFileViewCacheForTest()
+			dir := t.TempDir()
+			name := "parent_shown.go"
+			writeFile(t, dir, name, before)
+			m := nonGit(t, dir)
+			m = testOpenFile(m, name)
+			if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package before") {
+				t.Fatal("parent snapshot must show the pre-mutation content")
+			}
+			side, _ := m.handleBTWCommand("")
+			if !side.btw.active || side.btw.parent == nil {
+				t.Fatal("fork failed")
+			}
+			// Only the hidden parent keeps the file open. The inherited side load
+			// is revoked here and must not be delivered.
+			side = side.exitFileView()
+			side.activeRunID = side.btw.sideRunIDBase
+			side.runID = side.btw.sideRunIDBase
+			writeFile(t, dir, name, after)
+			updated, cmd := side.Update(agentRowMsg{
+				runID: side.activeRunID,
+				row: transcriptRow{
+					kind:         rowToolResult,
+					tool:         tool,
+					status:       tools.StatusOK,
+					changedFiles: []string{name},
+				},
+			})
+			side = updated.(model)
+			if cmd == nil {
+				t.Fatalf("%s on the side must schedule a parent reload immediately", tool)
+			}
+			side = deliverCommandMessages(t, side, cmd)
+			if side.btw.parent == nil {
+				t.Fatal("hidden parent disappeared")
+			}
+			got := plainRender(t, side.btw.parent.renderFileViewFull(80))
+			if !strings.Contains(got, "package after") || strings.Contains(got, "package before") {
+				t.Fatalf("%s left the parent stale outside git: %s", tool, got)
+			}
+			if side.btw.parent.fileView.loading {
+				t.Fatal("parent reload must have settled before returning from BTW")
+			}
+		})
+	}
+	t.Run("unrelated_path_does_not_reload_side", func(t *testing.T) {
+		resetFileViewCacheForTest()
+		dir := t.TempDir()
+		writeFile(t, dir, "keep.go", before)
+		m := nonGit(t, dir)
+		m.pending = true
+		m.runID = 4
+		m.activeRunID = 4
+		side, _ := m.handleBTWCommand("")
+		side = testOpenFile(side, "keep.go")
+		updated, cmd := side.Update(agentRowMsg{
+			runID: 4,
+			row: transcriptRow{
+				kind:         rowToolResult,
+				tool:         "edit_file",
+				status:       tools.StatusOK,
+				changedFiles: []string{"other.go"},
+			},
+		})
+		side = updated.(model)
+		if cmd != nil || side.fileView.loading || !side.fileView.snapshotReady {
+			t.Fatal("a path the side is not showing must not reload its snapshot")
+		}
+		got := plainRender(t, side.renderFileViewFull(80))
+		if !strings.Contains(got, "package before") {
+			t.Fatalf("unrelated mutation disturbed the side snapshot: %s", got)
+		}
+	})
+}
