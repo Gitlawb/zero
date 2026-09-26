@@ -182,3 +182,25 @@ func TestSessionsPruneFlagsBelongToPrune(t *testing.T) {
 		}
 	}
 }
+
+// An empty cutoff is a usage error, never a fall back to sessions.retentionDays.
+func TestSessionsPruneRejectsAnEmptyCutoff(t *testing.T) {
+	root, configPath, deps := pruneCLIFixture(t)
+	if err := os.WriteFile(configPath, []byte(`{"sessions":{"retentionDays":1}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"prune", "--older-than", ""},
+		{"prune", "--older-than", "   "},
+		{"prune", "--older-than="},
+		{"list", "--older-than", ""},
+	} {
+		code, _, stderr := runPruneCLI(t, deps, args...)
+		if code != exitUsage || !strings.Contains(stderr, "--older-than requires a value") {
+			t.Errorf("%q: exit %d, stderr %q, want a usage error", args, code, stderr)
+		}
+	}
+	if !pruneSessionExists(t, root, "old-session") {
+		t.Fatal("an empty cutoff fell back to the retention setting and removed a session")
+	}
+}
