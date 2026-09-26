@@ -116,7 +116,7 @@ func (store *Store) Prune(options PruneOptions) (PruneReport, error) {
 		}
 		// Open elsewhere at planning time. Checked again under the lease when the
 		// session is removed; this pass is what lets its ancestors be kept too.
-		lease, locked, err := store.acquireLeaseExclusive(session.SessionID)
+		release, locked, err := store.HoldExclusive(session.SessionID)
 		if err != nil {
 			report.Kept = append(report.Kept, store.pruneEntry(session, "its lease could not be checked: "+err.Error()))
 			continue
@@ -125,8 +125,7 @@ func (store *Store) Prune(options PruneOptions) (PruneReport, error) {
 			report.Kept = append(report.Kept, store.pruneEntry(session, PruneKeptOpen))
 			continue
 		}
-		unlockLease(lease)
-		_ = lease.Close()
+		release()
 		candidates[session.SessionID] = true
 	}
 
@@ -236,7 +235,7 @@ func (store *Store) sessionBytes(sessionID string) int64 {
 // what), and a keptReason when the session turned out to be open or was written
 // since the plan.
 func (store *Store) pruneSession(sessionID string, cutoff time.Time) (removed bool, keptReason string, err error) {
-	lease, locked, err := store.acquireLeaseExclusive(sessionID)
+	releaseLease, locked, err := store.HoldExclusive(sessionID)
 	if err != nil {
 		return false, "", fmt.Errorf("check the session's lease: %w", err)
 	}
@@ -245,11 +244,8 @@ func (store *Store) pruneSession(sessionID string, cutoff time.Time) (removed bo
 	}
 	leaseHeld := true
 	letLeaseGo := func() {
-		if leaseHeld {
-			leaseHeld = false
-			unlockLease(lease)
-			_ = lease.Close()
-		}
+		leaseHeld = false
+		releaseLease()
 	}
 	defer letLeaseGo()
 	release, err := store.lockSessionWithoutLease(sessionID)

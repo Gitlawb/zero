@@ -361,13 +361,12 @@ func TestForkAndChildHoldTheParentTheyAreCreatedFrom(t *testing.T) {
 			createFinishedSession(t, root, "parent", "2026-06-01T00:00:00Z", "")
 			other := NewStore(StoreOptions{RootDir: root, Now: fixedClock("2026-06-01T00:00:00Z")})
 
-			lease, locked, err := pruneStore(root).acquireLeaseExclusive("parent")
+			release, locked, err := pruneStore(root).HoldExclusive("parent")
 			if err != nil || !locked {
 				t.Fatalf("take the parent's lease the way prune does: locked=%v, %v", locked, err)
 			}
 			err = create.do(other)
-			unlockLease(lease)
-			_ = lease.Close()
+			release()
 			if err == nil || !strings.Contains(err.Error(), "locked by zero sessions prune") {
 				t.Errorf("%s from a parent prune holds: err = %v, want it refused", create.name, err)
 			}
@@ -410,5 +409,40 @@ func TestPruneLetsGoOfTheLeaseBeforeRemovingTheDirectory(t *testing.T) {
 	}
 	if strings.Join(reached, ",") != "old" || strings.Join(pruneIDs(report.Removed), ",") != "old" || sessionDirExists(t, root, "old") {
 		t.Fatalf("reached %v and removed %v, want old reached and removed", reached, pruneIDs(report.Removed))
+	}
+}
+
+// Loading a session to continue it is refused while prune holds it, instead of
+// read without the lease, and the exec path does not fall back to the raw log on
+// that refusal.
+func TestResumeIsRefusedWhilePruneHoldsTheSession(t *testing.T) {
+	root := t.TempDir()
+	createFinishedSession(t, root, "old", "2026-06-01T00:00:00Z", "")
+	other := NewStore(StoreOptions{RootDir: root})
+
+	release, locked, err := pruneStore(root).HoldExclusive("old")
+	if err != nil || !locked {
+		t.Fatalf("take the lease the way prune does: locked=%v, %v", locked, err)
+	}
+	_, _, readErr := other.ReadRehydratedEventsWithPresence("old")
+	events, execErr := readExecContextEvents(other, "old")
+	release()
+	if !errors.Is(readErr, ErrPruning) {
+		t.Errorf("rehydrated read while prune holds the session: err = %v, want ErrPruning", readErr)
+	}
+	if !errors.Is(execErr, ErrPruning) || events != nil {
+		t.Errorf("exec context read while prune holds the session: %d events, err = %v, want it refused, not read from the raw log", len(events), execErr)
+	}
+
+	// Once prune lets go, the read succeeds and holds the session.
+	if _, err := other.ReadRehydratedEvents("old"); err != nil {
+		t.Fatalf("read once prune let go: %v", err)
+	}
+	report, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if reason := keptReason(report, "old"); reason != PruneKeptOpen {
+		t.Errorf("old kept for %q, want %q", reason, PruneKeptOpen)
 	}
 }

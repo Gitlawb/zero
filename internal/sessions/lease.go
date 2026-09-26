@@ -1,9 +1,11 @@
 package sessions
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // leaseFileName is the file whose lock says a process has the session open.
@@ -21,26 +23,33 @@ func (store *Store) leasePath(sessionID string) string {
 // open, and an idle open session looked exactly like an abandoned one. Hold takes
 // a shared lock on the session's lease file and keeps it for the life of the
 // process; prune takes the same lock exclusively and leaves alone any session it
-// cannot get. Every write holds its session this way (lockSession), and so does
-// every rehydrated read, which is how the TUI, `exec --resume` and ACP load a
-// session in order to continue it. Fork and CreateChild hold the parent they
-// read from (holdParent).
+// cannot get. Every write holds its session this way (lockSession).
 //
-// It never waits and never fails its caller. A lease that cannot be taken,
+// Hold never waits and never fails its caller. A lease that cannot be taken,
 // because the session directory is gone or prune holds it at this moment, only
-// means prune cannot see this process; the operation that asked carries on and
-// meets a removed session on its own terms.
+// means prune cannot see this process, and that is enough for a write: it lands
+// under session.lock, where prune checks the session again, so either prune sees
+// the write and keeps the session or the write finds the session gone. A read
+// changes nothing prune checks, so the reads that continue a session, and the
+// creations that read a parent, use holdOrRefuse instead.
 func (store *Store) Hold(sessionID string) {
 	store.hold(sessionID)
 }
 
-// holdParent holds the session a new one is about to be created under, before
-// it is read. A parent that prune is checking or removing at this moment is
-// refused rather than read: a session created under it would outlive it, and
+// ErrPruning is returned, wrapped, when a process tries to continue a session,
+// or to create a session under it, while zero sessions prune holds it.
+var ErrPruning = errors.New("locked by zero sessions prune; try again")
+
+// holdOrRefuse holds a session that is about to be read in order to continue it
+// (the rehydrated read behind the TUI's resume, exec --resume and --fork, and
+// ACP's session/load and session/resume) or to create a session under it (Fork,
+// CreateChild). When prune holds it at this moment the caller is refused rather
+// than left to read it without the lease: prune could then remove a session
+// this process goes on to use, or one a new session is created under, whose
 // Lineage and Tree fail on a missing ancestor.
-func (store *Store) holdParent(parentSessionID string) error {
-	if store.hold(parentSessionID) {
-		return fmt.Errorf("zero session %s is locked by zero sessions prune; try again", parentSessionID)
+func (store *Store) holdOrRefuse(sessionID string) error {
+	if store.hold(sessionID) {
+		return fmt.Errorf("zero session %s is %w", sessionID, ErrPruning)
 	}
 	return nil
 }
@@ -91,18 +100,30 @@ func (store *Store) Release(sessionID string) {
 	_ = file.Close()
 }
 
-// acquireLeaseExclusive takes the lease exclusively for as long as prune is
-// removing the session, so no process can open it part way through. It reports
-// false, holding nothing, when a lease is already held.
-func (store *Store) acquireLeaseExclusive(sessionID string) (*os.File, bool, error) {
+// HoldExclusive takes sessionID's lease exclusively without waiting, which is how
+// prune keeps every other process out of a session while it checks or removes
+// it. It reports false, holding nothing, when any process holds the lease. While
+// it is held, Hold takes nothing and holdOrRefuse refuses. release lets it go,
+// and does nothing after the first call.
+func (store *Store) HoldExclusive(sessionID string) (release func(), locked bool, err error) {
+	nothing := func() {}
+	if !ValidSessionID(sessionID) {
+		return nothing, false, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
 	file, err := openLeaseFile(store.leasePath(sessionID))
 	if err != nil {
-		return nil, false, err
+		return nothing, false, err
 	}
-	locked, err := tryLockLease(file, true)
+	locked, err = tryLockLease(file, true)
 	if err != nil || !locked {
 		_ = file.Close()
-		return nil, false, err
+		return nothing, false, err
 	}
-	return file, true, nil
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			unlockLease(file)
+			_ = file.Close()
+		})
+	}, true, nil
 }

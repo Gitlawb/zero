@@ -301,6 +301,12 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	if operation == persistedSessionResume && historyErr != nil {
 		return nil, RPCError(codeInternalError, "restore session history: "+historyErr.Error())
 	}
+	// Load stays best effort about a history it cannot read, but not about one
+	// prune holds: publishing it would leave the client using a session prune may
+	// be removing, one this process could not hold open.
+	if errors.Is(historyErr, sessions.ErrPruning) {
+		return nil, RPCError(codeInternalError, historyErr.Error())
+	}
 	model, models, restrictModels, err := a.resolveModelChoices(ctx, root)
 	if err != nil {
 		return nil, RPCError(codeInternalError, "config: "+err.Error())
@@ -911,6 +917,11 @@ func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRec
 	events, eventLogPresent, err := a.deps.Store.ReadRehydratedEventsWithPresence(sessionID)
 	var rehydrateWarning error
 	if err != nil {
+		if errors.Is(err, sessions.ErrPruning) {
+			// Not a rehydration failure: the raw read would continue the session
+			// without holding it while zero sessions prune may be removing it.
+			return nil, nil, nil, err
+		}
 		rehydrateWarning = err
 		events, eventLogPresent, err = a.deps.Store.ReadEventsWithPresence(sessionID)
 		if err != nil {
