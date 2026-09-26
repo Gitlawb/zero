@@ -959,6 +959,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
+	// From the engine the session's commands run through, so the notice
+	// describes the sandbox they actually get.
+	startupNotices := []string{sandboxEngine.DegradedNotice()}
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
 		Version:              version,
@@ -1046,6 +1049,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		PermissionMode:            permissionMode,
 		Notify:                    resolved.Notify,
 		KeyBindings:               resolved.KeyBindings,
+		StartupNotices:            startupNotices,
 		STT:                       resolved.STT,
 		BuildDictationTranscriber: newDictationTranscriberFactory(resolved, userConfigPath, sttServerManager),
 		ShutdownDictationServer:   sttServerManager.Shutdown,
