@@ -71,12 +71,13 @@ func (result formatOnWriteResult) notice(relativePath string) string {
 //
 // STDIN ADAPTERS READ THE WRITTEN BYTES ON STDIN AND PRINT THE FORMATTED RESULT
 // TO STDOUT. That route lets filenameFlag carry the logical destination path,
-// so any rule written against the file's own path (.clang-format-ignore, an
-// .editorconfig section, rustfmt's ignore) still resolves against the file the
-// caller named instead of a random staging name. Physical adapters have no
-// such option: they are handed a private staging copy inside an owner-only
-// sibling directory (including auxiliary files) and keep the destination
-// directory as their working directory.
+// so a rule written against the file's own path is aimed at the name the
+// caller used instead of a random staging name. Aiming the rule at that name
+// does not make a path exclusion apply to a file that does not exist yet; see
+// formatterCommands. Physical adapters have no such option: they are handed a
+// private staging copy inside an owner-only sibling directory (including
+// auxiliary files) and keep the destination directory as their working
+// directory.
 type formatterAdapter struct {
 	argv []string
 	// stdin selects the stdin/stdout route. When false the private staging path
@@ -86,14 +87,28 @@ type formatterAdapter struct {
 	// stdin adapter. It is emitted as "--flag=<target>" and empty when the
 	// formatter resolves its configuration from the working directory alone.
 	filenameFlag string
+	// stdinArg is appended after filenameFlag, and must not also be stored in
+	// argv: a "-" kept in argv would be emitted before the filename flag.
+	// For Ruff, "-" serves as an explicit, defensive marker ensuring input is read
+	// from standard input when invoked as `ruff format --stdin-filename=<path> -`.
+	// Empty for formatters that read stdin when given no path.
+	stdinArg string
 }
 
 // formatterCommands maps a file extension to its formatter. A missing binary
 // silently skips formatting.
+//
+// PATH EXCLUSIONS DO NOT APPLY ON THE FIRST WRITE OF A NEW FILE. The stdin
+// adapters pass the logical destination, but a formatter that consults its
+// ignore file only when that path already exists (clang-format and
+// .clang-format-ignore) formats a not-yet-created file even when the path
+// matches an exclusion. An overwrite still finds the previous file at that
+// path, so the same rule can apply. TestFormatOnWritePathIgnoreDoesNotApplyToNewFiles
+// pins this split; it is the contract, not an oversight.
 var formatterCommands = map[string]formatterAdapter{
 	".go":    {argv: []string{"gofmt"}, stdin: true},
 	".rs":    {argv: []string{"rustfmt"}, stdin: true},
-	".py":    {argv: []string{"ruff", "format", "--quiet"}, stdin: true, filenameFlag: "--stdin-filename"},
+	".py":    {argv: []string{"ruff", "format", "--quiet"}, stdin: true, filenameFlag: "--stdin-filename", stdinArg: "-"},
 	".ts":    {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
 	".tsx":   {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
 	".js":    {argv: []string{"prettier", "--log-level", "silent"}, stdin: true, filenameFlag: "--stdin-filepath"},
@@ -142,11 +157,11 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 // maybeFormatWrittenFileScoped runs the configured formatter over a transient
 // copy of the written bytes (stdin, or a private staging file) and returns the
 // bytes to publish. The destination is never opened or rewritten here. If
-// absolutePath does not resolve inside one of the scope's write roots, the
-// formatting is refused and the written bytes pass through unchanged: a
-// formatter must not be able to read or write outside the same roots the tool
-// itself is confined to. The formatter's working directory is pinned inside the
-// matched root for the same reason.
+// absolutePath does not resolve inside one of the scope's write roots,
+// formatting is refused and the written bytes pass through unchanged. That
+// refusal is the pre-launch path check in openFormattedFileRoot. The
+// formatter's working directory is a path string derived from that check, not
+// a directory handle the subprocess is bound to.
 func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, scope PathScope, absolutePath string, writtenContent string) formatOnWriteResult {
 	unformatted := formatOnWriteResult{Content: writtenContent}
 	if !formatOnWriteEnabled() {
@@ -172,10 +187,19 @@ func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, sco
 	return formatWithStaging(ctx, adapter, binaryPath, absolutePath, writtenContent, workDir)
 }
 
-// openFormattedFileRoot resolves absolutePath against the scope's write roots
-// and opens the first root that contains it. It returns the descriptor-bound
-// root and the path relative to it, or an error when the path lies outside
-// every allowed root.
+// openFormattedFileRoot checks, before a formatter subprocess is started, that
+// absolutePath resolves inside one of the scope's write roots. It resolves
+// each configured root, applies a lexical prefix check to the candidate path
+// (previously validated by resolveScopedTargetPath), and opens the first root
+// containing it. It returns that root and the path relative to it, or an error
+// when the path lies outside every allowed root.
+//
+// The caller does not use the root as a handle for formatter I/O. It joins
+// root.Name() with the relative directory and passes that string as
+// exec.Cmd.Dir. The check is therefore a pre-launch lexical path check, not
+// descriptor-level confinement of the subprocess: a symlink or Windows junction
+// swapped onto a component of that directory between the check and process start
+// is not excluded, and there is no portable way to hand Cmd.Dir a directory handle.
 func openFormattedFileRoot(workspaceRoot string, scope PathScope, absolutePath string) (*os.Root, string, error) {
 	roots, err := scopedRoots(workspaceRoot, scope)
 	if err != nil {
@@ -272,6 +296,9 @@ func formatWithStdin(ctx context.Context, adapter formatterAdapter, binaryPath, 
 	arguments := append([]string(nil), adapter.argv[1:]...)
 	if adapter.filenameFlag != "" {
 		arguments = append(arguments, adapter.filenameFlag+"="+absolutePath)
+	}
+	if adapter.stdinArg != "" {
+		arguments = append(arguments, adapter.stdinArg)
 	}
 	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
 	formatter.Dir = dir

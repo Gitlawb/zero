@@ -229,7 +229,9 @@ func TestFormatOnWritePrettierUsesDestinationFilename(t *testing.T) {
 //
 // A stdin adapter receives the logical destination through its filename flag,
 // so a .clang-format-ignore pattern, an .editorconfig section, or rustfmt's
-// ignore still matches "vendor/lib.hintfmt" rather than a random staging name.
+// ignore is aimed at "vendor/lib.hintfmt" rather than a random staging name.
+// Whether the formatter consults that rule for a path that does not exist yet
+// is a separate contract; see TestFormatOnWritePathIgnoreDoesNotApplyToNewFiles.
 func TestFormatOnWritePassesLogicalDestinationToStdinFormatter(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake formatter shim is a POSIX script")
@@ -263,6 +265,85 @@ func TestFormatOnWritePassesLogicalDestinationToStdinFormatter(t *testing.T) {
 	if strings.Contains(args, ".zero-fmt-") {
 		t.Fatalf("formatter args %q leaked a staging path instead of the destination", args)
 	}
+}
+
+// PATH EXCLUSIONS DO NOT APPLY TO A FILE THAT DOES NOT EXIST YET.
+//
+// clang-format consults .clang-format-ignore only when --assume-filename names
+// a path that is already on disk. Formatting runs before publication, so the
+// first write of a new file is formatted even when that path would match an
+// exclusion. An overwrite still finds the previous file: the formatter prints
+// nothing, and the empty-output guard keeps the written bytes. Depositing the
+// bytes at the destination before the formatter runs would make the subsequent
+// exclusive create fail, so this split is the contract.
+func TestFormatOnWritePathIgnoreDoesNotApplyToNewFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake formatter shim is a POSIX script")
+	}
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	installExistenceGatedFormatter(t, ".ignfmt", "ignfmt", "--assume-filename")
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "vendor", "lib.ignfmt")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const written = "unformatted\n"
+	created := maybeFormatWrittenFile(context.Background(), target, written)
+	if created.Content != "REFORMATTED\n" {
+		t.Fatalf("a new file must be formatted even when its path would be ignored, got %q", created.Content)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("formatting a new file must not create it ahead of publication: %v", err)
+	}
+
+	if err := os.WriteFile(target, []byte("previous\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overwritten := maybeFormatWrittenFile(context.Background(), target, written)
+	if overwritten.Content != written {
+		t.Fatalf("an existing ignored path must keep the written bytes, got %q", overwritten.Content)
+	}
+	onDisk, err := os.ReadFile(target)
+	if err != nil || string(onDisk) != "previous\n" {
+		t.Fatalf("formatter must not rewrite the destination, got %q, %v", onDisk, err)
+	}
+}
+
+// installExistenceGatedFormatter registers a stdin formatter that honours a
+// path exclusion only when the assumed path already exists, matching
+// clang-format's .clang-format-ignore behaviour (where existing ignored files
+// have their input returned unchanged). A missing path is reformatted.
+func installExistenceGatedFormatter(t *testing.T, extension, name, filenameFlag string) {
+	t.Helper()
+	directory := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"path=\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in\n" +
+		"    " + filenameFlag + "=*) path=${arg#" + filenameFlag + "=} ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"if [ -n \"$path\" ] && [ -e \"$path\" ]; then\n" +
+		"  cat\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"cat >/dev/null\n" +
+		"printf 'REFORMATTED\\n'\n"
+	if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	previous, existed := formatterCommands[extension]
+	formatterCommands[extension] = formatterAdapter{argv: []string{name}, stdin: true, filenameFlag: filenameFlag}
+	t.Cleanup(func() {
+		if existed {
+			formatterCommands[extension] = previous
+			return
+		}
+		delete(formatterCommands, extension)
+	})
 }
 
 // THE PRODUCTION TABLE MUST CARRY THE HINTS, NOT ONLY THE TEST SEAM.
@@ -674,6 +755,68 @@ func installFakePhysicalFormatter(t *testing.T, extension, name, record string) 
 		}
 		delete(formatterCommands, extension)
 	})
+}
+
+// RUFF MUST READ STDIN WITH AN EXPLICIT TERMINAL MARKER.
+//
+// The stdin route passes an explicit "-" marker after --stdin-filename,
+// ensuring Ruff strictly reads input from stdin as documented.
+func TestFormatOnWriteRuffPassesTerminalStdinMarker(t *testing.T) {
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	adapter := formatterCommands[".py"]
+	if !adapter.stdin || adapter.filenameFlag != "--stdin-filename" || adapter.stdinArg != "-" {
+		t.Fatalf("ruff adapter = %+v, want stdin with --stdin-filename and stdinArg %q", adapter, "-")
+	}
+
+	directory := t.TempDir()
+	binaryName := "ruff" + formatterScriptExtension()
+	script := "#!/bin/sh\ncat\n"
+	if runtime.GOOS == "windows" {
+		script = "@echo off\r\nexit /b 0\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(directory, binaryName), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var seen *exec.Cmd
+	previous := formatterCommandObserver
+	formatterCommandObserver = func(command *exec.Cmd) { seen = command }
+	t.Cleanup(func() { formatterCommandObserver = previous })
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "pkg", "new_file.py")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = maybeFormatWrittenFile(context.Background(), target, "x=1\n")
+	if seen == nil {
+		t.Fatal("ruff was not executed")
+	}
+	args := seen.Args
+	if len(args) == 0 || args[len(args)-1] != "-" {
+		t.Fatalf("ruff execution args %q must end with the stdin marker \"-\"", args)
+	}
+	dashes := 0
+	flagAt := -1
+	wantFlag := "--stdin-filename=" + target
+	for i, arg := range args {
+		if arg == "-" {
+			dashes++
+		}
+		if arg == wantFlag {
+			flagAt = i
+		}
+		if arg == target {
+			t.Fatalf("ruff execution args %q pass the path as a file operand; the stdin route must not", args)
+		}
+	}
+	if dashes != 1 {
+		t.Fatalf("ruff execution args %q must contain exactly one stdin marker", args)
+	}
+	if flagAt < 0 || flagAt >= len(args)-1 {
+		t.Fatalf("ruff execution args %q must carry %q before the terminal \"-\"", args, wantFlag)
+	}
 }
 
 func TestFormatOnWriteRuffUsesLogicalDestinationForWriteAndEdit(t *testing.T) {
