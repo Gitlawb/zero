@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRedactStringRedactsAdjacentAWSKeys(t *testing.T) {
@@ -163,4 +164,24 @@ func containsCircular(v any) bool {
 		}
 	}
 	return false
+}
+
+func TestRedactStringLongAdjacentKeyRunCompletesPromptly(t *testing.T) {
+	// A long run of glued AWS keys must not blow up the span-chaining loop in
+	// redactAdjacent: the outer loop is bounded to the original match count,
+	// so appended spans are never re-chained. On the old code this input
+	// grows the span list exponentially and never finishes.
+	// The key is assembled at runtime so the literal never appears in source.
+	// gitleaks:allow -- synthetic redaction fixture below
+	key := "AKIA" + strings.Repeat("A", 16)
+	const count = 64
+	input := strings.Repeat(key, count)
+	start := time.Now()
+	got := RedactString(input, Options{})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("RedactString took %v on %d glued keys", elapsed, count)
+	}
+	if want := strings.Repeat(RedactedSecret, count); got != want {
+		t.Fatalf("expected %d redaction markers, got %d", count, strings.Count(got, RedactedSecret))
+	}
 }

@@ -121,7 +121,12 @@ var anchoredSecretPatterns = func() []*regexp.Regexp {
 // followed to the end.
 func redactAdjacent(s string, pattern, anchored *regexp.Regexp, replacement string) string {
 	spans := pattern.FindAllStringIndex(s, -1)
-	for i := 0; i < len(spans); i++ {
+	// Bound the outer loop to the original match count. The inner loop
+	// appends chained spans to the same slice; re-reading len(spans) would
+	// re-chain every appended span, growing the span count (and the
+	// FindStringIndex calls) exponentially on long glued runs.
+	n := len(spans)
+	for i := 0; i < n; i++ {
 		end := spans[i][1]
 		for end < len(s) {
 			loc := anchored.FindStringIndex(s[end:])
