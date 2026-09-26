@@ -6,6 +6,29 @@ import (
 	"testing"
 )
 
+func TestRedactStringRedactsAdjacentAWSKeys(t *testing.T) {
+	// Two AWS keys glued end to end have no word boundary between them, so a
+	// plain \b-anchored pattern only matches the first. Both must be redacted.
+	// gitleaks:allow -- synthetic redaction fixtures below
+	key1 := "AKIAIOSFODNN7EXAMPLE"
+	key2 := "ASIAIOSFODNN7EXAMPLE"
+	input := key1 + key2
+	if got := RedactString(input, Options{}); got != RedactedSecret+RedactedSecret {
+		t.Fatalf("adjacent AWS keys not both redacted: got %q", got)
+	}
+
+	// Three glued keys chain as well.
+	input3 := key1 + key2 + key1
+	if got := RedactString(input3, Options{}); got != RedactedSecret+RedactedSecret+RedactedSecret {
+		t.Fatalf("three adjacent AWS keys not all redacted: got %q", got)
+	}
+
+	// A mid-word AKIA that does not abut a redacted span still must not match.
+	if got := RedactString("prefixAKIAIOSFODNN7EXAMPLE", Options{}); got != "prefixAKIAIOSFODNN7EXAMPLE" {
+		t.Fatalf("mid-word AKIA should not be redacted: got %q", got)
+	}
+}
+
 func TestRedactStringCoversCommonSecretShapes(t *testing.T) {
 	input := strings.Join([]string{
 		`{"apiKey":"sk-proj-abcdefghijklmnopqrstuvwxyz"}`,
