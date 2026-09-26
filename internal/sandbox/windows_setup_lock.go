@@ -52,6 +52,11 @@ var (
 	// as the barrier that proves a second setup is queued behind the first without
 	// sleeping and hoping.
 	windowsSandboxSetupLockContendedHook func()
+
+	// The two halves of a release, as variables so a test can make either one
+	// fail. Production uses the real calls.
+	windowsSandboxSetupUnlock    = unlockGrantFile
+	windowsSandboxSetupLockClose = func(file *os.File) error { return file.Close() }
 )
 
 // errWindowsSandboxSetupBusy is returned when another setup for the same home
@@ -60,10 +65,17 @@ var errWindowsSandboxSetupBusy = errors.New("another `zero sandbox setup` for th
 
 // lockWindowsSandboxSetup takes the per-home setup lock and returns its release.
 //
+// The release REPORTS. It used to discard both the unlock and the close, and
+// setup defers it after publishing the marker, so an operator was told setup
+// succeeded without anything knowing whether the lock had been let go. Closing
+// the handle ordinarily releases the lock even when the explicit unlock failed,
+// so this is rarely more than a reporting gap, but setup does not get to report
+// success over a release it could not confirm. Reported by @jatmn.
+//
 // The lock file is never removed. Unlinking a lock file while another process is
 // waiting on it lets a third one create a fresh file at the same name and hold
 // "the lock" alongside the first, which is the failure this exists to prevent.
-func lockWindowsSandboxSetup(sandboxHome string) (func(), error) {
+func lockWindowsSandboxSetup(sandboxHome string) (func() error, error) {
 	sandboxHome = strings.TrimSpace(sandboxHome)
 	if sandboxHome == "" {
 		return nil, errors.New("windows sandbox setup requires a sandbox home to lock")
@@ -85,9 +97,8 @@ func lockWindowsSandboxSetup(sandboxHome string) (func(), error) {
 			return nil, fmt.Errorf("lock the sandbox setup lock %s: %w", lockPath, lockErr)
 		}
 		if locked {
-			return func() {
-				_ = unlockGrantFile(file)
-				_ = file.Close()
+			return func() error {
+				return releaseWindowsSandboxSetupLock(file, lockPath)
 			}, nil
 		}
 		if !announced {
@@ -103,4 +114,17 @@ func lockWindowsSandboxSetup(sandboxHome string) (func(), error) {
 		}
 		time.Sleep(windowsSandboxSetupLockRetry)
 	}
+}
+
+// releaseWindowsSandboxSetupLock unlocks and closes, always both, and reports
+// whichever failed.
+func releaseWindowsSandboxSetupLock(file *os.File, lockPath string) error {
+	var failures []error
+	if err := windowsSandboxSetupUnlock(file); err != nil {
+		failures = append(failures, fmt.Errorf("unlock the sandbox setup lock %s: %w", lockPath, err))
+	}
+	if err := windowsSandboxSetupLockClose(file); err != nil {
+		failures = append(failures, fmt.Errorf("close the sandbox setup lock %s: %w", lockPath, err))
+	}
+	return errors.Join(failures...)
 }

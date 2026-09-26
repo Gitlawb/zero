@@ -24,7 +24,7 @@ var (
 	windowsSetupApplyNetworkPlan = applyWindowsNetworkPlan
 )
 
-func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) int {
+func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) (code int) {
 	// Do not provision DenyRead ACLs for a token mode that cannot launch normal
 	// tools with DenyRead under the narrow restricting-SID set (PR #640).
 	if err := windowsDenyReadRestrictedTokenUnsupportedProfile(config.PermissionProfile); err != nil {
@@ -87,7 +87,15 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+lockErr.Error())
 		return 1
 	}
-	defer unlockSetup()
+	defer func() {
+		// Released after whichever return below ran, so a failed release is
+		// reported on top of that result, and a setup that could not confirm it
+		// let go of the lock does not exit 0. See lockWindowsSandboxSetup.
+		if releaseErr := unlockSetup(); releaseErr != nil {
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+releaseErr.Error())
+			code = 1
+		}
+	}()
 
 	// HOLD THE SELECTED ROOT FOR THE WHOLE TRANSACTION.
 	//

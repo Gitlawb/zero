@@ -276,7 +276,9 @@ func TestSetupReportsABusySandboxHomeAndChangesNothing(t *testing.T) {
 	}
 	config := preparedWindowsSetupConfig(t, workspace, home, bareWindowsProfile(workspace))
 	code, output := runWindowsSetupTransaction(config)
-	release()
+	if err := release(); err != nil {
+		t.Fatalf("release the held setup lock: %v", err)
+	}
 
 	if code == 0 {
 		t.Fatal("setup went ahead while another setup held the sandbox home")

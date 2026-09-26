@@ -409,7 +409,7 @@ func BuildWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 // re-open the runtime root by name afterwards. See windowsACLStampRequest. This
 // entry point remains for callers that record a marker without applying an ACL
 // plan, where there is no handle to ride.
-func WriteWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSandboxSetupMarker, error) {
+func WriteWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (written WindowsSandboxSetupMarker, err error) {
 	marker, err := BuildWindowsSandboxSetupMarker(config)
 	if err != nil {
 		return WindowsSandboxSetupMarker{}, err
@@ -420,7 +420,11 @@ func WriteWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 	if err != nil {
 		return WindowsSandboxSetupMarker{}, err
 	}
-	defer unlock()
+	defer func() {
+		if releaseErr := unlock(); releaseErr != nil {
+			written, err = WindowsSandboxSetupMarker{}, errors.Join(err, releaseErr)
+		}
+	}()
 	// Stamped alongside the marker, because this is the one place setup records
 	// that it completed and the two have to be recorded together: a marker whose
 	// stamp is missing reports setup as current when the tree it provisioned is
