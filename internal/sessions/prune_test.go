@@ -198,6 +198,15 @@ func TestPruneLeavesASessionAnotherProcessHasOpen(t *testing.T) {
 			other := NewStore(StoreOptions{RootDir: root, Now: fixedClock("2026-07-01T00:00:00Z")})
 			open.do(t, other, "old")
 
+			// A dry run has to say so too, not list it as removable.
+			preview, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays, DryRun: true})
+			if err != nil {
+				t.Fatalf("dry run: %v", err)
+			}
+			if reason := keptReason(preview, "old"); reason != PruneKeptOpen || len(preview.Removed) != 0 {
+				t.Fatalf("dry run kept reason %q and would remove %v, want it kept as open", reason, pruneIDs(preview.Removed))
+			}
+
 			report, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays})
 			if err != nil {
 				t.Fatalf("Prune: %v", err)
