@@ -95,6 +95,8 @@ func TestShouldReconnectClassification(t *testing.T) {
 		// Windows socket aborts also remain reconnectable at connect time.
 		"wsarecv: An established connection was aborted by the software in your host machine",
 		"read: connection was aborted",
+		// Unix/macOS ECONNABORTED text.
+		"read: software caused connection abort",
 		"An existing connection was forcibly closed by the remote host",
 	}
 	for _, m := range disconnects {

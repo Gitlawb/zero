@@ -146,8 +146,12 @@ func shouldReconnect(ctx context.Context, err error) bool {
 		"unexpected end",
 		// Windows mid-stream aborts (WSAECONNABORTED / wsarecv) — host or AV
 		// forcibly closes an established socket during CollectStream.
+		// "software caused connection abort" is the Unix/macOS ECONNABORTED
+		// text; it also appears in midStreamAbortNeedles, which must stay a
+		// subset of this list.
 		"wsarecv",
 		"connection was aborted",
+		"software caused connection abort",
 		"forcibly closed",
 	} {
 		if strings.Contains(msg, needle) {
