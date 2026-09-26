@@ -331,6 +331,11 @@ zero update --check   check for newer releases
 zero upgrade          download, verify, and install the latest release
 ```
 
+Cron keeps the newest 1,000 run outcomes per job in `runs.jsonl`. Each new run
+atomically replaces the history with the retained tail; existing larger histories
+are trimmed on their next run. Archive the file before that run if you need older
+outcomes. This retention does not delete session directories or reset fire counts.
+
 ## Extending Zero
 
 ### Project and personal instructions
