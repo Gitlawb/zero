@@ -1898,7 +1898,7 @@ func TestModelPickerRowShowsOwnerInMixedGroups(t *testing.T) {
 	for _, group := range []string{"Recent", "Favorites"} {
 		for _, owner := range []string{"chatgpt", "openai", "work-openai"} {
 			for _, selected := range []bool{false, true} {
-				item := pickerItem{Group: group, Label: "GPT-5.6", Value: "gpt-5.6", Provider: "openai", OwnerProvider: owner, Favorite: group == "Favorites"}
+				item := pickerItem{Group: group, Label: "GPT-5.6", Value: "gpt-5.6", Provider: "openai", OwnerProvider: owner, OwnerLabel: owner, Favorite: group == "Favorites"}
 				want := owner + " · GPT-5.6"
 				if item.Favorite {
 					want = "* " + want
@@ -1917,12 +1917,33 @@ func TestModelPickerRowShowsOwnerInMixedGroups(t *testing.T) {
 }
 
 func TestModelPickerWidthIncludesOwner(t *testing.T) {
-	item := pickerItem{Group: "Recent", Label: strings.Repeat("m", 40), OwnerProvider: "subscription-profile", Favorite: true}
+	item := pickerItem{Group: "Recent", Label: strings.Repeat("m", 40), OwnerProvider: "subscription-profile", OwnerLabel: "subscription-profile", Favorite: true}
 	picker := &commandPicker{items: []pickerItem{item}}
 	width := modelPickerOverlayWidth(120, picker)
 	got := plainRender(t, renderModelPickerRow(width-4, false, item))
 	if want := "* subscription-profile · " + item.Label; !strings.Contains(got, want) {
 		t.Fatalf("row clipped at overlay width %d: %q, want %q", width, got, want)
+	}
+}
+
+// Profile names are unbounded; a long owner must not consume the model name
+// once the overlay reaches its maximum width.
+func TestModelPickerLongOwnerKeepsModelVisible(t *testing.T) {
+	owner := strings.Repeat("o", 70)
+	for _, group := range []string{"Recent", "Favorites"} {
+		for _, label := range []string{"GPT-5.6", strings.Repeat("m", 40)} {
+			item := pickerItem{Group: group, Label: label, Value: label, OwnerProvider: owner, OwnerLabel: owner, Favorite: group == "Favorites"}
+			wide := pickerItem{Group: "Recent", Label: strings.Repeat("w", 100)}
+			width := modelPickerOverlayWidth(200, &commandPicker{items: []pickerItem{item, wide}})
+			if width != modelPickerOverlayMaxWidth {
+				t.Fatalf("overlay width = %d, want the %d cap", width, modelPickerOverlayMaxWidth)
+			}
+			got := plainRender(t, renderModelPickerRow(width-4, false, item))
+			want := truncateDisplayWidth(owner, modelPickerOwnerMaxWidth) + " · " + label
+			if !strings.Contains(got, want) || !strings.Contains(want, "…") {
+				t.Fatalf("group=%s: row = %q, want %q with the owner capped", group, got, want)
+			}
+		}
 	}
 }
 

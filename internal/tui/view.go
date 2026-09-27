@@ -24,6 +24,10 @@ const (
 	pickerOverlayMinWidth       = 56
 	modelPickerOverlayMaxWidth  = 76
 	modelPickerOverlayMinWidth  = 58
+	// modelPickerOwnerMaxWidth caps the owner prefix on Recent/Favorites rows so
+	// even a favorite ("* ") at the maximum overlay width keeps over 40 cells for
+	// the model name.
+	modelPickerOwnerMaxWidth = 20
 )
 
 // layoutTier buckets the terminal width into the spec's adaptive tiers. It
@@ -1164,11 +1168,11 @@ func modelPickerRowLabel(item pickerItem) string {
 	if label == "" {
 		label = strings.TrimSpace(item.Value)
 	}
-	// Mixed-provider groups cannot convey ownership through their header.
-	if item.Group == "Recent" || item.Group == "Favorites" {
-		if owner := strings.TrimSpace(item.OwnerProvider); owner != "" {
-			label = owner + " · " + label
-		}
+	// Mixed-provider groups cannot convey ownership through their header. Profile
+	// names are unbounded, so cap the owner to keep the model name visible within
+	// the overlay's maximum width.
+	if owner := strings.TrimSpace(item.OwnerLabel); owner != "" {
+		label = truncateDisplayWidth(owner, modelPickerOwnerMaxWidth) + " · " + label
 	}
 	if item.Favorite {
 		label = "* " + label

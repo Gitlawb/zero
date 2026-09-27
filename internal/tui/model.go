@@ -4531,15 +4531,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
 		var switchPersistErr error
-		owner := strings.TrimSpace(item.OwnerProvider)
-		_, ownerIsSavedProvider := m.savedProviderByName(owner)
-		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
+		// The row's owner label is derived from the same decision, so it always
+		// names the provider used here.
+		if owner := m.modelPickerSwitchOwner(item); owner != "" {
 			// A model from another saved provider: switch provider + model together.
 			m, text, _, cmd, switchPersistErr = m.switchProviderModel(owner, item.Value)
 		} else {
-			// OwnerProvider is blank, matches the active provider, or (registry-fallback
-			// / stale-history rows) doesn't resolve to any saved provider: apply against
-			// the active provider instead of attempting an unresolvable provider switch.
+			// Apply against the active provider instead of attempting an
+			// unresolvable provider switch.
 			m, text, switchPersistErr = m.handleModelCommand(item.Value)
 		}
 		if m.providerName != previousProvider || m.modelName != previousModel {

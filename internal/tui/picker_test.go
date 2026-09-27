@@ -1351,6 +1351,75 @@ func TestModelPickerListsAllSavedProviders(t *testing.T) {
 	}
 }
 
+// A Recent or Favorites row's owner label must name the provider Enter actually
+// uses. A history owner that was renamed or removed no longer resolves, so
+// selection falls back to the active provider; the label must follow it rather
+// than show the stale name.
+func TestModelPickerOwnerLabelMatchesSelectedProvider(t *testing.T) {
+	const staleModel = "anthropic/claude-sonnet-4.5"
+	for _, group := range []string{"Recent", "Favorites"} {
+		t.Run(group, func(t *testing.T) {
+			active := config.ProviderProfile{
+				Name:         "openrouter",
+				CatalogID:    "openrouter",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				Model:        "google/gemini-2.5-pro",
+				APIKeyEnv:    "OPENROUTER_API_KEY",
+				BaseURL:      "https://openrouter.ai/api/v1",
+				APIFormat:    "chat-completions",
+			}
+			options := Options{
+				ProviderName:    "openrouter",
+				ModelName:       "google/gemini-2.5-pro",
+				Provider:        &fakeProvider{},
+				ProviderProfile: active,
+				SavedProviders:  []config.ProviderProfile{active, {Name: "xai", CatalogID: "xai", Model: "grok-4"}},
+				// "chatgpt" was removed after this model was used from it.
+				RecentModels: []config.RecentModelEntry{
+					{Provider: "chatgpt", Model: staleModel},
+					{Provider: "xai", Model: "grok-4"},
+				},
+				NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					return &fakeProvider{}, nil
+				},
+			}
+			if group == "Favorites" {
+				options.FavoriteModels = []string{staleModel}
+			}
+			m := newModel(context.Background(), options)
+			m.picker = m.newModelPicker()
+			if m.picker == nil {
+				t.Fatal("expected model picker")
+			}
+			target := -1
+			for index, item := range m.picker.items {
+				if item.Group == group && item.Value == staleModel {
+					target = index
+				}
+				if item.Group == "Recent" && item.Value == "grok-4" && item.OwnerLabel != "xai" {
+					t.Fatalf("resolvable owner label = %q, want xai", item.OwnerLabel)
+				}
+			}
+			if target < 0 {
+				t.Fatalf("expected %s row for %s, got %#v", group, staleModel, m.picker.items)
+			}
+			if got := m.picker.items[target].OwnerLabel; got != "openrouter" {
+				t.Fatalf("stale owner label = %q, want the active provider", got)
+			}
+			row := plainRender(t, renderModelPickerRow(60, false, m.picker.items[target]))
+			assertContains(t, row, "openrouter · ")
+			assertNotContains(t, row, "chatgpt")
+
+			m.picker.selected = target
+			updated, _ := m.Update(testKey(tea.KeyEnter))
+			m = updated.(model)
+			if m.providerName != "openrouter" || m.modelName != staleModel {
+				t.Fatalf("selection used %s/%s, want the labeled provider openrouter/%s", m.providerName, m.modelName, staleModel)
+			}
+		})
+	}
+}
+
 func pickerGroups(items []pickerItem) []string {
 	groups := []string{}
 	seen := map[string]bool{}

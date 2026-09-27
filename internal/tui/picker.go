@@ -48,9 +48,13 @@ type pickerItem struct {
 	// /model picker can switch providers when a model from a non-active provider is
 	// chosen. Empty for non-model items.
 	OwnerProvider string
-	Remote        bool
-	Local         bool
-	Favorite      bool
+	// OwnerLabel names the provider Enter will actually use for a row in a
+	// mixed-provider group (Recent, Favorites), whose section header cannot
+	// convey it. Empty for provider-grouped rows.
+	OwnerLabel string
+	Remote     bool
+	Local      bool
+	Favorite   bool
 }
 
 // commandPicker is a generic single-select overlay reused by /model and /effort
@@ -462,6 +466,30 @@ func pickerItemDedupKey(item pickerItem) string {
 	return item.Value
 }
 
+// modelPickerSwitchOwner returns the saved provider that choosing item switches
+// to, or "" when the model is applied to the active provider: the owner is
+// blank, is the active provider, or (registry-fallback / stale-history rows
+// after a rename or removal) no longer resolves to a saved provider.
+func (m model) modelPickerSwitchOwner(item pickerItem) string {
+	owner := strings.TrimSpace(item.OwnerProvider)
+	if owner == "" || strings.EqualFold(owner, strings.TrimSpace(m.providerName)) {
+		return ""
+	}
+	if _, ok := m.savedProviderByName(owner); !ok {
+		return ""
+	}
+	return owner
+}
+
+// modelPickerEffectiveOwner names the provider choosing item will use, so a
+// row's owner label never promises a provider that selection falls back from.
+func (m model) modelPickerEffectiveOwner(item pickerItem) string {
+	if owner := m.modelPickerSwitchOwner(item); owner != "" {
+		return owner
+	}
+	return strings.TrimSpace(m.providerName)
+}
+
 func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
 	result := []pickerItem{}
 	// Favorites keep the pre-provider-aware semantics: one row per favorited
@@ -476,6 +504,7 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 			}
 			item.Group = "Favorites"
 			item.Favorite = true
+			item.OwnerLabel = m.modelPickerEffectiveOwner(item)
 			result = append(result, item)
 			favoriteSeen[item.Value] = true
 		}
@@ -498,6 +527,7 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 		}
 		item.Group = "Recent"
 		item.Favorite = m.favoriteModels[item.Value]
+		item.OwnerLabel = m.modelPickerEffectiveOwner(item)
 		result = append(result, item)
 		seen[key] = true
 	}
