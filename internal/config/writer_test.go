@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -49,7 +50,7 @@ func TestWriteConfigDataSync(t *testing.T) {
 				if got != dir || tmp == nil {
 					t.Fatalf("directory sync = %q, temp = %v", got, tmp)
 				}
-				if _, err := tmp.Stat(); !errors.Is(err, os.ErrClosed) {
+				if _, err := tmp.Seek(0, io.SeekCurrent); !errors.Is(err, os.ErrClosed) {
 					t.Fatalf("temp must be closed before directory sync: %v", err)
 				}
 				checkData(path, newData)
@@ -75,7 +76,7 @@ func TestWriteConfigDataSync(t *testing.T) {
 				t.Fatalf("sync calls = %v, want %v", calls, wantCalls)
 			}
 			checkData(path, wantData)
-			if _, err := tmp.Stat(); !errors.Is(err, os.ErrClosed) {
+			if _, err := tmp.Seek(0, io.SeekCurrent); !errors.Is(err, os.ErrClosed) {
 				t.Fatalf("temp must be closed on return: %v", err)
 			}
 			entries, err := os.ReadDir(dir)
@@ -86,18 +87,70 @@ func TestWriteConfigDataSync(t *testing.T) {
 	}
 }
 
+func TestWriteConfigDataSyncsCreatedDirectories(t *testing.T) {
+	root := t.TempDir()
+	outer := filepath.Join(root, "a")
+	dir := filepath.Join(outer, "b")
+	path := filepath.Join(dir, "config.json")
+	failure := errors.New("injected sync failure")
+	dirSync := syncConfigDirFn
+	t.Cleanup(func() { syncConfigDirFn = dirSync })
+
+	for _, fail := range []bool{false, true} {
+		var calls []string
+		syncConfigDirFn = func(got string) error {
+			calls = append(calls, got)
+			if fail && got == root {
+				return failure
+			}
+			return dirSync(got)
+		}
+		if err := os.RemoveAll(outer); err != nil {
+			t.Fatal(err)
+		}
+		err := writeConfigData(path, []byte(`{}`))
+		if fail {
+			if !errors.Is(err, failure) {
+				t.Fatalf("error = %v, want injected sync failure", err)
+			}
+			if want := []string{outer, root}; !reflect.DeepEqual(calls, want) {
+				t.Fatalf("sync calls = %v, want %v", calls, want)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("config must not be written after a failed directory sync: %v", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Each new directory's entry is synced into its parent, then the
+		// config's own directory after the rename.
+		if want := []string{outer, root, dir}; !reflect.DeepEqual(calls, want) {
+			t.Fatalf("sync calls = %v, want %v", calls, want)
+		}
+	}
+}
+
 func TestSyncConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := syncConfigDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	err := syncConfigDir(filepath.Join(dir, "missing"))
-	if runtime.GOOS == "windows" {
-		if err != nil {
-			t.Fatalf("Windows must skip directory sync: %v", err)
+	// A directory that cannot be opened is best effort, as in the sessions
+	// store: the rename has already happened, so the save is not a failure.
+	if err := syncConfigDir(filepath.Join(dir, "missing")); err != nil {
+		t.Fatalf("unopenable directory must be best effort: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		unreadable := filepath.Join(dir, "unreadable")
+		if err := os.Mkdir(unreadable, 0o300); err != nil {
+			t.Fatal(err)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("directory open error = %v, want not exist", err)
+		t.Cleanup(func() { _ = os.Chmod(unreadable, 0o700) })
+		if err := syncConfigDir(unreadable); err != nil {
+			t.Fatalf("write-only directory must be best effort: %v", err)
+		}
 	}
 }
 
