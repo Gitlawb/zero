@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -973,11 +974,57 @@ func writeConfigFile(path string, cfg FileConfig) error {
 	return writeConfigData(path, data)
 }
 
+// Sync seams allow tests to inject persistence failures at each barrier.
+var syncConfigFileFn = (*os.File).Sync
+var syncConfigDirFn = syncConfigDir
+
+// Windows cannot sync directory handles, and a directory that cannot be opened
+// (e.g. writable but not readable) cannot be synced either; rename durability
+// is best effort in both cases, matching the sessions store. Only a failed
+// Sync or Close is reported.
+func syncConfigDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	return errors.Join(d.Sync(), d.Close())
+}
+
+// missingConfigDirs lists dir and each ancestor that does not exist yet,
+// deepest first, so the entries MkdirAll creates can be synced into their
+// parents.
+func missingConfigDirs(dir string) []string {
+	var missing []string
+	for d := dir; ; {
+		if _, err := os.Lstat(d); !errors.Is(err, os.ErrNotExist) {
+			return missing
+		}
+		missing = append(missing, d)
+		parent := filepath.Dir(d)
+		if parent == d {
+			return missing
+		}
+		d = parent
+	}
+}
+
 func writeConfigData(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {
+		created := missingConfigDirs(dir)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create config directory %s: %w", dir, err)
+		}
+		// Persist each new directory entry so a crash cannot lose the
+		// directory, and with it the config, after a successful write.
+		for _, d := range created {
+			parent := filepath.Dir(d)
+			if err := syncConfigDirFn(parent); err != nil {
+				return fmt.Errorf("sync config directory %s: %w", parent, err)
+			}
 		}
 	}
 	if len(data) == 0 || data[len(data)-1] != '\n' {
@@ -999,11 +1046,19 @@ func writeConfigData(path string, data []byte) error {
 		_ = tmp.Close()
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
+	// Persist the complete contents before making the replacement visible.
+	if err := syncConfigFileFn(tmp); err != nil {
+		return fmt.Errorf("sync config %s: %w", path, errors.Join(err, tmp.Close()))
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	// The replacement is already visible if this fails; do not roll it back.
+	if err := syncConfigDirFn(dir); err != nil {
+		return fmt.Errorf("sync config directory %s: %w", dir, err)
 	}
 	return nil
 }
