@@ -53,6 +53,7 @@ const unavailableTestSandboxNotice = "[zero] Sandbox enforcement is degraded: Li
 
 func runExecWithSandbox(t *testing.T, args []string, backend func(sandbox.BackendOptions) sandbox.Backend, sandboxConfig config.SandboxConfig) (int, string, string) {
 	t.Helper()
+	isolateCLIUserState(t)
 	var stdout, stderr bytes.Buffer
 	cwd := t.TempDir()
 	exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
@@ -124,6 +125,39 @@ func TestExecSaysNothingWhenTheSandboxIsTurnedOff(t *testing.T) {
 	}
 }
 
+// launchTUIWithSandbox runs the root command the way a bare `zero` does, with
+// the sandbox backend pinned to the unavailable one, and returns the options the
+// TUI would have started with.
+func launchTUIWithSandbox(t *testing.T, sandboxConfig config.SandboxConfig) tui.Options {
+	t.Helper()
+	isolateCLIUserState(t)
+	var stdout, stderr bytes.Buffer
+	cwd := t.TempDir()
+	var launched tui.Options
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 12, Sandbox: sandboxConfig}, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			t.Fatal("newProvider should not be called without a resolved provider")
+			return nil, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
+		},
+		selectSandboxBackend: unavailableTestSandbox,
+		runTUI: func(_ context.Context, options tui.Options) int {
+			launched = options
+			return 0
+		},
+	})
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr %q", exitCode, stderr.String())
+	}
+	return launched
+}
+
 // The TUI shows the same notice when the session opens, taken from the engine
 // its commands run through.
 func TestTUILaunchCarriesTheDegradedNotice(t *testing.T) {
@@ -137,31 +171,7 @@ func TestTUILaunchCarriesTheDegradedNotice(t *testing.T) {
 		{name: "turned off", sandbox: config.SandboxConfig{Enabled: func() *bool { off := false; return &off }()}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			cwd := t.TempDir()
-			setCLIUserConfigRoot(t)
-			var launched tui.Options
-			exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
-				getwd: func() (string, error) { return cwd, nil },
-				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
-					return config.ResolvedConfig{MaxTurns: 12, Sandbox: testCase.sandbox}, nil
-				},
-				newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
-					t.Fatal("newProvider should not be called without a resolved provider")
-					return nil, nil
-				},
-				registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
-					return noopMCPRuntime{}, nil
-				},
-				selectSandboxBackend: unavailableTestSandbox,
-				runTUI: func(_ context.Context, options tui.Options) int {
-					launched = options
-					return 0
-				},
-			})
-			if exitCode != 0 {
-				t.Fatalf("exit code = %d, stderr %q", exitCode, stderr.String())
-			}
+			launched := launchTUIWithSandbox(t, testCase.sandbox)
 			var notices []string
 			for _, notice := range launched.StartupNotices {
 				if strings.TrimSpace(notice) != "" {
