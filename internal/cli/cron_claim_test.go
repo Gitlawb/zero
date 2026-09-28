@@ -130,8 +130,8 @@ func TestFireJobCompletionReadErrorDoesNotOverwriteState(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata := filepath.Join(root, job.ID, "metadata.json")
-	var stderr bytes.Buffer
-	fireJob(store, func() time.Time { return now }, job, io.Discard, &stderr,
+	var stdout, stderr bytes.Buffer
+	fireJob(store, func() time.Time { return now }, job, &stdout, &stderr,
 		func(_ []string, _, _ io.Writer) int {
 			// A corrupt read must not cause completion to replace unknown newer state
 			// with the stale pre-execution job. This works without permission tricks.
@@ -146,6 +146,9 @@ func TestFireJobCompletionReadErrorDoesNotOverwriteState(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "failed to persist job state") {
 		t.Fatalf("missing persistence warning: %s", stderr.String())
+	}
+	if want := "fired " + job.ID + " -> exit 0 (next: unknown)\n"; stdout.String() != want {
+		t.Fatalf("completion summary = %q; want %q", stdout.String(), want)
 	}
 	runs, err := store.Runs(job.ID)
 	if err != nil || len(runs) != 1 || runs[0].ExitCode != 0 {

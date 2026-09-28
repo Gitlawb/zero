@@ -208,11 +208,13 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 	if aerr := store.AppendRun(job.ID, rec); aerr != nil {
 		fmt.Fprintf(stderr, "warning: failed to record run for %s: %v\n", job.ID, aerr)
 	}
+	next := "unknown"
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: failed to persist job state for %s: %v\n", job.ID, err)
-		persisted = job
+	} else {
+		next = formatCronTime(persisted.NextRunAt)
 	}
-	fmt.Fprintf(stdout, "fired %s -> exit %d (next: %s)\n", job.ID, code, formatCronTime(persisted.NextRunAt))
+	fmt.Fprintf(stdout, "fired %s -> exit %d (next: %s)\n", job.ID, code, next)
 }
 
 // claimFire atomically claims a due job's fire under the per-job lock and reports
