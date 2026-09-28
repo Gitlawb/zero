@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,70 @@ import (
 
 	"github.com/Gitlawb/zero/internal/daemon/remote"
 )
+
+func TestProtectedReadOpenParentFallback(t *testing.T) {
+	for _, kind := range []string{"hard link", "sibling symlink", "escaping symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			ws := t.TempDir()
+			outside := t.TempDir()
+			path := filepath.Join(outside, "notes.txt")
+			token := filepath.Join(outside, "bridge-token")
+			if kind == "escaping symlink" {
+				token = filepath.Join(t.TempDir(), "bridge-token")
+			}
+			for name, content := range map[string]string{path: "ordinary notes\n", token: "bridge-secret\n"} {
+				if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(remote.EnvToken, "")
+			t.Setenv(remote.EnvTokenFile, token)
+			t.Setenv(remote.EnvTokenFileResolved, "")
+			t.Setenv(remote.EnvTokenFileIdentity, "")
+			// Exercise the fallback directly: callers have already authorized an
+			// extra root or spill file, but the workspace root cannot contain it.
+			if _, _, err := rootedPathWithin([]string{ws}, path); err == nil {
+				t.Fatal("fixture did not select the parent-directory fallback")
+			}
+			file, _, err := protectedReadOpen(path, ws)
+			if err != nil {
+				t.Fatalf("ordinary fallback read: %v", err)
+			}
+			content, readErr := io.ReadAll(file)
+			closeErr := file.Close()
+			if readErr != nil || closeErr != nil || string(content) != "ordinary notes\n" {
+				t.Fatalf("ordinary content = %q, read error = %v, close error = %v", content, readErr, closeErr)
+			}
+			// Replace the previously authorized ordinary path. A hard link or
+			// sibling symlink stays within the fallback root, so only the handle
+			// credential check can refuse it; an escaping symlink must also fail.
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "hard link":
+				err = os.Link(token, path)
+			case "sibling symlink":
+				err = os.Symlink(filepath.Base(token), path)
+			default:
+				err = os.Symlink(token, path)
+			}
+			if err != nil {
+				t.Skipf("%s unavailable: %v", kind, err)
+			}
+			file, info, err := protectedReadOpen(path, ws)
+			if file != nil {
+				file.Close()
+			}
+			if err == nil || file != nil || info != nil {
+				t.Fatalf("fallback returned a protected handle: file=%v info=%v err=%v", file, info, err)
+			}
+			if kind != "escaping symlink" && !strings.Contains(err.Error(), "remote bridge token and is never readable") {
+				t.Fatalf("wanted credential rejection, got %v", err)
+			}
+		})
+	}
+}
 
 // TestEngineLessRegistryMatrix drives every registry-dispatched tool that
 // names a path through the plain registry API (Registry.Run — no sandbox
