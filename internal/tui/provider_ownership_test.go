@@ -41,6 +41,8 @@ func setTUIUserConfigRoot(t *testing.T) string {
 func caseSiblingModel(t *testing.T, activeName string, builtProfiles *[]config.ProviderProfile) model {
 	t.Helper()
 	home := setTUIUserConfigRoot(t)
+	// Pin the backend as well as its path: keyring ignores the file path.
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
 	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 
