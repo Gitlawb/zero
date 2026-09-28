@@ -339,9 +339,26 @@ func TestPruneLeavesASessionAnotherProcessJustCreated(t *testing.T) {
 	}
 }
 
-// A fork or child session holds the parent it is created from, and is refused
-// while prune holds that parent, rather than created under a session that is
-// about to go.
+// sessionDirNames lists the session directories under root.
+func sessionDirNames(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
+// Every way of creating a session under a parent holds that parent, and is
+// refused while prune holds it, rather than creating a session under one that is
+// about to go: Fork, CreateChild, and the direct Create that exec
+// --calling-session-id and spec implementations use.
 func TestForkAndChildHoldTheParentTheyAreCreatedFrom(t *testing.T) {
 	for _, create := range []struct {
 		name string
@@ -355,11 +372,24 @@ func TestForkAndChildHoldTheParentTheyAreCreatedFrom(t *testing.T) {
 			_, err := store.CreateChild("parent", ChildInput{SessionID: "new"})
 			return err
 		}},
+		{"create with a parent", func(store *Store) error {
+			_, err := store.Create(CreateInput{SessionID: "new", ParentSessionID: "parent"})
+			return err
+		}},
+		{"exec calling session", func(store *Store) error {
+			_, err := PrepareExec(PrepareExecOptions{Store: store, SessionID: "new", CallingSessionID: "parent"})
+			return err
+		}},
+		{"spec implementation", func(store *Store) error {
+			_, _, err := store.EnsureSpecImplementation(EnsureSpecImplementationInput{SpecID: "spec", SpecSourceSessionID: "parent", Prompt: "build it"})
+			return err
+		}},
 	} {
 		t.Run(create.name, func(t *testing.T) {
 			root := t.TempDir()
 			createFinishedSession(t, root, "parent", "2026-06-01T00:00:00Z", "")
 			other := NewStore(StoreOptions{RootDir: root, Now: fixedClock("2026-06-01T00:00:00Z")})
+			before := strings.Join(sessionDirNames(t, root), ",")
 
 			release, locked, err := pruneStore(root).HoldExclusive("parent")
 			if err != nil || !locked {
@@ -370,8 +400,8 @@ func TestForkAndChildHoldTheParentTheyAreCreatedFrom(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "locked by zero sessions prune") {
 				t.Errorf("%s from a parent prune holds: err = %v, want it refused", create.name, err)
 			}
-			if sessionDirExists(t, root, "new") {
-				t.Errorf("the refused %s was created anyway", create.name)
+			if after := strings.Join(sessionDirNames(t, root), ","); after != before {
+				t.Errorf("the refused %s created a session anyway: %s, was %s", create.name, after, before)
 			}
 
 			if err := create.do(other); err != nil {

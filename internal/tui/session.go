@@ -310,6 +310,11 @@ func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 // the CLI's `zero exec --resume` (readExecContextEvents) and the in-TUI /compact
 // reload. Falls back to the raw log if rehydration fails.
 func (m model) resumeEvents(sessionID string) ([]sessions.Event, error) {
+	// Picked from its metadata a moment ago. Make sure it is still there, and
+	// held, before resuming it: see sessions.HoldToContinue.
+	if err := m.sessionStore.HoldToContinue(sessionID); err != nil {
+		return nil, err
+	}
 	events, err := m.sessionStore.ReadRehydratedEvents(sessionID)
 	if err == nil {
 		return events, nil

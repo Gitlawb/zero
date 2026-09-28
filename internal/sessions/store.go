@@ -283,6 +283,14 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 	if input.Depth < 0 {
 		return Metadata{}, fmt.Errorf("invalid zero session depth %d", input.Depth)
 	}
+	// A session created under a parent holds that parent, the way Fork and
+	// CreateChild do, and is refused while prune holds or is removing it: exec
+	// --calling-session-id and spec implementations create their children here.
+	if parent := strings.TrimSpace(input.ParentSessionID); parent != "" {
+		if err := store.holdParent(parent); err != nil {
+			return Metadata{}, err
+		}
+	}
 
 	timestamp := store.timestamp()
 	session := Metadata{
@@ -434,7 +442,7 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	if !ValidSessionID(parentSessionID) {
 		return Metadata{}, fmt.Errorf("invalid zero session id %q", parentSessionID)
 	}
-	if err := store.holdOrRefuse(parentSessionID); err != nil {
+	if err := store.holdParent(parentSessionID); err != nil {
 		return Metadata{}, err
 	}
 	parent, err := store.Get(parentSessionID)

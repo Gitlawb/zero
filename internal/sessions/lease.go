@@ -3,6 +3,7 @@ package sessions
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -36,22 +37,99 @@ func (store *Store) Hold(sessionID string) {
 	store.hold(sessionID)
 }
 
-// ErrPruning is returned, wrapped, when a process tries to continue a session,
-// or to create a session under it, while zero sessions prune holds it.
-var ErrPruning = errors.New("locked by zero sessions prune; try again")
+// ErrPruning is matched, through errors.Is, by the error a process gets when it
+// tries to continue a session, or to create a session under it, while zero
+// sessions prune holds that session or once it has removed it.
+var ErrPruning = errors.New("locked by zero sessions prune")
+
+// pruneRefusal is an error matching ErrPruning whose message says which of the
+// two it was.
+type pruneRefusal struct{ message string }
+
+func (refusal pruneRefusal) Error() string { return refusal.message }
+
+func (refusal pruneRefusal) Is(target error) bool { return target == ErrPruning }
+
+func pruneBusy(sessionID string) error {
+	return pruneRefusal{"zero session " + sessionID + " is locked by zero sessions prune; try again"}
+}
+
+func pruneRemoved(sessionID string) error {
+	return pruneRefusal{"zero session " + sessionID + " was removed while it was being opened"}
+}
 
 // holdOrRefuse holds a session that is about to be read in order to continue it
 // (the rehydrated read behind the TUI's resume, exec --resume and --fork, and
 // ACP's session/load and session/resume) or to create a session under it (Fork,
-// CreateChild). When prune holds it at this moment the caller is refused rather
-// than left to read it without the lease: prune could then remove a session
-// this process goes on to use, or one a new session is created under, whose
-// Lineage and Tree fail on a missing ancestor.
+// CreateChild, Create with a parent). When prune holds it at this moment the
+// caller is refused rather than left to read it without the lease: prune could
+// then remove a session this process goes on to use, or one a new session is
+// created under, whose Lineage and Tree fail on a missing ancestor.
 func (store *Store) holdOrRefuse(sessionID string) error {
 	if store.hold(sessionID) {
-		return fmt.Errorf("zero session %s is %w", sessionID, ErrPruning)
+		return pruneBusy(sessionID)
 	}
 	return nil
+}
+
+// holdParent is holdOrRefuse for the session a new one is created under: Fork,
+// CreateChild, and Create with a ParentSessionID.
+//
+// HOLDING A LEASE FILE DOES NOT PROVE THE SESSION IS STILL THERE. Prune removes
+// the metadata first and unlinks lease.lock after it, so a process that takes
+// the lease just then creates a fresh lease.lock in a directory prune is
+// emptying, and locks it with nothing to contend with. So a parent whose
+// directory still exists without its metadata is refused once the lease is
+// held. A parent whose directory is gone altogether is left alone, as before: a
+// session may name a parent this store never had.
+func (store *Store) holdParent(parentSessionID string) error {
+	if err := store.holdOrRefuse(parentSessionID); err != nil {
+		return err
+	}
+	if store.beingRemoved(parentSessionID) {
+		store.dropStrayLease(parentSessionID)
+		return pruneRemoved(parentSessionID)
+	}
+	return nil
+}
+
+// HoldToContinue holds a session the caller has already picked, having read its
+// metadata, and is about to continue: the TUI's resume, exec --resume and
+// --fork, and ACP's session/load and session/resume. It refuses, with an error
+// matching ErrPruning, a session prune holds and one that is gone by the time it
+// is held, whether prune is part way through removing it or has finished.
+// Callers must not fall back to reading the session another way on that error.
+// ReadRehydratedEvents on its own still reads a session that does not exist as
+// an empty one, for callers that picked nothing.
+func (store *Store) HoldToContinue(sessionID string) error {
+	if err := store.holdOrRefuse(sessionID); err != nil {
+		return err
+	}
+	if _, err := os.Stat(store.metadataPath(sessionID)); errors.Is(err, fs.ErrNotExist) {
+		store.dropStrayLease(sessionID)
+		return pruneRemoved(sessionID)
+	}
+	return nil
+}
+
+// beingRemoved reports a session directory that exists without its metadata:
+// one prune is part way through removing.
+func (store *Store) beingRemoved(sessionID string) bool {
+	if _, err := os.Stat(store.metadataPath(sessionID)); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	info, err := os.Stat(store.sessionPath(sessionID))
+	return err == nil && info.IsDir()
+}
+
+// dropStrayLease gives back a lease taken on a session that turned out to be
+// gone, and removes the lease file it may have created afresh in a directory
+// prune is emptying, so that prune can still remove the directory.
+func (store *Store) dropStrayLease(sessionID string) {
+	store.Release(sessionID)
+	if store.beingRemoved(sessionID) {
+		_ = os.Remove(store.leasePath(sessionID))
+	}
 }
 
 // hold is Hold, reporting busy when the lease could not be taken because prune

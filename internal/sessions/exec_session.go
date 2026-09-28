@@ -152,6 +152,11 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 }
 
 func readExecContextEvents(store *Store, sessionID string) ([]Event, error) {
+	// The session was picked from its metadata a moment ago. Make sure it is
+	// still there, and held, before reading it to continue: see HoldToContinue.
+	if err := store.HoldToContinue(sessionID); err != nil {
+		return nil, err
+	}
 	contextEvents, err := store.ReadRehydratedEvents(sessionID)
 	if err == nil {
 		return contextEvents, nil

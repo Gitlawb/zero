@@ -2455,3 +2455,31 @@ func TestACPLoadAndResumeAreRefusedWhilePruneHoldsTheSession(t *testing.T) {
 		t.Fatal("a session refused while prune held it was still promptable")
 	}
 }
+
+// Activation reads the session's metadata before it restores the history. A
+// session prune removes in between is refused as removed, which activation then
+// refuses to publish for load as well as resume, instead of restoring it as an
+// empty conversation.
+func TestACPLoadHistoryRefusesASessionRemovedAfterItWasPicked(t *testing.T) {
+	deps := testDeps(t)
+	meta, err := deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	deps.Store.Release(meta.SessionID)
+	dir := filepath.Join(deps.Store.RootDir, meta.SessionID)
+	if err := os.Remove(filepath.Join(dir, sessions.MetadataFile)); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{deps: deps}
+	if _, _, _, err := a.loadHistory(meta.SessionID, false); !errors.Is(err, sessions.ErrPruning) {
+		t.Errorf("load history of a session prune is removing: err = %v, want it refused", err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := a.loadHistory(meta.SessionID, false); !errors.Is(err, sessions.ErrPruning) {
+		t.Errorf("load history of a session prune removed: err = %v, want it refused", err)
+	}
+}

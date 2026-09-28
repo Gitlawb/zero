@@ -914,6 +914,12 @@ func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRec
 	// enough: rehydration substitutes the compaction event in place of the events
 	// it replaced, so a loop that skips everything but EventMessage would drop the
 	// summary exactly as before. It is projected below. Reported by @jatmn.
+	//
+	// The session was picked from its metadata a moment ago. Make sure it is
+	// still there, and held, before restoring it: see sessions.HoldToContinue.
+	if err := a.deps.Store.HoldToContinue(sessionID); err != nil {
+		return nil, nil, nil, err
+	}
 	events, eventLogPresent, err := a.deps.Store.ReadRehydratedEventsWithPresence(sessionID)
 	var rehydrateWarning error
 	if err != nil {

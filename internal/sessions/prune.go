@@ -69,12 +69,16 @@ var pruneRemoveSeam func(sessionID string)
 // says whether Prune still holds the lease. Nil in production.
 var pruneRemoveDirSeam func(sessionID string, leaseHeld bool)
 
+// prunePlannedSeam runs once Prune has made its plan and before it removes
+// anything. Nil in production.
+var prunePlannedSeam func()
+
 // Prune removes sessions last updated before the cutoff that OlderThan sets.
 //
 // Only on request: nothing in Zero calls it by itself (#971). It never removes:
 //   - a session another process has open, which holds its lease (see Hold);
-//   - a session with a descendant that is kept, because Lineage and Tree fail
-//     on a missing ancestor;
+//   - a session with a descendant that is kept, including one created after the
+//     plan was made, because Lineage and Tree fail on a missing ancestor;
 //   - a session written between the plan and its removal;
 //   - a session whose last update time cannot be read.
 //
@@ -157,6 +161,9 @@ func (store *Store) Prune(options PruneOptions) (PruneReport, error) {
 		}
 		return order[left].SessionID < order[right].SessionID
 	})
+	if prunePlannedSeam != nil {
+		prunePlannedSeam()
+	}
 
 	keep := map[string]bool{}
 	for _, session := range order {
@@ -169,7 +176,7 @@ func (store *Store) Prune(options PruneOptions) (PruneReport, error) {
 			report.Removed = append(report.Removed, entry)
 			continue
 		}
-		removed, keptReason, err := store.pruneSession(session.SessionID, cutoff)
+		removed, keptReason, err := store.pruneSession(session.SessionID, cutoff, byID)
 		switch {
 		case err != nil:
 			entry.Reason = err.Error()
@@ -230,11 +237,39 @@ func (store *Store) sessionBytes(sessionID string) int64 {
 	return total
 }
 
+// childCreatedAfterPlan reports whether a session the plan did not see names
+// sessionID as its parent. Only sessions missing from planned are read, so the
+// cost is one directory listing plus whatever was created since the plan.
+func (store *Store) childCreatedAfterPlan(sessionID string, planned map[string]Metadata) (bool, error) {
+	entries, err := os.ReadDir(store.RootDir)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		id := entry.Name()
+		if !entry.IsDir() || id == sessionID {
+			continue
+		}
+		if _, seen := planned[id]; seen {
+			continue
+		}
+		child, err := store.readMetadata(id)
+		if err != nil {
+			continue // not a session, or one without its metadata
+		}
+		if child.ParentSessionID == sessionID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // pruneSession removes one session that planning chose. It reports removed
 // once the metadata is gone, even when leftovers could not be deleted (err says
-// what), and a keptReason when the session turned out to be open or was written
-// since the plan.
-func (store *Store) pruneSession(sessionID string, cutoff time.Time) (removed bool, keptReason string, err error) {
+// what), and a keptReason when the session turned out to be open, was written
+// since the plan, or has a child the plan did not know about. planned is every
+// session the plan saw.
+func (store *Store) pruneSession(sessionID string, cutoff time.Time, planned map[string]Metadata) (removed bool, keptReason string, err error) {
 	releaseLease, locked, err := store.HoldExclusive(sessionID)
 	if err != nil {
 		return false, "", fmt.Errorf("check the session's lease: %w", err)
@@ -275,6 +310,18 @@ func (store *Store) pruneSession(sessionID string, cutoff time.Time) (removed bo
 	}
 	if !updated.Before(cutoff) {
 		return false, PruneKeptUpdated, nil
+	}
+	// A session forked or given a child after the plan was made, by a process that
+	// has exited since, is not in the plan, and nothing else would stop its parent
+	// going. Every way of creating a session under a parent holds that parent
+	// first (holdParent), so none can start while this lease is held exclusively,
+	// and one that finished has its metadata on disk.
+	child, err := store.childCreatedAfterPlan(sessionID, planned)
+	if err != nil {
+		return false, "", fmt.Errorf("look for sessions created under it: %w", err)
+	}
+	if child {
+		return false, PruneKeptParent, nil
 	}
 
 	// THE METADATA FIRST. From here the session no longer exists to List or Get.
