@@ -23,7 +23,9 @@ type PruneOptions struct {
 	// OlderThan makes a session a candidate when it was last updated at least
 	// this long ago. It must be at least MinimumPruneAge.
 	OlderThan time.Duration
-	// DryRun decides everything a real run would and removes nothing.
+	// DryRun decides everything a real run would and removes nothing. It takes
+	// the same locks to decide, so a Zero opening a session at the moment it is
+	// being checked is told to try again, as it would be during a real run.
 	DryRun bool
 }
 
@@ -48,8 +50,9 @@ type PruneReport struct {
 	Removed []PruneEntry `json:"removed"`
 	// Kept are sessions Prune left for a reason other than being recent.
 	Kept []PruneEntry `json:"kept"`
-	// Failed are sessions whose removal went wrong; Reason says how. A failure
-	// after the metadata was removed leaves a directory List no longer shows.
+	// Failed are sessions whose removal went wrong, or in a dry run could not be
+	// checked; Reason says how. A failure after the metadata was removed leaves
+	// a directory List no longer shows.
 	Failed []PruneEntry `json:"failed"`
 }
 
@@ -172,11 +175,7 @@ func (store *Store) Prune(options PruneOptions) (PruneReport, error) {
 			continue
 		}
 		entry := store.pruneEntry(session, "")
-		if options.DryRun {
-			report.Removed = append(report.Removed, entry)
-			continue
-		}
-		removed, keptReason, err := store.pruneSession(session.SessionID, cutoff, byID)
+		removed, keptReason, err := store.pruneSession(session.SessionID, cutoff, byID, options.DryRun)
 		switch {
 		case err != nil:
 			entry.Reason = err.Error()
@@ -268,8 +267,10 @@ func (store *Store) childCreatedAfterPlan(sessionID string, planned map[string]M
 // once the metadata is gone, even when leftovers could not be deleted (err says
 // what), and a keptReason when the session turned out to be open, was written
 // since the plan, or has a child the plan did not know about. planned is every
-// session the plan saw.
-func (store *Store) pruneSession(sessionID string, cutoff time.Time, planned map[string]Metadata) (removed bool, keptReason string, err error) {
+// session the plan saw. A dry run makes every one of those checks under the
+// same locks and stops before removing anything; removed then says a real run
+// would have gone on to remove the session.
+func (store *Store) pruneSession(sessionID string, cutoff time.Time, planned map[string]Metadata, dryRun bool) (removed bool, keptReason string, err error) {
 	releaseLease, locked, err := store.HoldExclusive(sessionID)
 	if err != nil {
 		return false, "", fmt.Errorf("check the session's lease: %w", err)
@@ -322,6 +323,9 @@ func (store *Store) pruneSession(sessionID string, cutoff time.Time, planned map
 	}
 	if child {
 		return false, PruneKeptParent, nil
+	}
+	if dryRun {
+		return true, "", nil
 	}
 
 	// THE METADATA FIRST. From here the session no longer exists to List or Get.

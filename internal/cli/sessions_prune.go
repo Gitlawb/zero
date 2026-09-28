@@ -121,7 +121,11 @@ func formatPruneReport(report sessions.PruneReport) string {
 		}
 	}
 	if len(report.Failed) > 0 {
-		fmt.Fprintf(&out, "Could not remove %d:\n", len(report.Failed))
+		failed := "Could not remove"
+		if report.DryRun {
+			failed = "Could not check"
+		}
+		fmt.Fprintf(&out, "%s %d:\n", failed, len(report.Failed))
 		for _, entry := range report.Failed {
 			fmt.Fprintf(&out, "  %s\n", formatPruneEntry(entry, redact(entry.Reason)))
 		}

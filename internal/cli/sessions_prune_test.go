@@ -71,6 +71,20 @@ func TestSessionsPruneDryRunListsWithoutRemoving(t *testing.T) {
 	}
 }
 
+// A dry run removes nothing, so a session it could not check is not reported
+// as one it could not remove.
+func TestSessionsPruneDryRunReportsFailuresAsUnchecked(t *testing.T) {
+	failed := []sessions.PruneEntry{{SessionID: "old-session", UpdatedAt: "2020-01-01T00:00:00Z", Reason: "the session disappeared while pruning"}}
+	dryRun := formatPruneReport(sessions.PruneReport{Cutoff: "2026-08-27T00:00:00Z", DryRun: true, Failed: failed})
+	if !strings.Contains(dryRun, "Could not check 1:") || strings.Contains(dryRun, "Could not remove") {
+		t.Errorf("dry run report:\n%s", dryRun)
+	}
+	run := formatPruneReport(sessions.PruneReport{Cutoff: "2026-08-27T00:00:00Z", Failed: failed})
+	if !strings.Contains(run, "Could not remove 1:") {
+		t.Errorf("report:\n%s", run)
+	}
+}
+
 func TestSessionsPruneRemovesOnlyOldSessions(t *testing.T) {
 	root, _, deps := pruneCLIFixture(t)
 	code, stdout, stderr := runPruneCLI(t, deps, "prune", "--older-than=30d")

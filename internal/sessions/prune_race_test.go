@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -41,6 +42,106 @@ func TestPruneKeepsAParentForkedAfterThePlan(t *testing.T) {
 	if lineage, err := pruneStore(root).Lineage("late"); err != nil || len(lineage) != 2 {
 		t.Fatalf("the late fork's lineage is broken: %d entries, %v", len(lineage), err)
 	}
+}
+
+// A dry run decides what a real run would, including what only shows once a
+// session is held for removal: a fork made after the plan, a write since the
+// plan, and a process that opened the session since the plan. Each case runs
+// both ways from the same start, and both reports must be the one wanted.
+func TestPruneDryRunDecidesLikeARealRunAtRemoval(t *testing.T) {
+	cases := []struct {
+		name string
+		// create lays out the sessions. afterPlan changes them once the plan is
+		// made, and returns what to undo when Prune has finished.
+		create    func(t *testing.T, root string)
+		afterPlan func(t *testing.T, root string) (undo func())
+		want      string
+	}{
+		{
+			name: "a fork made after the plan",
+			create: func(t *testing.T, root string) {
+				createFinishedSession(t, root, "parent", "2026-06-01T00:00:00Z", "")
+			},
+			afterPlan: func(t *testing.T, root string) func() {
+				other := NewStore(StoreOptions{RootDir: root, Now: fixedClock("2026-09-25T00:00:00Z")})
+				if _, err := other.Fork("parent", ForkInput{SessionID: "late"}); err != nil {
+					t.Errorf("fork after the plan: %v", err)
+				}
+				other.Release("late")
+				other.Release("parent")
+				return func() {}
+			},
+			want: "removed [] kept [parent: " + PruneKeptParent + "] failed []",
+		},
+		{
+			name: "a write since the plan",
+			create: func(t *testing.T, root string) {
+				createFinishedSession(t, root, "parent", "2026-06-01T00:00:00Z", "")
+				createFinishedSession(t, root, "child", "2026-06-15T00:00:00Z", "parent")
+			},
+			afterPlan: func(t *testing.T, root string) func() {
+				rewriteUpdatedAt(t, root, "child", "2026-09-25T23:00:00Z")
+				return func() {}
+			},
+			want: "removed [] kept [child: " + PruneKeptUpdated + ", parent: " + PruneKeptParent + "] failed []",
+		},
+		{
+			name: "a session opened since the plan",
+			create: func(t *testing.T, root string) {
+				createFinishedSession(t, root, "opened", "2026-06-01T00:00:00Z", "")
+				createFinishedSession(t, root, "idle", "2026-06-02T00:00:00Z", "")
+			},
+			afterPlan: func(t *testing.T, root string) func() {
+				other := NewStore(StoreOptions{RootDir: root})
+				if busy := other.hold("opened"); busy {
+					t.Error("SETUP INVALID: the session was busy when opened after the plan")
+				}
+				return func() { other.Release("opened") }
+			},
+			want: "removed [idle] kept [opened: " + PruneKeptOpen + "] failed []",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() { prunePlannedSeam = nil }()
+			for _, dryRun := range []bool{false, true} {
+				root := t.TempDir()
+				tc.create(t, root)
+				before := sessionDirNames(t, root)
+				var undo func()
+				prunePlannedSeam = func() { undo = tc.afterPlan(t, root) }
+				report, err := pruneStore(root).Prune(PruneOptions{OlderThan: thirtyDays, DryRun: dryRun})
+				prunePlannedSeam = nil
+				if undo == nil {
+					t.Fatal("SETUP INVALID: nothing changed after the plan")
+				}
+				undo()
+				if err != nil {
+					t.Fatalf("dry run %v: Prune: %v", dryRun, err)
+				}
+				if got := pruneSummary(report); got != tc.want {
+					t.Errorf("dry run %v: the report is %s, want %s", dryRun, got, tc.want)
+				}
+				if !dryRun {
+					continue
+				}
+				for _, id := range before {
+					if _, err := os.Stat(pruneStore(root).metadataPath(id)); err != nil {
+						t.Errorf("the dry run removed the metadata of %s: %v", id, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+// pruneSummary puts what a report decided on one line, in report order.
+func pruneSummary(report PruneReport) string {
+	kept := []string{}
+	for _, entry := range report.Kept {
+		kept = append(kept, entry.SessionID+": "+entry.Reason)
+	}
+	return fmt.Sprintf("removed %v kept [%s] failed %v", pruneIDs(report.Removed), strings.Join(kept, ", "), pruneIDs(report.Failed))
 }
 
 // Prune removes the metadata first and unlinks lease.lock after it. A process
