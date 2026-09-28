@@ -695,7 +695,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	modelregistry.StartModelsDevRefresh()
 
 	workspaceRoot, err := deps.getwd()
 	if err != nil {

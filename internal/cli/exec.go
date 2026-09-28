@@ -181,7 +181,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	modelregistry.StartModelsDevRefresh()
 
 	// A mode seeds model/effort/max-turns/tool filters as a preset. Expand it up
 	// front — before tool-filter validation and the --list-tools branch — so a
