@@ -52,9 +52,12 @@ type pickerItem struct {
 	// mixed-provider group (Recent, Favorites), whose section header cannot
 	// convey it. Empty for provider-grouped rows.
 	OwnerLabel string
-	Remote     bool
-	Local      bool
-	Favorite   bool
+	// OwnerNumber distinguishes abbreviated names, even when their visible
+	// suffixes coincide. It is the saved-profile position (1-based).
+	OwnerNumber int
+	Remote      bool
+	Local       bool
+	Favorite    bool
 }
 
 // commandPicker is a generic single-select overlay reused by /model and /effort
@@ -542,6 +545,17 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 		item.Favorite = m.favoriteModels[item.Value]
 		result = append(result, item)
 		seen[key] = true
+	}
+	for i := range result {
+		if result[i].OwnerLabel == "" {
+			continue
+		}
+		for index, profile := range m.modelPickerProviders() {
+			if strings.EqualFold(strings.TrimSpace(profile.Name), result[i].OwnerLabel) {
+				result[i].OwnerNumber = index + 1
+				break
+			}
+		}
 	}
 	return result
 }

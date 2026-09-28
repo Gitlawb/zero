@@ -1420,6 +1420,58 @@ func TestModelPickerOwnerLabelMatchesSelectedProvider(t *testing.T) {
 	}
 }
 
+func TestModelPickerAbbreviatedOwnersMatchSelection(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
+	home := t.TempDir()
+	for _, variable := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "APPDATA", "LOCALAPPDATA"} {
+		t.Setenv(variable, home)
+	}
+	for _, names := range [][]string{
+		{"work-subscription-provider-east", "work-subscription-provider-west"},
+		{"east-subscription-provider-shared", "west-subscription-provider-shared"},
+		{"東-subscription-provider-shared", "西-subscription-provider-shared"},
+	} {
+		for _, favorite := range []bool{false, true} {
+			for _, terminalWidth := range []int{76, 30} {
+				rows := map[string]bool{}
+				for selectedOwner, name := range names {
+					profiles := []config.ProviderProfile{}
+					for _, owner := range names {
+						profiles = append(profiles, config.ProviderProfile{Name: owner, CatalogID: "openrouter", ProviderKind: config.ProviderKindOpenAICompatible, Model: "gpt-5.6", APIKey: "test-key", BaseURL: "https://openrouter.ai/api/v1", APIFormat: "chat-completions"})
+					}
+					m := newModel(context.Background(), Options{ProviderName: names[0], ProviderProfile: profiles[0], ModelName: "gpt-5.6", Provider: &fakeProvider{}, SavedProviders: profiles,
+						NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil },
+					})
+					m.favoriteModels = map[string]bool{"gpt-5.6": favorite}
+					// Put each owner first in turn: Favorites retains only one row per model.
+					recent := []pickerItem{{Label: "GPT-5.6", Value: "gpt-5.6", OwnerProvider: name}, {Label: "GPT-5.6", Value: "gpt-5.6", OwnerProvider: names[1-selectedOwner]}}
+					items := m.assembleModelPickerItems(recent, nil)
+					m.picker = &commandPicker{kind: pickerModel, title: "Choose a model", items: items, allItems: items}
+					width := modelPickerOverlayWidth(terminalWidth, m.picker)
+					for _, selected := range []bool{false, true} {
+						row := plainRender(t, renderModelPickerRow(width-4, selected, items[0]))
+						assertContains(t, row, "GPT-5.6")
+						if selected {
+							if rows[row] {
+								t.Fatalf("different destinations have identical rows: %q", row)
+							}
+							rows[row] = true
+						}
+					}
+					overlay := plainRender(t, m.modelPickerOverlay(terminalWidth))
+					joined := strings.NewReplacer(" ", "", "\n", "", "│", "").Replace(overlay)
+					assertContains(t, joined, fmt.Sprintf("[%d]%s", selectedOwner+1, name))
+					updated, _ := m.Update(testKey(tea.KeyEnter))
+					got := updated.(model)
+					if got.providerName != name || got.modelName != "gpt-5.6" {
+						t.Fatalf("selection = %s/%s, want %s/gpt-5.6", got.providerName, got.modelName, name)
+					}
+				}
+			}
+		}
+	}
+}
+
 func pickerGroups(items []pickerItem) []string {
 	groups := []string{}
 	seen := map[string]bool{}

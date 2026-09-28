@@ -1939,10 +1939,22 @@ func TestModelPickerLongOwnerKeepsModelVisible(t *testing.T) {
 				t.Fatalf("overlay width = %d, want the %d cap", width, modelPickerOverlayMaxWidth)
 			}
 			got := plainRender(t, renderModelPickerRow(width-4, false, item))
-			want := truncateDisplayWidth(owner, modelPickerOwnerMaxWidth) + " · " + label
+			want := "…" + strings.Repeat("o", 19) + " · " + label
 			if !strings.Contains(got, want) || !strings.Contains(want, "…") {
 				t.Fatalf("group=%s: row = %q, want %q with the owner capped", group, got, want)
 			}
+		}
+	}
+}
+
+func TestModelPickerNarrowOwnerKeepsModelVisible(t *testing.T) {
+	for _, favorite := range []bool{false, true} {
+		for _, selected := range []bool{false, true} {
+			item := pickerItem{Label: "GPT-5.6", OwnerLabel: "subscription-profile", Favorite: favorite}
+			width := modelPickerOverlayWidth(30, &commandPicker{items: []pickerItem{item}})
+			got := plainRender(t, renderModelPickerRow(width-4, selected, item))
+			assertContains(t, got, "GPT-5.6")
+			assertContains(t, got, "profile · ")
 		}
 	}
 }

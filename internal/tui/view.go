@@ -11,6 +11,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
 )
@@ -1064,6 +1065,14 @@ func (m model) modelPickerOverlay(width int) string {
 		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render("no matching models"), innerWidth, transparentSurface))
 	}
 	if item, ok := m.picker.current(); ok {
+		if item.OwnerNumber > 0 && !strings.Contains(modelPickerRowLabel(item, innerWidth-searchInset), item.OwnerLabel) {
+			// Give abbreviated cues a full-name key before Enter, including on
+			// narrow terminals where the distinguishing part may not fit in a row.
+			owner := fmt.Sprintf("[%d] %s", item.OwnerNumber, item.OwnerLabel)
+			for _, line := range strings.Split(ansi.Hardwrap(owner, maxInt(1, innerWidth-searchInset), false), "\n") {
+				lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(line), innerWidth, transparentSurface))
+			}
+		}
 		if detail := modelPickerItemDetail(item); detail != "" {
 			lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 			lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(detail), innerWidth, transparentSurface))
@@ -1124,7 +1133,7 @@ func modelPickerOverlayWidth(terminalWidth int, picker *commandPicker) int {
 	target = maxInt(target, lipgloss.Width("  Using built-in model list"))
 	if picker != nil {
 		for _, item := range picker.items {
-			labelWidth := lipgloss.Width(modelPickerRowLabel(item))
+			labelWidth := lipgloss.Width(modelPickerRowLabel(item, maxInt(0, available-6)))
 			target = maxInt(target, lipgloss.Width("❯ ")+labelWidth)
 			if detail := modelPickerItemDetail(item); detail != "" {
 				target = maxInt(target, lipgloss.Width("  "+detail))
@@ -1159,20 +1168,31 @@ func renderModelPickerRow(width int, selected bool, item pickerItem) string {
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
-	left := marker + surface(zeroTheme.ink).Render(modelPickerRowLabel(item))
+	left := marker + surface(zeroTheme.ink).Render(modelPickerRowLabel(item, maxInt(0, width-2)))
 	return fillPaletteLine(left, width, surface)
 }
 
-func modelPickerRowLabel(item pickerItem) string {
+func modelPickerRowLabel(item pickerItem, width int) string {
 	label := strings.TrimSpace(item.Label)
 	if label == "" {
 		label = strings.TrimSpace(item.Value)
 	}
-	// Mixed-provider groups cannot convey ownership through their header. Profile
-	// names are unbounded, so cap the owner to keep the model name visible within
-	// the overlay's maximum width.
+	if item.Favorite {
+		width -= 2
+	}
+	// Reserve the model's cells against the actual terminal width, not just the
+	// overlay cap. Keep a small owner cue even for models that themselves overflow.
 	if owner := strings.TrimSpace(item.OwnerLabel); owner != "" {
-		label = truncateDisplayWidth(owner, modelPickerOwnerMaxWidth) + " · " + label
+		budget := minInt(modelPickerOwnerMaxWidth, maxInt(6, width-3-lipgloss.Width(label)))
+		if lipgloss.Width(owner) > budget {
+			prefix := ""
+			if item.OwnerNumber > 0 {
+				prefix = fmt.Sprintf("[%d]", item.OwnerNumber)
+			}
+			remove := lipgloss.Width(owner) - maxInt(1, budget-lipgloss.Width(prefix)) + 1
+			owner = prefix + ansi.TruncateLeft(owner, remove, "…")
+		}
+		label = owner + " · " + label
 	}
 	if item.Favorite {
 		label = "* " + label
