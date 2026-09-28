@@ -649,6 +649,8 @@ func TestProviderManagerCredStateFallsThroughStaleMarker(t *testing.T) {
 func TestProviderManagerRemoveKeepsSharedCredentialForCaseVariantSurvivor(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(dir, "oauth-tokens.json"))
 	configPath := filepath.Join(dir, "config.json")
 	profiles := []config.ProviderProfile{
 		{Name: "work", APIKeyStored: true},
@@ -864,6 +866,8 @@ func TestProviderManagerAmbiguousCaseVariantSessionDoesNotGuessLiveRow(t *testin
 }
 
 func TestProviderManagerCleanupRedactsCredentialStoreError(t *testing.T) {
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(t.TempDir(), "oauth-tokens.json"))
 	t.Setenv("ZERO_CRED_STORAGE", "file")
 	secret := "sk-proj-12345678901234567890"
 	dir := filepath.Join(t.TempDir(), secret)
@@ -948,6 +952,8 @@ func TestProviderManagerDeleteConfirmMatchesKeyRetentionPolicy(t *testing.T) {
 func TestProviderManagerRemoveDeletesKeyWhenSurvivorNeverClaimedIt(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(dir, "oauth-tokens.json"))
 	configPath := filepath.Join(dir, "config.json")
 	profiles := []config.ProviderProfile{
 		{Name: "work", APIKeyStored: true},
@@ -997,6 +1003,7 @@ func TestProviderManagerDeleteReconcilesStoredKeyMarkers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 			dir := t.TempDir()
+			t.Setenv("ZERO_OAUTH_STORAGE", "file")
 			t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(dir, "oauth.json"))
 			configPath := filepath.Join(dir, "config.json")
 			profiles := []config.ProviderProfile{
