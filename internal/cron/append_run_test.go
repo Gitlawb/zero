@@ -130,16 +130,66 @@ func TestAppendRunFailurePreservesHistory(t *testing.T) {
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		rec := RunRecord{ExitCode: 8}
-		if strings.HasPrefix(data, "{") {
-			rec.Error = strings.Repeat("x", 1024*1024)
-		}
+		rec := RunRecord{ExitCode: 8, Error: strings.Repeat("x", 1024*1024)}
 		if err := store.AppendRun(job.ID, rec); err == nil {
-			t.Fatal("expected oversized new or existing record error")
+			t.Fatal("expected oversized new record error")
 		}
 		got, err := os.ReadFile(path)
 		if err != nil || string(got) != data {
 			t.Fatalf("failed append changed history: %v", err)
+		}
+	}
+}
+
+func TestAppendRunWithOversizedHistory(t *testing.T) {
+	store := newTestStore(t)
+	job, err := store.Add(Job{Prompt: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.jobDir(job.ID), "runs.jsonl")
+	// An oversized unterminated legacy record must not block future outcomes.
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxRunBytes)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendRun(job.ID, RunRecord{ExitCode: 42}); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := store.Runs(job.ID, 1)
+	if err != nil || len(runs) != 1 || runs[0].ExitCode != 42 {
+		t.Fatalf("new outcome lost: %+v, %v", runs, err)
+	}
+}
+
+func TestRunsSkipOversizedLines(t *testing.T) {
+	store := newTestStore(t)
+	job, err := store.Add(Job{Prompt: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.jobDir(job.ID), "runs.jsonl")
+	for _, size := range []int{maxRunBytes - 1, maxRunBytes, maxRunBytes + 4096} {
+		// Valid JSON plus trailing whitespace catches accidental decoding of a
+		// prefix after dropping only the oversized suffix. The exact boundary
+		// also distinguishes an oversized line from the largest allowed line.
+		line := `{"exitCode":99}`
+		line += strings.Repeat(" ", size-len(line))
+		data := line + "\n{\"exitCode\":7}\n" + line + "\n{\"exitCode\":42}\n" + line
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runs, err := store.Runs(job.ID, 10)
+		want := []int{7, 42}
+		if size < maxRunBytes {
+			want = []int{99, 7, 99, 42, 99}
+		}
+		if err != nil || len(runs) != len(want) {
+			t.Fatalf("size %d: got %+v, err %v; want %v", size, runs, err, want)
+		}
+		for i, rec := range runs {
+			if rec.ExitCode != want[i] {
+				t.Fatalf("size %d: record %d = %d, want %d", size, i, rec.ExitCode, want[i])
+			}
 		}
 	}
 }

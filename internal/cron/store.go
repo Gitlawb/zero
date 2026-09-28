@@ -382,7 +382,8 @@ func (s *Store) Runs(id string, limit int) ([]RunRecord, error) {
 }
 
 // readRuns requires the job lock. Memory is bounded by limit records plus one
-// line; malformed JSON lines are skipped, as in the original forward reader.
+// line. Malformed and oversized legacy lines are skipped so they cannot prevent
+// recording new outcomes during compaction.
 func (s *Store) readRuns(id string, limit int) ([]RunRecord, error) {
 	f, err := os.Open(filepath.Join(s.jobDir(id), "runs.jsonl"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -398,6 +399,7 @@ func (s *Store) readRuns(id string, limit int) ([]RunRecord, error) {
 	}
 	var runs []RunRecord
 	var line []byte
+	oversized := false
 	decode := func() {
 		slices.Reverse(line)
 		var rec RunRecord
@@ -415,10 +417,15 @@ func (s *Store) readRuns(id string, limit int) ([]RunRecord, error) {
 		}
 		for i := n - 1; i >= 0 && len(runs) < limit; i-- {
 			if block[i] == '\n' {
-				decode()
-			} else {
+				if !oversized {
+					decode()
+				}
+				oversized = false
+			} else if !oversized {
 				if len(line) >= maxRunBytes-1 {
-					return nil, fmt.Errorf("cron run record exceeds %d bytes", maxRunBytes-1)
+					line = line[:0]
+					oversized = true
+					continue
 				}
 				line = append(line, block[i])
 			}

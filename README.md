@@ -335,6 +335,8 @@ Cron keeps the newest 1,000 run outcomes per job in `runs.jsonl`. Each new run
 atomically replaces the history with the retained tail; existing larger histories
 are trimmed on their next run. Archive the file before that run if you need older
 outcomes. This retention does not delete session directories or reset fire counts.
+Malformed records and legacy lines of 1 MiB or more are skipped when reading or
+compacting history; new records of that size are rejected.
 
 ## Extending Zero
 
