@@ -125,6 +125,53 @@ func TestExecSaysNothingWhenTheSandboxIsTurnedOff(t *testing.T) {
 	}
 }
 
+// countingExecProvider is echoExecProvider, counting the completions it streams.
+type countingExecProvider struct {
+	echoExecProvider
+	streamed *int
+}
+
+func (provider countingExecProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	*provider.streamed++
+	return provider.echoExecProvider.StreamCompletion(ctx, request)
+}
+
+// A degraded notice that cannot be written stops the run before the model is
+// asked for anything, as the image and effort notices do, instead of going ahead
+// with reduced isolation and no warning delivered.
+func TestExecStopsWhenTheDegradedNoticeCannotBeWritten(t *testing.T) {
+	clearSandboxNestingMarkers(t)
+	isolateCLIUserState(t)
+	var stdout bytes.Buffer
+	cwd := t.TempDir()
+	streamed := 0
+	exitCode := runWithDeps([]string{"exec", "hello"}, &stdout, failingWriter{}, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{
+				ActiveProvider: "echo",
+				Provider: config.ProviderProfile{
+					Name:         "echo",
+					ProviderKind: config.ProviderKindOpenAICompatible,
+					BaseURL:      "http://127.0.0.1/v1",
+					Model:        "echo-model",
+				},
+				MaxTurns: 3,
+			}, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return countingExecProvider{streamed: &streamed}, nil
+		},
+		selectSandboxBackend: unavailableTestSandbox,
+	})
+	if exitCode != exitCrash {
+		t.Fatalf("exit code = %d, want %d when the degraded notice cannot be written", exitCode, exitCrash)
+	}
+	if streamed != 0 {
+		t.Fatalf("the model was asked %d times: the run went ahead without its warning", streamed)
+	}
+}
+
 // launchTUIWithSandbox runs the root command the way a bare `zero` does, with
 // the sandbox backend pinned to the unavailable one, and returns the options the
 // TUI would have started with.

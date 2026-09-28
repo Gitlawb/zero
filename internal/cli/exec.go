@@ -347,10 +347,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	} else if notice != "" {
 		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
 	}
-	// Before any tool runs, so a run that goes ahead with reduced isolation says
-	// so where its output starts, not only when someone runs `zero doctor`.
+	// Before any tool runs, and before the MCP servers and plugins below start
+	// through the same sandbox, so a run that goes ahead with reduced isolation
+	// says so where its output starts, not only when someone runs `zero doctor`.
+	// A notice that cannot be written stops the run, as the image and effort
+	// notices further down do: going ahead would mean reduced isolation and no
+	// warning delivered.
 	if notice := sandboxEngine.DegradedNotice(); notice != "" {
-		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
+		if _, err := fmt.Fprintln(stderr, "[zero] "+notice); err != nil {
+			return exitCrash
+		}
 	}
 	executionRunner.SetPreparer(sandboxEngine)
 	if permissionMode != agent.PermissionModePlan {
