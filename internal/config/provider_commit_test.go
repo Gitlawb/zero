@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -458,6 +459,8 @@ func TestCommitProviderProfileRollsBackKeyWhenPublicationFails(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	path := filepath.Join(dir, "config.json")
+	before := FileConfig{Providers: []ProviderProfile{{Name: "work", APIKeyStored: true}}}
+	writeConfigFixture(t, path, before, 0o600)
 	store, err := ProviderKeyStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -469,8 +472,15 @@ func TestCommitProviderProfileRollsBackKeyWhenPublicationFails(t *testing.T) {
 	publishProviderConfig = func(string, FileConfig) error { return errors.New("disk full") }
 	t.Cleanup(func() { publishProviderConfig = oldPublish })
 
-	if _, err := CommitProviderProfile(path, ProviderCommit{Profile: ProviderProfile{Name: "work", APIKey: "sk-new"}}); err == nil {
+	result, err := CommitProviderProfile(path, ProviderCommit{Profile: ProviderProfile{Name: "work", APIKey: "sk-new"}})
+	if err == nil {
 		t.Fatal("CommitProviderProfile error = nil, want publication failure")
+	}
+	if !reflect.DeepEqual(result, ProviderCommitResult{}) {
+		t.Fatalf("rejected publication returned a committed result: %+v", result)
+	}
+	if got := readConfigFixture(t, path); !reflect.DeepEqual(got, before) {
+		t.Fatalf("rejected publication changed config: %+v", got)
 	}
 	if key, ok, err := store.Get("work"); err != nil || !ok || key != "sk-original" {
 		t.Fatalf("rollback key = %q ok=%v err=%v, want original", key, ok, err)
