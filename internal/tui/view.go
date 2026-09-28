@@ -1028,22 +1028,44 @@ func joinThemePickerColumns(left, right []string, leftWidth, rightWidth int) []s
 }
 
 func (m model) modelPickerOverlay(width int) string {
+	overlay, _, _ := m.modelPickerOverlayLayout(width)
+	return overlay
+}
+
+// Share the fitted item window with mouse hit-testing. Rows and the selected
+// owner key can span multiple lines, so an item count alone cannot bound height.
+func (m model) modelPickerOverlayLayout(width int) (string, int, int) {
 	if m.picker == nil {
-		return ""
+		return "", 0, 0
 	}
 	if m.modelPickerLoading {
-		return m.modelPickerLoadingOverlay(width)
+		return m.modelPickerLoadingOverlay(width), 0, 0
 	}
-	overlayWidth := modelPickerOverlayWidth(width, m.picker)
-	innerWidth := maxInt(1, overlayWidth-4)
-	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
-	start := 0
-	visible := []pickerItem{}
+	height := normalizedStartupHeight(m.height)
+	if m.altScreen && m.height > 0 {
+		height = m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width)).bodyHeight
+	}
 	if len(m.picker.items) > 0 {
 		m.picker.selected = clampInt(m.picker.selected, 0, len(m.picker.items)-1)
-		start = selectableListStart(len(m.picker.items), maxVisible, m.picker.selected)
-		visible = m.picker.items[start : start+maxVisible]
 	}
+	count := minInt(pickerOverlayMaxVisible, len(m.picker.items))
+	for {
+		start := selectableListStart(len(m.picker.items), count, m.picker.selected)
+		if count > 0 {
+			start = maxInt(start, m.picker.selected-count+1)
+		}
+		overlay := m.renderModelPickerOverlay(width, start, count)
+		if len(viewLines(overlay)) <= height || count <= 1 {
+			return overlay, start, count
+		}
+		count--
+	}
+}
+
+func (m model) renderModelPickerOverlay(width, start, count int) string {
+	overlayWidth := modelPickerOverlayWidth(width, m.picker)
+	innerWidth := maxInt(1, overlayWidth-4)
+	visible := m.picker.items[start : start+count]
 
 	lines := make([]string, 0, len(visible)+6)
 	searchInset := lipgloss.Width("❯ ")
