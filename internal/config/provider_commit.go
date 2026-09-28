@@ -48,8 +48,9 @@ var acquireProviderWriteLock = lockProviderWrite
 // config stays invalid because the row cannot be removed. Operations that ADD
 // or publish state pass false, so a new profile or credential is never written
 // into a config whose persisted names are already ambiguous. When it is true
-// the publish also goes through writeProviderNameRepair, which rewrites only
-// the fields this operation changed instead of restating the whole file.
+// the publish goes through writeProviderNameRepair, which re-encodes the whole
+// config but permits remaining invalid names only when the operation strictly
+// reduces existing name problems without introducing or worsening another.
 func runProviderProfileOperation(path string, allowMissing bool, allowInvalidInput bool, mutate func(*providerProfileOperation) error) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -229,6 +230,8 @@ type ProviderCommit struct {
 // ProviderCommitResult reports the config as written and the profile exactly as
 // it was persisted: the adopted name, and the key moved into the credential
 // store (APIKey cleared, APIKeyStored set) unless KeepStoredKey was requested.
+// A nonzero result alongside an error means publication succeeded but lock
+// release failed; a rejected mutation or publication returns the zero result.
 type ProviderCommitResult struct {
 	Config    FileConfig
 	Persisted ProviderProfile
