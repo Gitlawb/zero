@@ -228,8 +228,7 @@ func (s *Store) Update(job Job) error {
 // Remove). It re-reads the CURRENT on-disk job and passes it to mutate along with
 // any read error; mutate returns the job to persist. A removed job aborts with
 // ErrJobNotFound (no recreate). A transient read error (not removal) is surfaced
-// via readErr so the caller can still persist a best-effort state — the fire path
-// advances the schedule regardless, to avoid a re-fire.
+// via readErr; the callback can return it to abort without overwriting state.
 func (s *Store) Mutate(id string, mutate func(current Job, readErr error) (Job, error)) (Job, error) {
 	if !validID(id) {
 		return Job{}, fmt.Errorf("invalid cron job id %q", id)
