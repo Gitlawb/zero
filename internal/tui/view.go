@@ -1059,13 +1059,13 @@ func (m model) modelPickerOverlay(width int) string {
 			lines = append(lines, fillPaletteLine(zeroTheme.accent.Bold(true).Render(item.Group), innerWidth, transparentSurface))
 			lastGroup = item.Group
 		}
-		lines = append(lines, renderModelPickerRow(innerWidth, start+index == m.picker.selected, item))
+		lines = append(lines, strings.Split(renderModelPickerRow(innerWidth, start+index == m.picker.selected, item), "\n")...)
 	}
 	if len(visible) == 0 {
 		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render("no matching models"), innerWidth, transparentSurface))
 	}
 	if item, ok := m.picker.current(); ok {
-		if item.OwnerNumber > 0 && !strings.Contains(modelPickerRowLabel(item, innerWidth-searchInset), item.OwnerLabel) {
+		if item.OwnerNumber > 0 && !strings.Contains(ansi.Strip(renderModelPickerRow(innerWidth, true, item)), item.OwnerLabel) {
 			// Give abbreviated cues a full-name key before Enter, including on
 			// narrow terminals where the distinguishing part may not fit in a row.
 			owner := fmt.Sprintf("[%d] %s", item.OwnerNumber, item.OwnerLabel)
@@ -1168,8 +1168,12 @@ func renderModelPickerRow(width int, selected bool, item pickerItem) string {
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
-	left := marker + surface(zeroTheme.ink).Render(modelPickerRowLabel(item, maxInt(0, width-2)))
-	return fillPaletteLine(left, width, surface)
+	lines := strings.Split(modelPickerRowLabel(item, maxInt(0, width-2)), "\n")
+	for i, line := range lines {
+		lines[i] = fillPaletteLine(marker+surface(zeroTheme.ink).Render(line), width, surface)
+		marker = surface(zeroTheme.ink).Render("  ")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func modelPickerRowLabel(item pickerItem, width int) string {
@@ -1181,9 +1185,13 @@ func modelPickerRowLabel(item pickerItem, width int) string {
 		width -= 2
 	}
 	// Reserve the model's cells against the actual terminal width, not just the
-	// overlay cap. Keep a small owner cue even for models that themselves overflow.
+	// overlay cap. If both cannot fit, give the owner its own line.
 	if owner := strings.TrimSpace(item.OwnerLabel); owner != "" {
-		budget := minInt(modelPickerOwnerMaxWidth, maxInt(6, width-3-lipgloss.Width(label)))
+		budget := minInt(modelPickerOwnerMaxWidth, width-3-lipgloss.Width(label))
+		separateLine := budget < minInt(6, lipgloss.Width(owner))
+		if separateLine {
+			budget = maxInt(1, minInt(modelPickerOwnerMaxWidth, width))
+		}
 		if lipgloss.Width(owner) > budget {
 			prefix := ""
 			if item.OwnerNumber > 0 {
@@ -1192,7 +1200,11 @@ func modelPickerRowLabel(item pickerItem, width int) string {
 			remove := lipgloss.Width(owner) - maxInt(1, budget-lipgloss.Width(prefix)) + 1
 			owner = prefix + ansi.TruncateLeft(owner, remove, "…")
 		}
-		label = owner + " · " + label
+		if separateLine {
+			label += "\n" + owner
+		} else {
+			label = owner + " · " + label
+		}
 	}
 	if item.Favorite {
 		label = "* " + label

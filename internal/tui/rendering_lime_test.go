@@ -1959,6 +1959,31 @@ func TestModelPickerNarrowOwnerKeepsModelVisible(t *testing.T) {
 	}
 }
 
+func TestModelPickerNarrowLongModelKeepsSuffix(t *testing.T) {
+	for _, favorite := range []bool{false, true} {
+		for _, selected := range []bool{false, true} {
+			for _, label := range []string{"model-subscription-one", "model-subscription-two"} {
+				item := pickerItem{Label: label, OwnerLabel: "subscription-profile", OwnerNumber: 1, Favorite: favorite}
+				got := plainRender(t, renderModelPickerRow(26, selected, item))
+				assertContains(t, got, label)
+				assertContains(t, got, "subscription-profile")
+				if len(strings.Split(got, "\n")) != 2 {
+					t.Fatalf("expected separate model and owner lines: %q", got)
+				}
+			}
+		}
+	}
+}
+
+func TestModelPickerClippedModelCannotHideOwnerKey(t *testing.T) {
+	m := limeTestModel()
+	item := pickerItem{Group: "Recent", Label: strings.Repeat("model-", 10) + "work-subscription-profile", OwnerLabel: "work-subscription-profile", OwnerNumber: 1}
+	m.picker = &commandPicker{kind: pickerModel, items: []pickerItem{item}}
+	got := plainRender(t, m.modelPickerOverlay(30))
+	joined := strings.NewReplacer(" ", "", "\n", "", "│", "").Replace(got)
+	assertContains(t, joined, "[1]work-subscription-profile")
+}
+
 func TestModelPickerRowOmitsProviderTag(t *testing.T) {
 	// The provider is shown as a section header above each group, so a row renders
 	// just the model label — no repeated right-aligned provider tag.
