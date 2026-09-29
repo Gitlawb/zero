@@ -360,7 +360,33 @@ func (s *Store) AppendRun(id string, rec RunRecord) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return fsutil.RenameWithRetry(f.Name(), filepath.Join(dir, "runs.jsonl"), nil)
+	path := filepath.Join(dir, "runs.jsonl")
+	err = fsutil.RenameWithRetry(f.Name(), path, nil)
+	var committed *fsutil.CommittedReplacementCleanupError
+	if err == nil || errors.As(err, &committed) {
+		return err
+	}
+	// Windows refuses to replace a log another process holds open. Append the
+	// record instead so the outcome survives; compaction resumes on a later run.
+	// The leading newline ends any unterminated tail, and readRuns skips the
+	// blank line it may leave. Zero's own readers hold the job lock.
+	if appendErr := appendRunLine(path, line); appendErr != nil {
+		return errors.Join(err, appendErr)
+	}
+	return nil
+}
+
+func appendRunLine(path string, line []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	record := append(append([]byte{'\n'}, line...), '\n')
+	if _, err := f.Write(record); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // Runs returns the newest limit valid records in append order (oldest first).

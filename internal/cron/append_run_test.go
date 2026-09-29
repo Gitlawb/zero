@@ -194,6 +194,53 @@ func TestRunsSkipOversizedLines(t *testing.T) {
 	}
 }
 
+// An outside reader holding runs.jsonl open makes the Windows replace fail;
+// the outcome must still be recorded rather than dropped.
+func TestAppendRunWhileHistoryHeldOpen(t *testing.T) {
+	store := newTestStore(t)
+	job, err := store.Add(Job{Prompt: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.jobDir(job.ID), "runs.jsonl")
+	if err := os.WriteFile(path, []byte("{\"exitCode\":7}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := store.AppendRun(job.ID, RunRecord{ExitCode: 42}); err != nil {
+		t.Fatalf("AppendRun with history held open: %v", err)
+	}
+	runs, err := store.Runs(job.ID, 10)
+	if err != nil || len(runs) != 2 || runs[0].ExitCode != 7 || runs[1].ExitCode != 42 {
+		t.Fatalf("outcome lost while history held open: %+v, %v", runs, err)
+	}
+}
+
+// The fallback append must start a fresh line even when the log ends in an
+// unterminated record, so neither record is corrupted.
+func TestAppendRunLineAfterUnterminatedTail(t *testing.T) {
+	store := newTestStore(t)
+	job, err := store.Add(Job{Prompt: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.jobDir(job.ID), "runs.jsonl")
+	if err := os.WriteFile(path, []byte("{\"exitCode\":7}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendRunLine(path, []byte("{\"exitCode\":42}")); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := store.Runs(job.ID, 10)
+	if err != nil || len(runs) != 2 || runs[0].ExitCode != 7 || runs[1].ExitCode != 42 {
+		t.Fatalf("fallback append corrupted history: %+v, %v", runs, err)
+	}
+}
+
 func TestRunHistoryConcurrentStores(t *testing.T) {
 	store := newTestStore(t)
 	job, err := store.Add(Job{Prompt: "x"})
