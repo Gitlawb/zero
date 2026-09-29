@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	DefaultRepository = "Gitlawb/zero"
+	DefaultRepository = "Twigpine/zero"
 	DefaultTimeout    = 5 * time.Second
 )
 

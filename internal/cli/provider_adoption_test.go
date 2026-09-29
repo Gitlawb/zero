@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/provideronboarding"
+	"github.com/Twigpine/zero/internal/provideronboarding"
 	"mvdan.cc/sh/v3/shell"
 )
 

@@ -46,13 +46,13 @@ npm 包是一个小型包装器，其平台构建（Linux 和 macOS 的 x64/arm6
 Linux/macOS：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.sh | bash
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 | iex
 ```
 
 ### 从源码构建
@@ -60,7 +60,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 源码构建需要 Go 1.26.6+。
 
 ```bash
-git clone https://github.com/Gitlawb/zero.git
+git clone https://github.com/Twigpine/zero.git
 cd zero
 go run ./cmd/zero
 ```
@@ -281,14 +281,14 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 实时交流在 [Discord 服务器](https://discord.gg/CaQDS6wdFn) 进行。
 
 提问、安装帮助、想法和分享都在
-[GitHub Discussions](https://github.com/Gitlawb/zero/discussions)：
+[GitHub Discussions](https://github.com/Twigpine/zero/discussions)：
 
 | 分类 | 用途 |
 |---|---|
-| [Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a) | 安装帮助、提供商/模型配置、"如何做"类问题 |
-| [Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) | 功能提议和 PR 之前的设计讨论 |
-| [Show and tell](https://github.com/Gitlawb/zero/discussions/categories/show-and-tell) | 你的技能、插件、MCP 配置、主题和工作流 |
-| [Announcements](https://github.com/Gitlawb/zero/discussions/categories/announcements) | 维护者发布的版本和项目动态 |
+| [Q&A](https://github.com/Twigpine/zero/discussions/categories/q-a) | 安装帮助、提供商/模型配置、"如何做"类问题 |
+| [Ideas](https://github.com/Twigpine/zero/discussions/categories/ideas) | 功能提议和 PR 之前的设计讨论 |
+| [Show and tell](https://github.com/Twigpine/zero/discussions/categories/show-and-tell) | 你的技能、插件、MCP 配置、主题和工作流 |
+| [Announcements](https://github.com/Twigpine/zero/discussions/categories/announcements) | 维护者发布的版本和项目动态 |
 
 ## 贡献
 

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/release"
+	"github.com/Twigpine/zero/internal/release"
 )
 
 func TestApplyReturnsNoopWhenUpToDate(t *testing.T) {

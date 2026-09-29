@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/redaction"
 )
 
 func TestDiscoverParsesMetadata(t *testing.T) {

@@ -15,28 +15,28 @@
 # written rather than being a skeleton with placeholders.
 class Zero < Formula
   desc "Terminal coding agent"
-  homepage "https://github.com/Gitlawb/zero"
+  homepage "https://github.com/Twigpine/zero"
   version "0.7.0"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/Gitlawb/zero/releases/download/v0.7.0/zero-v0.7.0-macos-arm64.tar.gz"
+      url "https://github.com/Twigpine/zero/releases/download/v0.7.0/zero-v0.7.0-macos-arm64.tar.gz"
       sha256 "75e859fe25f3f63785f512f20b9c9501c67394166f10746f80e374672a1a8b7f"
     end
     on_intel do
-      url "https://github.com/Gitlawb/zero/releases/download/v0.7.0/zero-v0.7.0-macos-x64.tar.gz"
+      url "https://github.com/Twigpine/zero/releases/download/v0.7.0/zero-v0.7.0-macos-x64.tar.gz"
       sha256 "184256abd5738b77d44cf4a99d71ac32d0a0355714ebc698a2221a69aeb71976"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/Gitlawb/zero/releases/download/v0.7.0/zero-v0.7.0-linux-arm64.tar.gz"
+      url "https://github.com/Twigpine/zero/releases/download/v0.7.0/zero-v0.7.0-linux-arm64.tar.gz"
       sha256 "dd0355f78b6ab044e1181184e29432d0ab7652a1dc27a161960f06e8520b4f21"
     end
     on_intel do
-      url "https://github.com/Gitlawb/zero/releases/download/v0.7.0/zero-v0.7.0-linux-x64.tar.gz"
+      url "https://github.com/Twigpine/zero/releases/download/v0.7.0/zero-v0.7.0-linux-x64.tar.gz"
       sha256 "f5120c2cc1e9f45ebf69d472b6026eb8e37eee2c113211efedd7d0917437490c"
     end
   end

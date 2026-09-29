@@ -93,7 +93,7 @@ function bunRecoveryParagraph() {
 function buildFromSourceParagraph() {
   return (
     'If this platform has no prebuilt binary, build from source:\n' +
-    'https://github.com/Gitlawb/zero (go run ./cmd/zero, requires Go 1.26+).'
+    'https://github.com/Twigpine/zero (go run ./cmd/zero, requires Go 1.26+).'
   );
 }
 

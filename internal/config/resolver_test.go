@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/providercatalog"
 )
 
 func TestResolveAppliesLayerPrecedence(t *testing.T) {
@@ -1559,7 +1559,7 @@ func TestApplyCatalogDescriptorStripsAimlapiAttributionFromRetargetedProfile(t *
 		BaseURL: "https://proxy.example.test/v1",
 		CustomHeaders: map[string]string{
 			"x-aimlapi-partner-id":          "persisted-partner",
-			"X-AIMLAPI-Integration-Repo":    "Gitlawb/zero",
+			"X-AIMLAPI-Integration-Repo":    "Twigpine/zero",
 			"X-AIMLAPI-Integration-Version": "zero",
 			"X-Environment":                 "staging",
 		},

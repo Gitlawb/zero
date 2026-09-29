@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/Gitlawb/zero/internal/cli"
+	"github.com/Twigpine/zero/internal/cli"
 )
 
 func main() {
