@@ -3,11 +3,16 @@ package cron
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 func TestAppendRunRetainsNewestThousand(t *testing.T) {
@@ -217,6 +222,54 @@ func TestAppendRunWhileHistoryHeldOpen(t *testing.T) {
 	runs, err := store.Runs(job.ID, 10)
 	if err != nil || len(runs) != 2 || runs[0].ExitCode != 7 || runs[1].ExitCode != 42 {
 		t.Fatalf("outcome lost while history held open: %+v, %v", runs, err)
+	}
+}
+
+// Only a sharing or lock violation falls back to appending. Any other replace
+// failure, including a persistent access denial, and a committed replacement
+// whose backup cleanup failed must leave the log untouched, so history can
+// neither grow past retention nor record an outcome twice.
+func TestAppendRunFallbackOnlyForSharingViolation(t *testing.T) {
+	const seed = "{\"exitCode\":7}\n"
+	for _, tc := range []struct {
+		name   string
+		err    error
+		append bool
+	}{
+		{"sharing violation", syscall.Errno(32), runtime.GOOS == "windows"},
+		{"access denied", os.ErrPermission, false},
+		{"other", errors.New("boom"), false},
+		{"committed", &fsutil.CommittedReplacementCleanupError{Cause: syscall.Errno(32)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			job, err := store.Add(Job{Prompt: "x"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(store.jobDir(job.ID), "runs.jsonl")
+			if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store.replace = func(string, string) error { return tc.err }
+			err = store.AppendRun(job.ID, RunRecord{ExitCode: 42})
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if tc.append {
+				if err != nil || !strings.HasPrefix(string(data), seed) || !strings.Contains(string(data), "\"exitCode\":42") {
+					t.Fatalf("sharing violation dropped the outcome: err %v, log %q", err, data)
+				}
+				return
+			}
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("AppendRun error = %v, want %v", err, tc.err)
+			}
+			if string(data) != seed {
+				t.Fatalf("non-transient replace failure changed the log: %q", data)
+			}
+		})
 	}
 }
 

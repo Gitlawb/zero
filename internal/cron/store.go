@@ -61,6 +61,9 @@ type StoreOptions struct {
 type Store struct {
 	root string
 	now  func() time.Time
+	// replace overrides the run-history replacement primitive in tests; nil
+	// uses the platform default.
+	replace func(src, dst string) error
 }
 
 func NewStore(opts StoreOptions) *Store {
@@ -361,15 +364,19 @@ func (s *Store) AppendRun(id string, rec RunRecord) error {
 		return err
 	}
 	path := filepath.Join(dir, "runs.jsonl")
-	err = fsutil.RenameWithRetry(f.Name(), path, nil)
+	// ReplaceWithRetry keeps a DACL applied to runs.jsonl itself; a rename would
+	// publish the temporary file's inherited directory DACL instead.
+	err = fsutil.ReplaceWithRetry(f.Name(), path, s.replace)
 	var committed *fsutil.CommittedReplacementCleanupError
-	if err == nil || errors.As(err, &committed) {
+	if err == nil || errors.As(err, &committed) || !fsutil.IsSharingOrLockViolation(err) {
 		return err
 	}
 	// Windows refuses to replace a log another process holds open. Append the
 	// record instead so the outcome survives; compaction resumes on a later run.
-	// The leading newline ends any unterminated tail, and readRuns skips the
-	// blank line it may leave. Zero's own readers hold the job lock.
+	// Other failures are returned so a log that can never be replaced cannot
+	// grow past the retention limit. The leading newline ends any unterminated
+	// tail, and readRuns skips the blank line it may leave. Zero's own readers
+	// hold the job lock.
 	if appendErr := appendRunLine(path, line); appendErr != nil {
 		return errors.Join(err, appendErr)
 	}
