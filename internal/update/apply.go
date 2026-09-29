@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/release"
+	"github.com/Twigpine/zero/internal/release"
 )
 
 // ErrTargetPossiblyTampered reports that an executable path may hold content

@@ -187,7 +187,7 @@ func TestCheckRejectsInvalidLatestVersion(t *testing.T) {
 func TestCheckFallsBackReleaseURL(t *testing.T) {
 	result, err := Check(context.Background(), Options{
 		CurrentVersion: "0.1.0",
-		Repository:     "Gitlawb/zero",
+		Repository:     "Twigpine/zero",
 		GOOS:           "linux",
 		GOARCH:         "amd64",
 		Fetch: func(context.Context, string) (Release, error) {
@@ -200,7 +200,7 @@ func TestCheckFallsBackReleaseURL(t *testing.T) {
 		t.Fatalf("Check returned error: %v", err)
 	}
 
-	wantURL := "https://github.com/Gitlawb/zero/releases/tag/v0.2.0"
+	wantURL := "https://github.com/Twigpine/zero/releases/tag/v0.2.0"
 	if result.ReleaseURL != wantURL {
 		t.Fatalf("ReleaseURL = %q, want %q", result.ReleaseURL, wantURL)
 	}
@@ -426,7 +426,7 @@ func TestFormatResult(t *testing.T) {
 	output := Format(Result{
 		CurrentVersion:  "0.1.0",
 		LatestVersion:   "0.2.0",
-		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:         "v0.2.0",
 		ReleaseAsset:    assetCheckForTest(t, "v0.2.0", "linux", "amd64"),
 		UpdateAvailable: true,
@@ -451,7 +451,7 @@ func TestFormatResult(t *testing.T) {
 	local := Format(Result{
 		CurrentVersion:  "0.1.0",
 		LatestVersion:   "0.2.0",
-		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:         "v0.2.0",
 		ReleaseAsset:    assetCheckForTest(t, "v0.2.0", runtime.GOOS, runtime.GOARCH),
 		UpdateAvailable: true,
@@ -463,7 +463,7 @@ func TestFormatResult(t *testing.T) {
 	output = Format(Result{
 		CurrentVersion:  "0.2.0",
 		LatestVersion:   "0.2.0",
-		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:         "v0.2.0",
 		ReleaseAsset:    assetCheckForTest(t, "v0.2.0", "linux", "amd64"),
 		UpdateAvailable: false,
@@ -622,7 +622,7 @@ func TestFormatCrossTargetCheckDoesNotRecommendLocalUpgrade(t *testing.T) {
 	output := Format(Result{
 		CurrentVersion:  "0.1.0",
 		LatestVersion:   "0.2.0",
-		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:         "v0.2.0",
 		ReleaseAsset:    other,
 		UpdateAvailable: true,
@@ -661,7 +661,7 @@ func releaseForTarget(t *testing.T, tag string, goos string, goarch string) Rele
 	check := assetCheckForTest(t, tag, goos, goarch)
 	return Release{
 		TagName: tag,
-		HTMLURL: "https://github.com/Gitlawb/zero/releases/tag/" + tag,
+		HTMLURL: "https://github.com/Twigpine/zero/releases/tag/" + tag,
 		Assets: []Asset{
 			{Name: check.ArchiveName, BrowserDownloadURL: "https://example.test/" + check.ArchiveName},
 			{Name: check.ChecksumName, BrowserDownloadURL: "https://example.test/" + check.ChecksumName},

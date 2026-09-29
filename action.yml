@@ -110,7 +110,7 @@ inputs:
   zero-repo:
     description: Repository to install the ZERO release from (owner/repo).
     required: false
-    default: Gitlawb/zero
+    default: Twigpine/zero
 
 outputs:
   exit-code:

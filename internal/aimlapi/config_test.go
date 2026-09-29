@@ -22,7 +22,7 @@ func TestResolvedPartnerHeaderUsesEnvironmentOverrideWithoutDuplicates(t *testin
 
 	headers := WithResolvedPartnerHeader(map[string]string{
 		"x-aimlapi-partner-id":       "part_catalog",
-		"X-AIMLAPI-Integration-Repo": "Gitlawb/zero",
+		"X-AIMLAPI-Integration-Repo": "Twigpine/zero",
 	})
 
 	if got := headers[PartnerHeaderName]; got != "part_override" {
@@ -31,7 +31,7 @@ func TestResolvedPartnerHeaderUsesEnvironmentOverrideWithoutDuplicates(t *testin
 	if _, ok := headers["x-aimlapi-partner-id"]; ok {
 		t.Fatalf("case-insensitive partner header was duplicated: %#v", headers)
 	}
-	if got := headers["X-AIMLAPI-Integration-Repo"]; got != "Gitlawb/zero" {
+	if got := headers["X-AIMLAPI-Integration-Repo"]; got != "Twigpine/zero" {
 		t.Fatalf("unrelated header changed: %#v", headers)
 	}
 }

@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/oauth"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	"github.com/Gitlawb/zero/internal/zerocommands"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/zerocommands"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 func TestRunConfigPrintsRedactedSummary(t *testing.T) {
@@ -371,7 +371,7 @@ func TestRunProvidersAddAimlapiWritesDefaultHeaders(t *testing.T) {
 		t.Fatalf("unexpected provider profile: %#v", profile)
 	}
 	if profile.CustomHeaders["X-AIMLAPI-Partner-ID"] != "part_62yQoGYDq4Yqnrj2R1iGrDNJ" ||
-		profile.CustomHeaders["X-AIMLAPI-Integration-Repo"] != "Gitlawb/zero" {
+		profile.CustomHeaders["X-AIMLAPI-Integration-Repo"] != "Twigpine/zero" {
 		t.Fatalf("missing aimlapi.com default headers: %#v", profile.CustomHeaders)
 	}
 }

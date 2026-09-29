@@ -7,7 +7,7 @@ downloads, verifies, and installs it.
 ```bash
 zero update --check
 zero update --check --json
-zero update --check --repo Gitlawb/zero
+zero update --check --repo Twigpine/zero
 zero update --check --target windows-x64
 
 zero upgrade
@@ -65,7 +65,7 @@ Endpoint resolution order:
 1. `--endpoint`
 2. `ZERO_UPDATE_RELEASE_URL`
 3. `--repo`
-4. `https://api.github.com/repos/Gitlawb/zero/releases/latest`
+4. `https://api.github.com/repos/Twigpine/zero/releases/latest`
 
 Installer scripts download the matching release asset for the local platform and
 verify its `.sha256` file. If Zero is already installed, run `zero upgrade`
