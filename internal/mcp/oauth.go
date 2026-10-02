@@ -59,6 +59,11 @@ func tokenToStored(t oauth.Token) StoredToken {
 		TokenType:    t.TokenType,
 		Scopes:       t.Scopes,
 		ExpiresAt:    t.ExpiresAt,
+
+		TokenEndpoint:          t.TokenEndpoint,
+		ProtectedTokenEndpoint: t.ProtectedTokenEndpoint,
+		ClientID:               t.ClientID,
+		ClientSecret:           t.ClientSecret,
 	}
 }
 
@@ -341,7 +346,53 @@ func refreshAccessToken(ctx context.Context, client *http.Client, cfg OAuthConfi
 	if err != nil {
 		return StoredToken{}, err
 	}
-	return tokenToStored(token), nil
+	refreshed := tokenToStored(token)
+	// The token response never carries what Login learned about the client and
+	// endpoint, so carry it over or the next refresh would lose it.
+	refreshed.TokenEndpoint = current.TokenEndpoint
+	refreshed.ProtectedTokenEndpoint = current.ProtectedTokenEndpoint
+	refreshed.ClientID = current.ClientID
+	refreshed.ClientSecret = current.ClientSecret
+	return refreshed, nil
+}
+
+// refreshSettings fills the gaps in the configured OAuth settings from what the
+// login stored: the discovered token endpoint and the dynamically registered
+// client. Explicit config always wins. A stored endpoint is re-validated before
+// credentials are posted to it, and one that came from server-advertised
+// discovery is also held to the public-network policy, with the returned client
+// pinned to it, exactly as Login did.
+func refreshSettings(ctx context.Context, client *http.Client, resourceURL string, cfg OAuthConfig, stored StoredToken) (OAuthConfig, *http.Client, error) {
+	if strings.TrimSpace(cfg.ClientID) == "" && strings.TrimSpace(stored.ClientID) != "" {
+		cfg.ClientID = stored.ClientID
+		if strings.TrimSpace(cfg.ClientSecret) == "" {
+			cfg.ClientSecret = stored.ClientSecret
+		}
+	}
+	if strings.TrimSpace(cfg.TokenEndpoint) != "" || strings.TrimSpace(stored.TokenEndpoint) == "" {
+		return cfg, client, nil
+	}
+	endpoint := strings.TrimSpace(stored.TokenEndpoint)
+	if err := oauth.ValidateEndpointURL(endpoint); err != nil {
+		return cfg, client, fmt.Errorf("mcp oauth: stored token endpoint: %w", err)
+	}
+	if stored.ProtectedTokenEndpoint {
+		metadata := authServerMetadata{
+			TokenEndpoint:        endpoint,
+			protectedResourceURL: strings.TrimSpace(resourceURL),
+			protectTokenEndpoint: true,
+		}
+		if err := validateProtectedDiscoveredEndpoints(ctx, metadata); err != nil {
+			return cfg, client, err
+		}
+		protected, err := newAdvertisedOAuthDiscoveryClient(client, metadata.protectedResourceURL)
+		if err != nil {
+			return cfg, client, err
+		}
+		client = protected
+	}
+	cfg.TokenEndpoint = endpoint
+	return cfg, client, nil
 }
 
 // registerClient performs dynamic client registration against the registration
@@ -446,6 +497,7 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 		tokenClient = protectedEndpointClient
 	}
 
+	registeredClientID, registeredClientSecret := "", ""
 	if strings.TrimSpace(cfg.ClientID) == "" {
 		if registration := strings.TrimSpace(metadata.RegistrationEndpoint); registration != "" {
 			registrationClient := httpClient
@@ -457,8 +509,10 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 				return StoredToken{}, regErr
 			}
 			cfg.ClientID = clientID
+			registeredClientID = clientID
 			if clientSecret != "" {
 				cfg.ClientSecret = clientSecret
+				registeredClientSecret = clientSecret
 			}
 		}
 	}
@@ -537,6 +591,14 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 		if err != nil {
 			return StoredToken{}, err
 		}
+		// Persist only what config does not already carry, so refresh can reuse
+		// it without copying configured secrets into the token store.
+		if strings.TrimSpace(options.Config.TokenEndpoint) == "" {
+			token.TokenEndpoint = metadata.TokenEndpoint
+			token.ProtectedTokenEndpoint = metadata.protectTokenEndpoint
+		}
+		token.ClientID = registeredClientID
+		token.ClientSecret = registeredClientSecret
 		return token, nil
 	case <-loginCtx.Done():
 		return StoredToken{}, fmt.Errorf("timed out waiting for OAuth authorization callback: %w", loginCtx.Err())
