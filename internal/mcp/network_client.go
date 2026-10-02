@@ -871,7 +871,11 @@ func (source *storeTokenSource) Refresh(ctx context.Context) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("no stored OAuth token for MCP server %s", source.server.Name)
 	}
-	refreshed, err := refreshAccessToken(ctx, source.httpClient, source.config(), token, source.now)
+	cfg, client, err := refreshSettings(ctx, source.httpClient, source.server.URL, source.config(), token)
+	if err != nil {
+		return "", err
+	}
+	refreshed, err := refreshAccessToken(ctx, client, cfg, token, source.now)
 	if err != nil {
 		return "", err
 	}
