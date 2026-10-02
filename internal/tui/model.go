@@ -843,6 +843,11 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
+	// decideCmd is the Update-safe alternative to decide for prompts the TUI
+	// itself raises: decide forwards through runtimeMessageSink, which blocks on
+	// the program's unbuffered message channel when called from Update, so these
+	// prompts return a command that yields the follow-up message instead.
+	decideCmd func(agent.PermissionDecision) tea.Cmd
 	// cursor is the highlighted option index (into permissionOptions): 0 is the
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
@@ -4464,11 +4469,13 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 		return m, nil
 	}
 
+	resolved := agent.PermissionDecision{Action: decision, Reason: reason}
 	if pending.decide != nil {
-		pending.decide(agent.PermissionDecision{
-			Action: decision,
-			Reason: reason,
-		})
+		pending.decide(resolved)
+	}
+	var decideCmd tea.Cmd
+	if pending.decideCmd != nil {
+		decideCmd = pending.decideCmd(resolved)
 	}
 	m.pendingPermission = nil
 	// Time spent at the prompt is user wait, not provider silence. Restart the
@@ -4478,9 +4485,10 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 	if pending.request.ToolName == peerPermissionToolName {
 		// Receipt delivery completes asynchronously. That completion advances
 		// the peer queue after this prompt is fully settled.
-		return m, nil
+		return m, decideCmd
 	}
-	return m.openNextPeerApproval()
+	next, cmd := m.openNextPeerApproval()
+	return next, tea.Batch(decideCmd, cmd)
 }
 
 func permissionDecisionReason(decision permissionDecision) string {
