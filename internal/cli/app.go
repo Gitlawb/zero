@@ -959,7 +959,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
+	modelRPM := zeroruntime.NewModelRPMLimiter(resolved.ModelRPM)
 	return deps.runTUI(context.Background(), tui.Options{
+		ModelRPM:             modelRPM,
 		Cwd:                  workspaceRoot,
 		Version:              version,
 		Theme:                theme,
@@ -982,7 +984,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			if provider == nil {
 				return nil
 			}
-			if optimized, ok := providers.OptimizedTurnSessions(profile, provider, providers.Options{}); ok {
+			if optimized, ok := providers.ConfiguredTurnSessions(profile, provider, providers.Options{ModelRPM: modelRPM}); ok {
 				return optimized
 			}
 			return providers.DefaultTurnSessions(profile, provider, providers.Options{})
